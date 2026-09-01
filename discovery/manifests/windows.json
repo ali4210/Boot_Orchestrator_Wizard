@@ -1,0 +1,20 @@
+[
+  {"id":"winxp-gui-i386","family":"windows","distro":"Windows XP","version":"XP","flavor":"gui","arch":"i386","min_disk_gb":2,"requires_license":true,"eol":true,"notes":"Unsupported since 2014; requires legacy driver slipstreaming (no native NVMe/USB3 support) — see engine/slipstream.go"},
+  {"id":"win7-gui-amd64","family":"windows","distro":"Windows 7","version":"7","flavor":"gui","arch":"amd64","min_disk_gb":16,"requires_license":true,"eol":true,"notes":"Unsupported since Jan 2020; requires NVMe/USB3/VirtIO slipstreaming for modern hardware and most VMs"},
+  {"id":"win7-gui-i386","family":"windows","distro":"Windows 7","version":"7","flavor":"gui","arch":"i386","min_disk_gb":16,"requires_license":true,"eol":true},
+  {"id":"win81-gui-amd64","family":"windows","distro":"Windows 8.1","version":"8.1","flavor":"gui","arch":"amd64","min_disk_gb":20,"requires_license":true,"eol":true,"notes":"Extended support ended Jan 2023"},
+  {"id":"win10-gui-amd64","family":"windows","distro":"Windows 10","version":"10","flavor":"gui","arch":"amd64","min_disk_gb":25,"requires_license":true,"notes":"Mainstream support ended Oct 2025; ESU program available"},
+  {"id":"win11-gui-amd64","family":"windows","distro":"Windows 11","version":"11","flavor":"gui","arch":"amd64","min_disk_gb":64,"requires_license":true,"notes":"TPM 2.0 + Secure Boot required by default; safety/firmware.go check is a hard prerequisite before offering this entry"},
+  {"id":"win11-gui-arm64","family":"windows","distro":"Windows 11","version":"11","flavor":"gui","arch":"arm64","min_disk_gb":64,"requires_license":true},
+
+  {"id":"winsrv2003-server-i386","family":"windows","distro":"Windows Server","version":"2003","flavor":"server","arch":"i386","min_disk_gb":4,"requires_license":true,"eol":true},
+  {"id":"winsrv2008r2-server-amd64","family":"windows","distro":"Windows Server","version":"2008 R2","flavor":"server","arch":"amd64","min_disk_gb":10,"requires_license":true,"eol":true,"notes":"Needs NVMe/VirtIO slipstreaming, same as Windows 7"},
+  {"id":"winsrv2012r2-server-amd64","family":"windows","distro":"Windows Server","version":"2012 R2","flavor":"server","arch":"amd64","min_disk_gb":32,"requires_license":true,"eol":true},
+  {"id":"winsrv2016-server-amd64","family":"windows","distro":"Windows Server","version":"2016","flavor":"server","arch":"amd64","min_disk_gb":32,"requires_license":true},
+  {"id":"winsrv2019-server-amd64","family":"windows","distro":"Windows Server","version":"2019","flavor":"server","arch":"amd64","min_disk_gb":32,"requires_license":true},
+  {"id":"winsrv2019-server-core-amd64","family":"windows","distro":"Windows Server","version":"2019 Server Core","flavor":"tty","arch":"amd64","min_disk_gb":16,"requires_license":true,"notes":"Headless/no-GUI edition — maps to the TTY profile filter"},
+  {"id":"winsrv2022-server-amd64","family":"windows","distro":"Windows Server","version":"2022","flavor":"server","arch":"amd64","min_disk_gb":32,"requires_license":true},
+  {"id":"winsrv2022-server-core-amd64","family":"windows","distro":"Windows Server","version":"2022 Server Core","flavor":"tty","arch":"amd64","min_disk_gb":16,"requires_license":true},
+  {"id":"winsrv2025-server-amd64","family":"windows","distro":"Windows Server","version":"2025","flavor":"server","arch":"amd64","min_disk_gb":32,"requires_license":true},
+  {"id":"winsrv2025-server-core-amd64","family":"windows","distro":"Windows Server","version":"2025 Server Core","flavor":"tty","arch":"amd64","min_disk_gb":16,"requires_license":true}
+]

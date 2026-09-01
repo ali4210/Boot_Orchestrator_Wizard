@@ -1,0 +1,31 @@
+[
+  {"id":"ubuntu-24.04-tty-amd64","family":"linux","distro":"Ubuntu","version":"24.04 LTS","codename":"noble","flavor":"tty","arch":"amd64","min_disk_gb":5,"notes":"Server/minimal cloud image; exact filename resolved live via discovery/scraper.go"},
+  {"id":"ubuntu-24.04-gui-amd64","family":"linux","distro":"Ubuntu","version":"24.04 LTS","codename":"noble","flavor":"gui","arch":"amd64","min_disk_gb":25,"notes":"Desktop ISO (GNOME)"},
+  {"id":"ubuntu-22.04-tty-amd64","family":"linux","distro":"Ubuntu","version":"22.04 LTS","codename":"jammy","flavor":"tty","arch":"amd64","min_disk_gb":5},
+  {"id":"ubuntu-22.04-gui-amd64","family":"linux","distro":"Ubuntu","version":"22.04 LTS","codename":"jammy","flavor":"gui","arch":"amd64","min_disk_gb":25},
+  {"id":"ubuntu-20.04-tty-amd64","family":"linux","distro":"Ubuntu","version":"20.04 LTS","codename":"focal","flavor":"tty","arch":"amd64","min_disk_gb":5,"notes":"Standard support ended; ESM required for security updates"},
+  {"id":"ubuntu-18.04-tty-amd64","family":"linux","distro":"Ubuntu","version":"18.04 LTS","codename":"bionic","flavor":"tty","arch":"amd64","min_disk_gb":5,"eol":true,"notes":"EOL, ESM only"},
+
+  {"id":"debian-12-tty-amd64","family":"linux","distro":"Debian","version":"12","codename":"bookworm","flavor":"tty","arch":"amd64","min_disk_gb":4,"download_url":"https://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/mini.iso"},
+  {"id":"debian-12-gui-amd64","family":"linux","distro":"Debian","version":"12","codename":"bookworm","flavor":"gui","arch":"amd64","min_disk_gb":20},
+  {"id":"debian-11-tty-amd64","family":"linux","distro":"Debian","version":"11","codename":"bullseye","flavor":"tty","arch":"amd64","min_disk_gb":4},
+
+  {"id":"kali-2024.x-tty-amd64","family":"linux","distro":"Kali Linux","version":"2024.x rolling","flavor":"tty","arch":"amd64","min_disk_gb":8,"notes":"Version string tracks Kali's rolling release; pin exact ISO at fetch time"},
+  {"id":"kali-2024.x-gui-amd64","family":"linux","distro":"Kali Linux","version":"2024.x rolling","flavor":"gui","arch":"amd64","min_disk_gb":20,"notes":"Xfce default desktop"},
+
+  {"id":"parrot-6.x-tty-amd64","family":"linux","distro":"Parrot OS","version":"6.x","flavor":"tty","arch":"amd64","min_disk_gb":8,"notes":"Parrot Core (headless)"},
+  {"id":"parrot-6.x-gui-amd64","family":"linux","distro":"Parrot OS","version":"6.x","flavor":"gui","arch":"amd64","min_disk_gb":20,"notes":"Parrot Security / Home editions, MATE desktop"},
+
+  {"id":"rhel-9-tty-amd64","family":"linux","distro":"RHEL","version":"9","flavor":"tty","arch":"amd64","min_disk_gb":10,"requires_license":true,"notes":"Requires active Red Hat subscription or developer account to download"},
+  {"id":"rhel-9-gui-amd64","family":"linux","distro":"RHEL","version":"9","flavor":"gui","arch":"amd64","min_disk_gb":20,"requires_license":true},
+
+  {"id":"centos-stream-9-tty-amd64","family":"linux","distro":"CentOS Stream","version":"9","flavor":"tty","arch":"amd64","min_disk_gb":10},
+  {"id":"rocky-9-tty-amd64","family":"linux","distro":"Rocky Linux","version":"9","flavor":"tty","arch":"amd64","min_disk_gb":10},
+  {"id":"rocky-9-gui-amd64","family":"linux","distro":"Rocky Linux","version":"9","flavor":"gui","arch":"amd64","min_disk_gb":20},
+  {"id":"alma-9-tty-amd64","family":"linux","distro":"AlmaLinux","version":"9","flavor":"tty","arch":"amd64","min_disk_gb":10},
+  {"id":"alma-9-gui-amd64","family":"linux","distro":"AlmaLinux","version":"9","flavor":"gui","arch":"amd64","min_disk_gb":20},
+
+  {"id":"arch-rolling-tty-amd64","family":"linux","distro":"Arch Linux","version":"rolling","flavor":"tty","arch":"amd64","min_disk_gb":2,"notes":"Base install only; no desktop by default on any flavor"},
+
+  {"id":"alpine-3.20-tty-amd64","family":"linux","distro":"Alpine Linux","version":"3.20","flavor":"tty","arch":"amd64","min_disk_gb":1,"approx_size_bytes":52428800,"notes":"musl/busybox based, extremely minimal footprint"}
+]
