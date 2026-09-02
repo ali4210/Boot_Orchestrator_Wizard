@@ -8,6 +8,28 @@
 # ==============================================================================
 set -eo pipefail
 
+# ------------------------------------------------------------------------------
+# 0. Early Root Privilege Assertion & Password Elevation Gate
+# ------------------------------------------------------------------------------
+if [ "$(id -u)" -ne 0 ]; then
+    echo "======================================================================"
+    echo " [SECURITY NOTICE] Partitioning, formatting, and NVRAM require root."
+    echo " Verifying sudo credentials..."
+    echo "======================================================================"
+    
+    # Prompt user cleanly for password if credentials are not already cached
+    if ! sudo -v; then
+        echo "[FATAL] Elevated root privileges are strictly mandatory. Exiting."
+        exit 1
+    fi
+
+    # Keep sudo timestamp alive in background during compilation/execution
+    while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
+
+    # Re-execute entire launcher with root privileges preserving current environment
+    exec sudo -E "$0" "$@"
+fi
+
 REQUIRED_GO_MAJOR=1
 REQUIRED_GO_MINOR=22
 REQUIRED_GO_PATCH=6
@@ -118,15 +140,6 @@ mkdir -p bin
 "$GO_BIN" build -o bin/boot-orchestrator ./cmd/orchestrator
 
 # ------------------------------------------------------------------------------
-# 4. Privilege Elevation & Execution
+# 4. Launch Orchestrator (Fully Elevated)
 # ------------------------------------------------------------------------------
-if [ "$(id -u)" -ne 0 ]; then
-    echo ""
-    echo "======================================================================"
-    echo " [SECURITY NOTICE] Partitioning and UEFI NVRAM writes require root."
-    echo " Requesting sudo privileges to launch..."
-    echo "======================================================================"
-    exec sudo ./bin/boot-orchestrator "$@"
-else
-    exec ./bin/boot-orchestrator "$@"
-fi
+exec ./bin/boot-orchestrator "$@"

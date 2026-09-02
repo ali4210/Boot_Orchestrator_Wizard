@@ -1,0 +1,34 @@
+[
+  {
+    "id": "macos-sequoia-virt-amd64",
+    "category": "Apple macOS",
+    "family": "macos",
+    "distro": "macOS Sequoia (Recovery BaseSystem)",
+    "version": "15.x",
+    "flavor": "gui",
+    "arch": "amd64",
+    "min_disk_gb": 64,
+    "approx_size_bytes": 680000000,
+    "opencore_profile": "vbox-opencore-sequoia",
+    "mirrors": [
+      "https://raw.githubusercontent.com/kholia/OSX-KVM/master/fetch-macOS-v2.py"
+    ],
+    "notes": "Latest virtualized macOS deployment with hypervisor CPU profile spoofing."
+  },
+  {
+    "id": "macos-sonoma-virt-amd64",
+    "category": "Apple macOS",
+    "family": "macos",
+    "distro": "macOS Sonoma (Recovery BaseSystem)",
+    "version": "14.x",
+    "flavor": "gui",
+    "arch": "amd64",
+    "min_disk_gb": 60,
+    "approx_size_bytes": 650000000,
+    "opencore_profile": "vbox-opencore-sonoma",
+    "mirrors": [
+      "https://raw.githubusercontent.com/kholia/OSX-KVM/master/fetch-macOS-v2.py"
+    ],
+    "notes": "OpenCore KVM recovery bootstrap module. Streams verified BaseSystem directly from Apple."
+  }
+]

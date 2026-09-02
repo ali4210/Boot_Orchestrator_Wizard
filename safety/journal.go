@@ -13,16 +13,28 @@ import (
 type StepStatus string
 
 const (
-	StepPending   StepStatus = "pending"
-	StepRunning   StepStatus = "running"
-	StepCommitted StepStatus = "committed"
-	StepFailed    StepStatus = "failed"
+	StepPending    StepStatus = "pending"
+	StepRunning    StepStatus = "running"
+	StepPaused     StepStatus = "paused"
+	StepCommitted  StepStatus = "committed"
+	StepFailed     StepStatus = "failed"
 	StepRolledBack StepStatus = "rolled_back"
 )
 
+// SessionState records the overall transaction context for pause/resume.
+type SessionState struct {
+	TargetOSID      string `json:"target_os_id,omitempty"`
+	DistroName      string `json:"distro_name,omitempty"`
+	ProvisionMode   string `json:"provision_mode,omitempty"` // "dual-boot", "single-boot"
+	TargetDisk      string `json:"target_disk,omitempty"`
+	TargetPartition string `json:"target_partition,omitempty"`
+	DownloadURL     string `json:"download_url,omitempty"`
+	BytesDownloaded int64  `json:"bytes_downloaded,omitempty"`
+	TotalBytes      int64  `json:"total_bytes,omitempty"`
+	IsPaused        bool   `json:"is_paused,omitempty"`
+}
+
 // Step is one atomic unit of work in a provisioning transaction.
-// RollbackData is opaque, step-defined state needed to undo the action
-// (e.g. original partition table bytes, original BootNext value, temp file paths).
 type Step struct {
 	ID           string          `json:"id"`
 	Name         string          `json:"name"`
@@ -33,29 +45,25 @@ type Step struct {
 	RollbackData json.RawMessage `json:"rollback_data,omitempty"`
 }
 
-// Journal is the on-disk transactional log. It is written after every
-// state change so that a crash or power loss mid-run leaves enough
-// information for RollbackAll to restore the host to its prior state.
+// Journal is the on-disk transactional log.
 type Journal struct {
-	Path      string    `json:"-"`
-	TxnID     string    `json:"txn_id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Steps     []*Step   `json:"steps"`
+	Path      string       `json:"-"`
+	TxnID     string       `json:"txn_id"`
+	CreatedAt time.Time    `json:"created_at"`
+	UpdatedAt time.Time    `json:"updated_at"`
+	Session   SessionState `json:"session"`
+	Steps     []*Step      `json:"steps"`
 
 	mu sync.Mutex
 }
 
 // RollbackFunc undoes one step given its stored rollback data.
-// Registered per step-name by the engine packages that know how to
-// reverse their own actions (partition, uefi, wim_deployer, etc.).
 type RollbackFunc func(data json.RawMessage) error
 
-// NewJournal creates a fresh journal file at path, failing if one
-// already exists (use LoadJournal to resume/inspect an interrupted run).
+// NewJournal creates a fresh journal file at path.
 func NewJournal(path, txnID string) (*Journal, error) {
 	if _, err := os.Stat(path); err == nil {
-		return nil, fmt.Errorf("journal already exists at %s — call LoadJournal to resume or remove it first", path)
+		return nil, fmt.Errorf("journal already exists at %s — call LoadJournal to resume or purge it first", path)
 	}
 	j := &Journal{
 		Path:      path,
@@ -70,8 +78,7 @@ func NewJournal(path, txnID string) (*Journal, error) {
 	return j, nil
 }
 
-// LoadJournal reads an existing journal.json — used at startup to detect
-// an interrupted prior run and offer rollback before doing anything else.
+// LoadJournal reads an existing journal.json.
 func LoadJournal(path string) (*Journal, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -85,19 +92,45 @@ func LoadJournal(path string) (*Journal, error) {
 	return &j, nil
 }
 
-// HasIncompleteSteps reports whether the journal recorded a run that never
-// reached a clean, fully-committed end — i.e. rollback should be offered.
+// HasIncompleteSteps reports whether an active operation is currently running or paused.
+// Completed or previously rolled-back/failed historical steps do not count as in-flight locks.
 func (j *Journal) HasIncompleteSteps() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.hasIncompleteStepsLocked()
+}
+
+func (j *Journal) hasIncompleteStepsLocked() bool {
+	if j.Session.IsPaused {
+		return true
+	}
 	for _, s := range j.Steps {
-		if s.Status == StepRunning || s.Status == StepFailed || s.Status == StepPending {
+		if s.Status == StepRunning || s.Status == StepPending || s.Status == StepPaused {
 			return true
 		}
 	}
 	return false
 }
 
-// Begin registers a new step as pending+running and persists immediately,
-// so a crash right after this call still leaves a record to roll back.
+// GetUnfinishedSession returns the stored session parameters if an interrupted or paused session exists.
+func (j *Journal) GetUnfinishedSession() (*SessionState, bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.hasIncompleteStepsLocked() {
+		return &j.Session, true
+	}
+	return nil, false
+}
+
+// SetSessionState records high-level workflow parameters.
+func (j *Journal) SetSessionState(state SessionState) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.Session = state
+	return j.flushLocked()
+}
+
+// Begin registers a step as running and persists immediately.
 func (j *Journal) Begin(name string, rollbackData any) (*Step, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -120,6 +153,17 @@ func (j *Journal) Begin(name string, rollbackData any) (*Step, error) {
 	return step, nil
 }
 
+// Pause flags a running step as paused and persists the byte offset checkpoint.
+func (j *Journal) Pause(step *Step, bytesRead, totalBytes int64) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	step.Status = StepPaused
+	j.Session.IsPaused = true
+	j.Session.BytesDownloaded = bytesRead
+	j.Session.TotalBytes = totalBytes
+	return j.flushLocked()
+}
+
 // Commit marks a step as successfully completed.
 func (j *Journal) Commit(step *Step) error {
 	j.mu.Lock()
@@ -129,8 +173,7 @@ func (j *Journal) Commit(step *Step) error {
 	return j.flushLocked()
 }
 
-// Fail marks a step as failed and records the error. The caller should
-// then invoke RollbackAll to unwind everything committed so far.
+// Fail marks a step as failed and records the error.
 func (j *Journal) Fail(step *Step, cause error) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -142,11 +185,7 @@ func (j *Journal) Fail(step *Step, cause error) error {
 	return j.flushLocked()
 }
 
-// RollbackAll walks committed/failed steps in reverse order and invokes
-// the matching handler from handlers (keyed by step Name) to undo them.
-// It keeps going even if an individual rollback fails, collecting all
-// errors, because leaving later steps un-rolled-back is worse than a
-// partial rollback report.
+// RollbackAll undoes all committed, running, or failed steps in reverse order.
 func (j *Journal) RollbackAll(handlers map[string]RollbackFunc) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -154,7 +193,7 @@ func (j *Journal) RollbackAll(handlers map[string]RollbackFunc) error {
 	var errs []string
 	for i := len(j.Steps) - 1; i >= 0; i-- {
 		s := j.Steps[i]
-		if s.Status != StepCommitted && s.Status != StepFailed {
+		if s.Status != StepCommitted && s.Status != StepFailed && s.Status != StepPaused && s.Status != StepRunning {
 			continue
 		}
 		fn, ok := handlers[s.Name]
@@ -177,16 +216,33 @@ func (j *Journal) RollbackAll(handlers map[string]RollbackFunc) error {
 	return nil
 }
 
-// Finalize deletes the journal file once a run has fully committed with
-// no failures — a clean run shouldn't leave a stale journal offering a
-// rollback that no longer makes sense.
+// Finalize removes the journal file after a successful run.
 func (j *Journal) Finalize() error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if j.HasIncompleteSteps() {
-		return fmt.Errorf("refusing to finalize: journal still has incomplete steps")
+
+	if j.hasIncompleteStepsLocked() {
+		return fmt.Errorf("refusing to finalize: active operations still in flight")
 	}
-	return os.Remove(j.Path)
+
+	j.Steps = nil
+	j.Session = SessionState{}
+	if j.Path != "" {
+		_ = os.Remove(j.Path)
+	}
+	return nil
+}
+
+// PurgeForce unconditionally removes the journal file and releases state locks.
+func (j *Journal) PurgeForce() error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.Steps = nil
+	j.Session = SessionState{}
+	if j.Path != "" {
+		return os.Remove(j.Path)
+	}
+	return nil
 }
 
 func (j *Journal) flush() error {
@@ -195,8 +251,6 @@ func (j *Journal) flush() error {
 	return j.flushLocked()
 }
 
-// flushLocked writes the journal atomically (temp file + rename) so a
-// crash mid-write never corrupts the on-disk record we rely on to recover.
 func (j *Journal) flushLocked() error {
 	j.UpdatedAt = time.Now()
 	raw, err := json.MarshalIndent(j, "", "  ")

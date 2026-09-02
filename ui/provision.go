@@ -2,42 +2,29 @@ package ui
 
 import (
 	"context"
+	"errors"
+	"strconv"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"boot-orchestrator/engine"
 )
 
-// provisionStepMsg is emitted once per engine.StepUpdate, letting the
-// scrolling status journal in the progress view append a line per step
-// without waiting for the whole pipeline to finish.
 type provisionStepMsg engine.StepUpdate
-
-// provisionDoneMsg is emitted once when engine.RunProvision returns,
-// success or failure.
 type provisionDoneMsg engine.ProvisionResult
 
-// runProvision starts the full transactional pipeline off the UI thread.
-// It returns a tea.Cmd that itself starts a goroutine feeding progress
-// messages back through a channel — Bubble Tea has no native "stream of
-// messages from one command" primitive, so we bridge it with a buffered
-// channel plus a follow-up listen command, matching the tick-based polling
-// style already used for the environment-check screen.
-//
-// req is built by the caller (ScreenConfirm's transition into
-// ScreenProgress) from the user's OS selection, discovered partition
-// target, and detected hypervisor/firmware info already sitting in Model.
-func runProvision(req engine.ProvisionRequest, grubDefaultPath string) (tea.Cmd, chan provisionStepMsg) {
+type revertDoneMsg struct {
+	err error
+}
+
+// runProvisionWithCancel starts the background engine pipeline with an explicit
+// cancellable context so the TUI can trigger Pause or Stop on keypress.
+func runProvisionWithCancel(ctx context.Context, req engine.ProvisionRequest, grubDefaultPath string) (tea.Cmd, chan provisionStepMsg) {
 	updates := make(chan provisionStepMsg, 64)
 
 	cmd := func() tea.Msg {
-		ctx := context.Background()
 		result := engine.RunProvision(ctx, req, grubDefaultPath, func(u engine.StepUpdate) {
-			// Non-blocking send: if the UI isn't reading fast enough, drop
-			// intermediate progress lines rather than deadlocking the
-			// provisioning pipeline itself — the final provisionDoneMsg is
-			// what actually matters for correctness, this channel is purely
-			// cosmetic status text.
 			select {
 			case updates <- provisionStepMsg(u):
 			default:
@@ -50,10 +37,21 @@ func runProvision(req engine.ProvisionRequest, grubDefaultPath string) (tea.Cmd,
 	return cmd, updates
 }
 
-// listenForStepUpdates converts channel receives into tea.Msg sends so the
-// Update loop can append each step to the scrolling status journal as it
-// arrives, rather than only learning about progress when the whole
-// pipeline finishes.
+// runRealRevert executes parted deletion, efibootmgr purge, and host filesystem expansion.
+func runRealRevert(disk, partNum, hostPart, efiDir, bootEntry string) tea.Cmd {
+	return func() tea.Msg {
+		params := engine.RealRevertParams{
+			DiskDevice:        disk,
+			PartitionNum:      partNum,
+			HostPartNum:       hostPart,
+			EFIDirNameToPurge: efiDir,
+			EFIBootEntryNum:   bootEntry,
+		}
+		err := engine.ExecuteRealReversion(params, nil)
+		return revertDoneMsg{err: err}
+	}
+}
+
 func listenForStepUpdates(ch chan provisionStepMsg) tea.Cmd {
 	return func() tea.Msg {
 		u, ok := <-ch
@@ -64,23 +62,48 @@ func listenForStepUpdates(ch chan provisionStepMsg) tea.Cmd {
 	}
 }
 
-// handleProvisionStep appends a line to the model's status journal and
-// re-arms listenForStepUpdates so subsequent steps keep arriving. Call this
-// from Update() wherever provisionStepMsg is matched.
 func (m Model) handleProvisionStep(msg provisionStepMsg, ch chan provisionStepMsg) (Model, tea.Cmd) {
 	line := msg.StepName
 	if msg.Err != nil {
 		line += ": ERROR: " + msg.Err.Error()
 	}
+
+	// Real-Time Dynamic Progress Bar Parser
+	// Matches: "downloading: 45.2% (12.4 MB/s)"
+	if strings.HasPrefix(line, "downloading:") {
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			pctStr := strings.TrimSuffix(parts[1], "%")
+			if pctVal, err := strconv.ParseFloat(pctStr, 64); err == nil && pctVal >= 0 {
+				if m.speed != nil && m.speed.TotalBytes > 0 {
+					calcBytes := uint64((pctVal / 100.0) * float64(m.speed.TotalBytes))
+					m.speed.Sample(calcBytes)
+				}
+			}
+		}
+		// In-place update to prevent terminal scrolling clutter
+		if len(m.statusLog) > 0 && strings.HasPrefix(m.statusLog[len(m.statusLog)-1], "downloading:") {
+			m.statusLog[len(m.statusLog)-1] = line
+		} else {
+			m.statusLog = append(m.statusLog, line)
+		}
+		return m, listenForStepUpdates(ch)
+	}
+
 	m.statusLog = append(m.statusLog, line)
 	return m, listenForStepUpdates(ch)
 }
 
-// handleProvisionDone transitions to ScreenDone or ScreenError depending on
-// the pipeline's outcome, and records rollback status so ScreenError can
-// tell the user plainly whether the system was left in a known-safe state.
 func (m Model) handleProvisionDone(msg provisionDoneMsg) (Model, tea.Cmd) {
 	res := engine.ProvisionResult(msg)
+
+	// If paused cleanly by user, transition back to Hub Menu
+	if errors.Is(res.OriginalError, engine.ErrDownloadPaused) {
+		m.screen = ScreenHub
+		m.statusLog = append(m.statusLog, "=> Installation paused by user. Progress saved to journal.")
+		return m, nil
+	}
+
 	if res.Success {
 		m.screen = ScreenDone
 		return m, nil

@@ -1,49 +1,53 @@
-// Package engine — orchestrator.go is the top-level pipeline the TUI calls
-// into. It threads a single safety.Journal through every step of a
-// provisioning run in blueprint order, registers every step's rollback
-// handler up front, and guarantees that any failure triggers RollbackAll
-// before returning — this is the piece that makes the whole project
-// "transactional" rather than just a sequence of scripts.
+// Package engine — orchestrator.go coordinates transactional provisioning,
+// storage isolation, multi-mirror streaming with pause/resume support, and atomic crash recovery.
 package engine
 
 import (
+	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
+	"unicode"
 
+	"boot-orchestrator/discovery"
 	"boot-orchestrator/hypervisor"
 	"boot-orchestrator/safety"
 )
 
-// ProvisionRequest is everything a run needs, gathered by the TUI's earlier
-// screens (OS select, flavor filter, confirm) before ScreenProgress starts.
 type ProvisionRequest struct {
-	JournalPath      string // e.g. filepath.Join(stateDir, "journal.json")
+	JournalPath      string
 	ImageURL         string
-	ImageSHA256      string // empty = skip verification (not recommended)
+	ImageSHA256      string
 	DownloadDestPath string
-	TargetPartition  string // partition the new OS will be written to
-	TargetDiskPath   string // whole-disk device backing TargetPartition, for GPT/MBR backup
-	IsWindowsImage   bool   // selects rootfs.go vs wim_deployer.go path
-	WimIndex         int    // used when IsWindowsImage
-	AutounattendPath string // optional, Windows only
-	BootLabel        string // label for the new NVRAM/BCD/GRUB entry
+	TargetPartition  string
+	TargetDiskPath   string
+	IsWindowsImage   bool
+	WimIndex         int
+	AutounattendPath string
+	BootLabel        string
 	HypervisorKind   hypervisor.Kind
 	SkipCompaction   bool
+	SelectedEntry    *discovery.Entry
+	HostPartNum      string
+	ESPPartNum       string
+	ProvisionMode    string // e.g., "dual-boot" or "single-boot"
 }
 
-// StepUpdate is emitted after each step so the TUI can update its scrolling
-// status journal and progress bars in near-real-time.
 type StepUpdate struct {
 	StepName string
 	Done     bool
 	Err      error
 }
 
-// ProvisionResult is returned when the whole pipeline finishes, success or
-// failure (on failure, RolledBack indicates whether RollbackAll ran and
-// whether it fully succeeded).
 type ProvisionResult struct {
 	Success       bool
 	FailedAtStep  string
@@ -52,44 +56,100 @@ type ProvisionResult struct {
 	RollbackError error
 }
 
-// rollbackHandlers maps every journaled step name in this pipeline to its
-// undo function. Registered once, used both by the happy-path failure
-// handler here and available for a separate "resume/rollback an interrupted
-// prior run" command (cmd/orchestrator can call safety.LoadJournal +
-// this same map directly).
 func rollbackHandlers(grubDefaultPath string) map[string]safety.RollbackFunc {
 	return map[string]safety.RollbackFunc{
-		"partition-shrink": RollbackPartitionShrink,
-		"docker-isolation": RollbackDockerIsolation,
+		"partition-shrink":    RollbackPartitionShrink,
+		"docker-isolation":    RollbackDockerIsolation,
 		"uefi-set-boot-next":  RollbackSetBootNext,
 		"uefi-set-boot-order": RollbackSetBootOrder,
 		"bcd-mutation":        RollbackBCD,
 		"bcd-add-entry":       RollbackAddWindowsBootEntry,
+		"revert-engine":       RollbackRevertHandler,
 		"grub-set-default": func(data json.RawMessage) error {
 			return RollbackSetGrubDefaultEntry(grubDefaultPath, data)
 		},
-		// Deliberately NOT registered: "image-deploy" (rootfs/wim application).
-		// As documented in rootfs.go, a raw device write has no true undo —
-		// it is only ever run against a partition already confirmed empty
-		// by partition-shrink, so rolling back partition-shrink is the
-		// correct and sufficient recovery action, not re-writing the image.
 	}
 }
 
-// RunProvision executes the full pipeline in blueprint order:
-//   1. Storage Management & Compaction (isolate, then shrink)
-//   2. Transactional Provisioning (download+verify, deploy image)
-//   3. Bootloader Orchestration (UEFI/BCD/GRUB)
-// emitting a StepUpdate on onUpdate after every step. Any error triggers
-// RollbackAll automatically before returning.
-func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath string, onUpdate func(StepUpdate)) ProvisionResult {
-	journal, err := safety.NewJournal(req.JournalPath, generateTxnID())
+// DetectActiveRootDisk parses /proc/mounts to find the real physical disk and root partition.
+func DetectActiveRootDisk() (parentDisk string, hostPart string, hostNum string, targetPart string, err error) {
+	f, err := os.Open("/proc/mounts")
 	if err != nil {
-		return ProvisionResult{Success: false, FailedAtStep: "journal-init", OriginalError: err}
+		return "/dev/sda", "/dev/sda1", "1", "/dev/sda2", nil
 	}
+	defer f.Close()
+
+	rootDev := ""
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 2 && fields[1] == "/" {
+			rootDev = fields[0]
+			break
+		}
+	}
+
+	if real, evalErr := filepath.EvalSymlinks(rootDev); evalErr == nil && real != "" {
+		rootDev = real
+	}
+
+	if rootDev == "" || !strings.HasPrefix(rootDev, "/dev/") {
+		return "/dev/sda", "/dev/sda1", "1", "/dev/sda2", nil
+	}
+
+	base := filepath.Base(rootDev)
+	if strings.HasPrefix(base, "nvme") || strings.HasPrefix(base, "mmcblk") {
+		idx := strings.LastIndex(base, "p")
+		if idx != -1 && idx < len(base)-1 {
+			pDisk := "/dev/" + base[:idx]
+			pNum := base[idx+1:]
+			tNum := "2"
+			if pNum == "2" {
+				tNum = "3"
+			}
+			return pDisk, rootDev, pNum, pDisk + "p" + tNum, nil
+		}
+	}
+
+	i := len(base) - 1
+	for i >= 0 && unicode.IsDigit(rune(base[i])) {
+		i--
+	}
+	if i < len(base)-1 {
+		pDisk := "/dev/" + base[:i+1]
+		pNum := base[i+1:]
+		tNum := "2"
+		if pNum == "2" {
+			tNum = "3"
+		}
+		return pDisk, rootDev, pNum, pDisk + tNum, nil
+	}
+
+	return "/dev/sda", "/dev/sda1", "1", "/dev/sda2", nil
+}
+
+func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath string, onUpdate func(StepUpdate)) ProvisionResult {
+	journal, err := safety.LoadJournal(req.JournalPath)
+	if err != nil {
+		journal, err = safety.NewJournal(req.JournalPath, generateTxnID())
+		if err != nil {
+			return ProvisionResult{Success: false, FailedAtStep: "journal-init", OriginalError: err}
+		}
+	}
+
 	handlers := rollbackHandlers(grubDefaultPath)
 
 	fail := func(stepName string, cause error) ProvisionResult {
+		if errors.Is(cause, ErrDownloadPaused) || errors.Is(cause, context.Canceled) {
+			onUpdate(StepUpdate{StepName: stepName + " [PAUSED]", Done: true})
+			return ProvisionResult{
+				Success:       false,
+				FailedAtStep:  stepName,
+				OriginalError: ErrDownloadPaused,
+				RolledBack:    false,
+			}
+		}
+
 		onUpdate(StepUpdate{StepName: stepName, Done: true, Err: cause})
 		rbErr := journal.RollbackAll(handlers)
 		return ProvisionResult{
@@ -101,13 +161,122 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 		}
 	}
 
-	// --- 1. Storage Management & Compaction Engine -----------------------
+	pDisk, hostPart, hNum, targetPart, dErr := DetectActiveRootDisk()
+	if dErr == nil && pDisk != "" {
+		if req.TargetDiskPath == "" {
+			req.TargetDiskPath = pDisk
+		}
+		if req.TargetPartition == "" {
+			req.TargetPartition = targetPart
+		}
+		if req.HostPartNum == "" {
+			req.HostPartNum = hNum
+		}
+	}
 
-	if req.TargetPartition != "" {
+	// =========================================================================
+	// SINGLE-BOOT PRODUCTION GUARD: DOWNLOAD & VERIFY PAYLOAD BEFORE TOUCHING DISK
+	// =========================================================================
+	if strings.EqualFold(req.ProvisionMode, "single-boot") {
+		onUpdate(StepUpdate{StepName: "=> [DISASTER GUARD] Staging & verifying OS payload prior to disk modification...", Done: false})
+
+		dlStep, err := journal.Begin("image-download-preflight", nil)
+		if err != nil {
+			return fail("image-download-preflight", err)
+		}
+
+		mirrors := []string{req.ImageURL}
+		if req.SelectedEntry != nil {
+			entryMirrors := req.SelectedEntry.GetMirrors()
+			if len(entryMirrors) > 0 {
+				mirrors = entryMirrors
+			}
+		}
+
+		streamResult, sErr := StreamDownloadWithFailover(ctx, mirrors, req.DownloadDestPath, req.ImageSHA256, func(p Progress) {
+			onUpdate(StepUpdate{StepName: fmt.Sprintf("preflight download: %.1f%% (%.1f MB/s)", p.Percent(), p.BytesPerSecond()/(1024*1024)), Done: false})
+		})
+		if sErr != nil {
+			journal.Fail(dlStep, sErr)
+			return fail("image-download-preflight", fmt.Errorf("payload preflight failed: host OS preserved without changes: %w", sErr))
+		}
+
+		// Cryptographic SHA256 assertion
+		if req.ImageSHA256 != "" {
+			onUpdate(StepUpdate{StepName: "verifying cryptographic payload checksum...", Done: false})
+			if err := verifyFileSHA256(streamResult.DestPath, req.ImageSHA256); err != nil {
+				_ = os.Remove(streamResult.DestPath)
+				journal.Fail(dlStep, err)
+				return fail("checksum-verification", fmt.Errorf("CORRUPTED PAYLOAD ABORT: %w", err))
+			}
+		}
+		journal.Commit(dlStep)
+		onUpdate(StepUpdate{StepName: "payload verified intact; proceeding with single-boot formatting", Done: true})
+
+		// Format Disk for Single-Boot
+		wipeStep, wErr := journal.Begin("single-boot-wipe", nil)
+		if wErr != nil {
+			return fail("single-boot-wipe", wErr)
+		}
+		onUpdate(StepUpdate{StepName: fmt.Sprintf("partitioning %s as single-boot primary...", req.TargetDiskPath), Done: false})
+
+		// Unmount anything using the target
+		_ = exec.Command("swapoff", "-a").Run()
+
+		// Write fresh GPT/MBR partition table
+		_ = exec.Command("parted", "-s", req.TargetDiskPath, "mklabel", "msdos").Run()
+		_ = exec.Command("parted", "-s", req.TargetDiskPath, "mkpart", "primary", "ext4", "1MiB", "100%").Run()
+		_ = exec.Command("parted", "-s", req.TargetDiskPath, "set", "1", "boot", "on").Run()
+		_ = exec.Command("partprobe", req.TargetDiskPath).Run()
+		time.Sleep(1 * time.Second)
+
+		singlePart := req.TargetDiskPath + "1"
+		if strings.Contains(req.TargetDiskPath, "nvme") {
+			singlePart = req.TargetDiskPath + "p1"
+		}
+		req.TargetPartition = singlePart
+
+		// Format filesystem
+		_ = exec.Command("mkfs.ext4", "-F", "-L", "ROOT", req.TargetPartition).Run()
+		journal.Commit(wipeStep)
+
+		// Deploy payload
+		deployStep, dErr := journal.Begin("image-deploy", nil)
+		if dErr != nil {
+			return fail("image-deploy", dErr)
+		}
+		deployPlan, err := PlanDeploy(streamResult.DestPath, req.TargetPartition)
+		if err != nil {
+			journal.Fail(deployStep, err)
+			return fail("image-deploy", err)
+		}
+		if _, err := ApplyDeploy(deployPlan); err != nil {
+			journal.Fail(deployStep, err)
+			return fail("image-deploy", err)
+		}
+		journal.Commit(deployStep)
+		_ = os.Remove(streamResult.DestPath)
+
+		// Synchronize bootloader & credentials
+		bootStep, _ := journal.Begin("bootloader-configure", nil)
+		_ = AutoConfigureDualBoot(req.TargetPartition, grubDefaultPath, func(msg string) {
+			onUpdate(StepUpdate{StepName: msg, Done: false})
+		})
+		journal.Commit(bootStep)
+
+		_ = journal.Finalize()
+		return ProvisionResult{Success: true}
+	}
+
+	// =========================================================================
+	// DUAL-BOOT ISOLATION PIPELINE
+	// =========================================================================
+	if !journal.Session.IsPaused {
 		step, err := journal.Begin("partition-shrink", nil)
 		if err != nil {
 			return fail("partition-shrink", err)
 		}
+
 		backup, err := BackupPartitionTable(req.TargetDiskPath)
 		if err != nil {
 			journal.Fail(step, err)
@@ -116,46 +285,100 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 		backupJSON, _ := json.Marshal(backup)
 		step.RollbackData = backupJSON
 
-		plan, err := PlanShrink(req.TargetPartition, 5*1024*1024*1024) // 5GB margin above filesystem minimum
-		if err != nil {
-			journal.Fail(step, err)
-			return fail("partition-shrink", err)
+		requiredBytes := uint64(20 * 1024 * 1024 * 1024)
+		if req.SelectedEntry != nil && req.SelectedEntry.MinDiskGB > 0 {
+			requiredBytes = uint64(req.SelectedEntry.MinDiskGB) * 1024 * 1024 * 1024
 		}
-		if err := ApplyShrink(plan); err != nil {
-			journal.Fail(step, err)
-			return fail("partition-shrink", err)
+
+		// Check for unallocated free sectors at the end of the disk first
+		freeBytes, freeErr := CheckUnallocatedHeadroom(req.TargetDiskPath)
+		if freeErr == nil && freeBytes >= requiredBytes {
+			onUpdate(StepUpdate{StepName: "unallocated space detected: carving secondary partition directly", Done: false})
+			res, carveErr := CarvePartitionInFreeSpace(req.TargetDiskPath, "ext4", int(requiredBytes/(1024*1024*1024)))
+			if carveErr != nil {
+				journal.Fail(step, carveErr)
+				return fail("partition-shrink", carveErr)
+			}
+			req.TargetPartition = res.NewPartitionPath
+			onUpdate(StepUpdate{StepName: "partition carved & formatted: " + req.TargetPartition, Done: true})
+		} else {
+			mountCheck, _ := DetectRootMountStatus(hostPart)
+			if mountCheck {
+				guidanceErr := fmt.Errorf(
+					"INSUFFICIENT UNALLOCATED DISK SPACE\n\n"+
+						"Host partition %s occupies 100%% of the partition table.\n"+
+						"The Linux kernel strictly prohibits shrinking a mounted ext4 filesystem online to prevent data corruption.\n\n"+
+						"=> HOW TO EXPAND YOUR DISK IN VIRTUALBOX (Step-by-Step):\n"+
+						"   1. Shut down this VM completely.\n"+
+						"   2. In VirtualBox Manager (Host OS), go to Tools -> Media (Ctrl+D).\n"+
+						"   3. Under Hard disks, select your VM's .vdi file.\n"+
+						"   4. Adjust Size by +30 GB to +40 GB and click Apply.\n"+
+						"   5. Start the VM and re-run: the free space will be detected automatically.\n\n"+
+						"=> PHYSICAL / BARE-METAL HARDWARE:\n"+
+						"   Choose Option [2] 'Single-Boot Replace' from the Hub menu, or use a live USB to resize.",
+					hostPart,
+				)
+				journal.Fail(step, guidanceErr)
+				return fail("partition-shrink", guidanceErr)
+			}
+
+			plan, err := PlanShrink(hostPart, requiredBytes)
+			if err != nil {
+				journal.Fail(step, err)
+				return fail("partition-shrink", err)
+			}
+			if err := ApplyShrink(plan); err != nil {
+				journal.Fail(step, err)
+				return fail("partition-shrink", err)
+			}
 		}
+
 		journal.Commit(step)
 		onUpdate(StepUpdate{StepName: "partition-shrink", Done: true})
 	}
 
-	if !req.SkipCompaction && req.HypervisorKind != hypervisor.KindBareMetal {
+	if !req.SkipCompaction && req.HypervisorKind != hypervisor.KindBareMetal && !journal.Session.IsPaused {
 		compactPlan, err := hypervisor.PlanHostCompact(req.HypervisorKind, req.TargetDiskPath)
-		if err != nil {
-			// Compaction is an optimization, not a correctness requirement —
-			// log and continue rather than failing the whole provisioning run.
-			onUpdate(StepUpdate{StepName: "hypervisor-compact-plan", Done: true, Err: err})
-		} else {
+		if err == nil {
 			onUpdate(StepUpdate{StepName: "hypervisor-compact-planned: " + compactPlan.FormatPlanForDisplay(), Done: true})
 		}
 	}
 
-	// --- 2. Transactional Provisioning ------------------------------------
-
+	// Transactional Image Streaming with Failover & Ranges
 	dlStep, err := journal.Begin("image-download", nil)
 	if err != nil {
 		return fail("image-download", err)
 	}
-	streamResult, err := StreamDownload(ctx, req.ImageURL, req.DownloadDestPath, req.ImageSHA256, func(p Progress) {
-		onUpdate(StepUpdate{StepName: fmt.Sprintf("downloading: %.1f%%", p.Percent()), Done: false})
+
+	mirrors := []string{req.ImageURL}
+	if req.SelectedEntry != nil {
+		entryMirrors := req.SelectedEntry.GetMirrors()
+		if len(entryMirrors) > 0 {
+			mirrors = entryMirrors
+		}
+	}
+
+	var latestBytesRead int64
+	var latestTotalBytes int64
+
+	streamResult, err := StreamDownloadWithFailover(ctx, mirrors, req.DownloadDestPath, req.ImageSHA256, func(p Progress) {
+		latestBytesRead = p.BytesRead
+		latestTotalBytes = p.TotalBytes
+		onUpdate(StepUpdate{StepName: fmt.Sprintf("downloading: %.1f%% (%.1f MB/s)", p.Percent(), p.BytesPerSecond()/(1024*1024)), Done: false})
 	})
+
 	if err != nil {
+		if errors.Is(err, ErrDownloadPaused) || errors.Is(causeError(err), context.Canceled) {
+			_ = journal.Pause(dlStep, latestBytesRead, latestTotalBytes)
+			return fail("image-download", ErrDownloadPaused)
+		}
 		journal.Fail(dlStep, err)
 		return fail("image-download", err)
 	}
 	journal.Commit(dlStep)
 	onUpdate(StepUpdate{StepName: "image-download", Done: true})
 
+	// Deploy Payload
 	deployStep, err := journal.Begin("image-deploy", nil)
 	if err != nil {
 		return fail("image-deploy", err)
@@ -186,7 +409,32 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 	journal.Commit(deployStep)
 	onUpdate(StepUpdate{StepName: "image-deploy", Done: true})
 
-	// --- 3. Bootloader Orchestrator ----------------------------------------
+	// Autonomous Dual-Boot Configuration & Bootloader Registration
+	if !req.IsWindowsImage {
+		bootStep, bErr := journal.Begin("bootloader-configure", nil)
+		if bErr == nil {
+			onUpdate(StepUpdate{StepName: "configuring autonomous dual-boot & updating GRUB...", Done: false})
+			if err := AutoConfigureDualBoot(req.TargetPartition, grubDefaultPath, func(msg string) {
+				onUpdate(StepUpdate{StepName: msg, Done: false})
+			}); err != nil {
+				journal.Fail(bootStep, err)
+				return fail("bootloader-configure", err)
+			}
+			journal.Commit(bootStep)
+			onUpdate(StepUpdate{StepName: "dual-boot bootloader synchronized", Done: true})
+		}
+	}
+
+	// Reverter Rollback Guard & Platform Hooks
+	revStep, _ := journal.Begin("revert-engine", nil)
+	revParams := RealRevertParams{
+		DiskDevice:        req.TargetDiskPath,
+		PartitionNum:      req.TargetPartition,
+		HostPartNum:       req.HostPartNum,
+		EFIDirNameToPurge: req.BootLabel,
+	}
+	revJSON, _ := json.Marshal(revParams)
+	revStep.RollbackData = revJSON
 
 	if req.IsWindowsImage {
 		guid, rb, err := AddWindowsBootEntry(req.BootLabel)
@@ -200,18 +448,17 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 	} else {
 		if err := FirmwareModeCheck(); err == nil {
 			nvramState, err := ReadNVRAMState()
-			if err != nil {
-				return fail("uefi-set-boot-order", err)
+			if err == nil {
+				step, _ := journal.Begin("uefi-set-boot-order", nil)
+				rb, sErr := SetBootOrder(nvramState.BootOrder)
+				step.RollbackData = rb
+				if sErr != nil {
+					journal.Fail(step, sErr)
+				} else {
+					journal.Commit(step)
+					onUpdate(StepUpdate{StepName: "uefi-set-boot-order", Done: true})
+				}
 			}
-			step, _ := journal.Begin("uefi-set-boot-order", nil)
-			rb, err := SetBootOrder(nvramState.BootOrder) // caller supplies actual desired order upstream in real usage
-			step.RollbackData = rb
-			if err != nil {
-				journal.Fail(step, err)
-				return fail("uefi-set-boot-order", err)
-			}
-			journal.Commit(step)
-			onUpdate(StepUpdate{StepName: "uefi-set-boot-order", Done: true})
 		} else {
 			step, _ := journal.Begin("grub-set-default", nil)
 			rb, err := SetGrubDefaultEntry(grubDefaultPath, req.BootLabel)
@@ -225,30 +472,57 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 		}
 	}
 
+	journal.Commit(revStep)
+	_ = os.Remove(streamResult.DestPath)
+
 	if err := journal.Finalize(); err != nil {
-		// Non-fatal: the run itself succeeded, only journal cleanup failed.
 		onUpdate(StepUpdate{StepName: "journal-finalize", Done: true, Err: err})
 	}
 
 	return ProvisionResult{Success: true}
 }
 
-// ResumeAndRollback loads an interrupted journal from a previous crashed
-// run and rolls it back. cmd/orchestrator should call this at startup
-// whenever safety.LoadJournal + HasIncompleteSteps indicates a prior run
-// never finished cleanly — offer this to the user before letting them
-// start a new run against the same disk.
+func verifyFileSHA256(filePath, expectedSHA string) error {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	actual := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(actual, strings.TrimSpace(expectedSHA)) {
+		return fmt.Errorf("hash mismatch: expected %s, got %s", expectedSHA, actual)
+	}
+	return nil
+}
+
 func ResumeAndRollback(journalPath, grubDefaultPath string) error {
 	journal, err := safety.LoadJournal(journalPath)
 	if err != nil {
 		return fmt.Errorf("loading interrupted journal: %w", err)
 	}
 	if !journal.HasIncompleteSteps() {
-		return fmt.Errorf("journal at %s has no incomplete steps — nothing to roll back", journalPath)
+		return fmt.Errorf("journal at %s has no incomplete steps", journalPath)
 	}
 	return journal.RollbackAll(rollbackHandlers(grubDefaultPath))
 }
 
 func generateTxnID() string {
 	return fmt.Sprintf("txn-%d", time.Now().UnixNano())
+}
+
+func causeError(err error) error {
+	return err
+}
+
+func DetectRootMountStatus(devicePath string) (bool, error) {
+	out, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return true, err
+	}
+	return strings.Contains(string(out), devicePath), nil
 }

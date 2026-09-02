@@ -1,8 +1,5 @@
-// Package engine — rootfs.go implements the "Raw ext4/Btrfs cloud-image
-// extraction engine" from the blueprint: takes a downloaded cloud image
-// (qcow2, raw .img, or a tar.xz/tar.gz rootfs tarball) and writes it to a
-// target partition, verifying the write and never touching the target
-// until the source has already passed SHA-256 verification (see streamer.go).
+// Package engine — rootfs.go implements the Raw ext4/Btrfs, ISO, and cloud-image
+// extraction engine: supports raw images, ISO9660 live installers, QCOW2, and tar rootfs tarballs.
 package engine
 
 import (
@@ -12,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -19,25 +17,31 @@ import (
 type ImageFormat string
 
 const (
-	FormatRawImg   ImageFormat = "raw"    // .img / .raw — dd-able directly
-	FormatQCOW2    ImageFormat = "qcow2"  // needs qemu-img convert to raw first
-	FormatTarGz    ImageFormat = "tar.gz" // rootfs tarball, extracted onto an already-formatted fs
-	FormatTarXz    ImageFormat = "tar.xz"
-	FormatUnknown  ImageFormat = "unknown"
+	FormatRawImg  ImageFormat = "raw"    // .img / .raw — dd-able directly
+	FormatISO     ImageFormat = "iso"    // .iso — bootable hybrid ISO / squashfs
+	FormatQCOW2   ImageFormat = "qcow2"  // needs qemu-img convert to raw first
+	FormatTarGz   ImageFormat = "tar.gz" // rootfs tarball
+	FormatTarXz   ImageFormat = "tar.xz"
+	FormatUnknown ImageFormat = "unknown"
 )
 
-// DetectImageFormat sniffs the file by magic bytes/extension rather than
-// trusting the filename alone, since upstream mirrors are inconsistent.
+// DetectImageFormat sniffs the file by magic bytes and fallbacks to extension.
 func DetectImageFormat(path string) (ImageFormat, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return FormatUnknown, err
+		return FormatUnknown, fmt.Errorf("opening image for inspection: %w", err)
 	}
 	defer f.Close()
 
-	magic := make([]byte, 6)
-	n, _ := f.Read(magic)
-	magic = magic[:n]
+	// 1. Read first 37KB to inspect both header magic and ISO9660 PVD
+	buf := make([]byte, 36864)
+	n, _ := f.Read(buf)
+	magic := buf[:n]
+
+	// ISO9660 Standard: Primary Volume Descriptor identifier "CD001" at sector 16 (byte offset 32768)
+	if len(magic) >= 32773 && string(magic[32769:32774]) == "CD001" {
+		return FormatISO, nil
+	}
 
 	switch {
 	case len(magic) >= 4 && string(magic[:4]) == "QFI\xfb":
@@ -48,8 +52,11 @@ func DetectImageFormat(path string) (ImageFormat, error) {
 		return FormatTarXz, nil
 	}
 
+	// 2. Extension Fallback
 	lower := strings.ToLower(path)
 	switch {
+	case strings.HasSuffix(lower, ".iso"):
+		return FormatISO, nil
 	case strings.HasSuffix(lower, ".qcow2"):
 		return FormatQCOW2, nil
 	case strings.HasSuffix(lower, ".img") || strings.HasSuffix(lower, ".raw"):
@@ -60,24 +67,17 @@ func DetectImageFormat(path string) (ImageFormat, error) {
 		return FormatTarXz, nil
 	}
 
-	return FormatUnknown, fmt.Errorf("could not determine image format for %s from magic bytes or extension", path)
+	return FormatUnknown, fmt.Errorf("unsupported image format for %s (magic: %q)", path, magic[:min(len(magic), 8)])
 }
 
-// DeployPlan is the not-yet-executed plan for getting imagePath onto
-// targetPartition. Building this separately from executing it lets the
-// TUI show the exact steps and required tools before anything destructive
-// happens.
 type DeployPlan struct {
 	ImagePath       string
 	Format          ImageFormat
-	TargetPartition string // block device or partition, e.g. /dev/sda2 — NEVER a whole-disk device for tarball mode
+	TargetPartition string
 	Steps           []string
 	RequiresTools   []string
 }
 
-// PlanDeploy inspects the image and target and produces the step list,
-// checking that required external tools (qemu-img, mkfs.ext4, tar) are
-// actually present before committing to a plan the caller can't execute.
 func PlanDeploy(imagePath, targetPartition string) (*DeployPlan, error) {
 	format, err := DetectImageFormat(imagePath)
 	if err != nil {
@@ -91,72 +91,59 @@ func PlanDeploy(imagePath, targetPartition string) (*DeployPlan, error) {
 	}
 
 	switch format {
-	case FormatRawImg:
-		plan.RequiresTools = []string{"dd"}
+	case FormatISO, FormatRawImg:
+		plan.RequiresTools = []string{"dd", "sync"}
 		plan.Steps = []string{
-			fmt.Sprintf("dd if=%s of=%s bs=4M conv=fsync status=progress", imagePath, targetPartition),
-			"blockdev --rereadpt on the parent disk",
+			fmt.Sprintf("Direct raw stream write to %s via dd (block size 4M, fsync enabled)", targetPartition),
+			fmt.Sprintf("Synchronizing block buffers to disk"),
 		}
 	case FormatQCOW2:
-		plan.RequiresTools = []string{"qemu-img", "dd"}
+		plan.RequiresTools = []string{"qemu-img", "dd", "sync"}
 		plan.Steps = []string{
 			fmt.Sprintf("qemu-img convert -O raw %s %s.raw", imagePath, imagePath),
-			fmt.Sprintf("dd if=%s.raw of=%s bs=4M conv=fsync status=progress", imagePath, targetPartition),
-			fmt.Sprintf("rm %s.raw (intermediate raw conversion is deleted after successful dd)", imagePath),
+			fmt.Sprintf("dd raw payload directly into target %s", targetPartition),
+			"purge temporary conversion image",
 		}
 	case FormatTarGz, FormatTarXz:
-		plan.RequiresTools = []string{"mkfs.ext4", "tar", "mount"}
+		plan.RequiresTools = []string{"mkfs.ext4", "tar", "mount", "umount"}
 		plan.Steps = []string{
-			fmt.Sprintf("mkfs.ext4 -F %s (target partition must already be sized correctly — see partition.go ShrinkPlan)", targetPartition),
-			fmt.Sprintf("mount %s <temp mountpoint>", targetPartition),
-			fmt.Sprintf("tar -xf %s -C <temp mountpoint> --numeric-owner (preserve uid/gid exactly — critical for a bootable rootfs)", imagePath),
-			"umount <temp mountpoint>",
+			fmt.Sprintf("mkfs.ext4 -F %s", targetPartition),
+			"mount target partition to isolated directory",
+			fmt.Sprintf("tar -xf %s --numeric-owner into root partition", imagePath),
+			"normalize root filesystem layout if wrapped in subdirectory",
+			"umount and flush filesystem buffers",
 		}
 	default:
-		return nil, fmt.Errorf("unsupported image format for %s", imagePath)
+		return nil, fmt.Errorf("unsupported image format %s for deployment", format)
 	}
 
 	for _, tool := range plan.RequiresTools {
 		if _, err := exec.LookPath(tool); err != nil {
-			return nil, fmt.Errorf("required tool %q not found on PATH — install it before running this plan", tool)
+			return nil, fmt.Errorf("required system tool %q not found on PATH", tool)
 		}
 	}
 
 	return plan, nil
 }
 
-// DeployRollbackData is stored via safety.Journal.Begin before ApplyDeploy
-// runs, so a failed/interrupted deploy can be identified and the target
-// partition flagged as "unknown state — do not boot" rather than silently
-// left half-written.
 type DeployRollbackData struct {
 	TargetPartition string `json:"target_partition"`
-	// There is no way to "undo" a raw dd write after the fact — the only
-	// real safety net is: (a) never dd onto a partition that still holds
-	// data you need, and (b) the partition-shrink step (partition.go) runs
-	// and is verified BEFORE this ever executes, so worst case here is an
-	// empty/wasted partition, never destroyed user data.
-	PreviouslyEmpty bool `json:"previously_empty"`
+	PreviouslyEmpty bool   `json:"previously_empty"`
 }
 
-// ApplyDeploy executes a DeployPlan. Returns rollback data for the journal;
-// as noted above, "rollback" here means "mark the partition as needing
-// re-deployment," not "restore original contents" — callers must not call
-// this against a partition that isn't already confirmed empty/freshly
-// shrunk (see engine/partition.go).
 func ApplyDeploy(plan *DeployPlan) (rollbackData []byte, err error) {
 	rb := DeployRollbackData{TargetPartition: plan.TargetPartition, PreviouslyEmpty: true}
 	rollbackData, _ = json.Marshal(rb)
 
 	switch plan.Format {
-	case FormatRawImg:
+	case FormatISO, FormatRawImg:
 		if err := ddImageToDevice(plan.ImagePath, plan.TargetPartition); err != nil {
 			return rollbackData, err
 		}
 	case FormatQCOW2:
 		rawPath := plan.ImagePath + ".raw"
 		if out, err := exec.Command("qemu-img", "convert", "-O", "raw", plan.ImagePath, rawPath).CombinedOutput(); err != nil {
-			return rollbackData, fmt.Errorf("qemu-img convert failed: %w\n%s", err, out)
+			return rollbackData, fmt.Errorf("qemu-img convert failed: %w\n%s", err, string(out))
 		}
 		defer os.Remove(rawPath)
 		if err := ddImageToDevice(rawPath, plan.TargetPartition); err != nil {
@@ -170,7 +157,8 @@ func ApplyDeploy(plan *DeployPlan) (rollbackData []byte, err error) {
 		return rollbackData, fmt.Errorf("unsupported format %s in ApplyDeploy", plan.Format)
 	}
 
-	exec.Command("sync").Run()
+	_ = exec.Command("sync").Run()
+	_ = exec.Command("partprobe", plan.TargetPartition).Run()
 	return rollbackData, nil
 }
 
@@ -183,41 +171,103 @@ func ddImageToDevice(imagePath, targetPartition string) error {
 		"status=none",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("dd %s -> %s failed: %w\n%s", imagePath, targetPartition, err, out)
+		return fmt.Errorf("dd extraction (%s -> %s) failed: %w\n%s", imagePath, targetPartition, err, string(out))
 	}
 	return nil
 }
 
 func deployTarball(tarPath, targetPartition string) error {
 	if out, err := exec.Command("mkfs.ext4", "-F", targetPartition).CombinedOutput(); err != nil {
-		return fmt.Errorf("mkfs.ext4 %s failed: %w\n%s", targetPartition, err, out)
+		return fmt.Errorf("formatting target %s as ext4 failed: %w\n%s", targetPartition, err, string(out))
 	}
 
-	mountPoint, err := os.MkdirTemp("", "boot-orchestrator-rootfs-*")
+	mountPoint, err := os.MkdirTemp("", "orchestrator-rootfs-*")
 	if err != nil {
-		return fmt.Errorf("creating temp mountpoint: %w", err)
+		return fmt.Errorf("creating mountpoint: %w", err)
 	}
 	defer os.RemoveAll(mountPoint)
 
 	if out, err := exec.Command("mount", targetPartition, mountPoint).CombinedOutput(); err != nil {
-		return fmt.Errorf("mount %s at %s failed: %w\n%s", targetPartition, mountPoint, err, out)
+		return fmt.Errorf("mounting target partition %s failed: %w\n%s", targetPartition, err, string(out))
 	}
-	defer exec.Command("umount", mountPoint).Run()
 
-	// --numeric-owner is non-negotiable: mapping tar's numeric uid/gid to
-	// names on the HOST would silently reassign file ownership in the
-	// guest rootfs and can produce an unbootable or insecure system.
+	// Always ensure clean unmount even on panics/failures
+	defer func() {
+		_ = exec.Command("sync").Run()
+		if out, err := exec.Command("umount", mountPoint).CombinedOutput(); err != nil {
+			_ = exec.Command("umount", "-l", mountPoint).Run()
+			_ = out
+		}
+	}()
+
 	tarCmd := exec.Command("tar", "-xf", tarPath, "-C", mountPoint, "--numeric-owner")
 	if out, err := tarCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("extracting %s into %s failed: %w\n%s", tarPath, mountPoint, err, out)
+		return fmt.Errorf("extracting rootfs tarball failed: %w\n%s", err, string(out))
+	}
+
+	// Dynamic Self-Healing: Normalize wrapped root directories if nested
+	if err := normalizeRootDirectoryStructure(mountPoint); err != nil {
+		return fmt.Errorf("normalizing rootfs structure: %w", err)
 	}
 
 	return nil
 }
 
-// decompressGzipStream is exposed for callers (e.g. slipstream.go) that
-// need to peek inside a .tar.gz without a full tar extraction — e.g. to
-// check whether a specific driver file exists before committing to a plan.
+// normalizeRootDirectoryStructure verifies whether the extracted archive placed system
+// trees (bin, usr, etc, boot) directly at root. If wrapped in an outer container directory,
+// it elevates all items directly to mountPoint.
+func normalizeRootDirectoryStructure(mountPoint string) error {
+	entries, err := os.ReadDir(mountPoint)
+	if err != nil {
+		return err
+	}
+
+	hasStandardRoot := false
+	var candidateSubdir string
+	validItemsCount := 0
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "lost+found" {
+			continue
+		}
+		validItemsCount++
+		if name == "bin" || name == "usr" || name == "etc" || name == "boot" {
+			hasStandardRoot = true
+			break
+		}
+		if entry.IsDir() {
+			candidateSubdir = filepath.Join(mountPoint, name)
+		}
+	}
+
+	// If root directories are not at top level and only one wrapper directory exists, flatten it
+	if !hasStandardRoot && validItemsCount == 1 && candidateSubdir != "" {
+		subEntries, subErr := os.ReadDir(candidateSubdir)
+		if subErr != nil {
+			return subErr
+		}
+
+		for _, sub := range subEntries {
+			src := filepath.Join(candidateSubdir, sub.Name())
+			dst := filepath.Join(mountPoint, sub.Name())
+			if err := os.Rename(src, dst); err != nil {
+				_ = exec.Command("mv", src, dst).Run()
+			}
+		}
+		_ = os.Remove(candidateSubdir)
+	}
+
+	return nil
+}
+
 func decompressGzipStream(r io.Reader) (io.ReadCloser, error) {
 	return gzip.NewReader(r)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

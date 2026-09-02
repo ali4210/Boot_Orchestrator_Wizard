@@ -1,4 +1,7 @@
-[
+import json
+
+entries = [
+  # --- CategoryKali ---
   {
     "id": "kali-gui-amd64",
     "category": "Kali Linux",
@@ -10,11 +13,9 @@
     "arch": "amd64",
     "min_disk_gb": 25,
     "approx_size_bytes": 4294967296,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://cdimage.kali.org/kali-2026.2/kali-linux-2026.2-installer-amd64.iso",
-    "mirrors": [
-      "https://cdimage.kali.org/kali-2026.2/kali-linux-2026.2-installer-amd64.iso"
-    ]
+    "mirrors": ["https://cdimage.kali.org/kali-2026.2/kali-linux-2026.2-installer-amd64.iso"]
   },
   {
     "id": "kali-netinst-amd64",
@@ -27,50 +28,14 @@
     "arch": "amd64",
     "min_disk_gb": 15,
     "approx_size_bytes": 629145600,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://cdimage.kali.org/kali-2026.2/kali-linux-2026.2-installer-netinst-amd64.iso",
-    "mirrors": [
-      "https://cdimage.kali.org/kali-2026.2/kali-linux-2026.2-installer-netinst-amd64.iso"
-    ]
+    "mirrors": ["https://cdimage.kali.org/kali-2026.2/kali-linux-2026.2-installer-netinst-amd64.iso"]
   },
+
+  # --- CategoryParrot ---
   {
-    "id": "parrot-security-gui-amd64",
-    "category": "Parrot OS",
-    "family": "linux",
-    "distro": "Parrot Security Edition (MATE)",
-    "version": "7.3 Security",
-    "codename": "lorikeet",
-    "flavor": "gui",
-    "arch": "amd64",
-    "min_disk_gb": 30,
-    "approx_size_bytes": 5120000000,
-    "requires_license": false,
-    "download_url": "http://sft.if.usp.br/parrot/iso/7.3/Parrot-security-7.3_amd64.iso",
-    "mirrors": [
-      "http://sft.if.usp.br/parrot/iso/7.3/Parrot-security-7.3_amd64.iso"
-    ],
-    "notes": "Flagship cybersecurity, penetration testing, and digital forensics suite with full MATE Desktop."
-  },
-  {
-    "id": "parrot-home-gui-amd64",
-    "category": "Parrot OS",
-    "family": "linux",
-    "distro": "Parrot Home Edition (MATE)",
-    "version": "7.3 Home",
-    "codename": "lorikeet",
-    "flavor": "gui",
-    "arch": "amd64",
-    "min_disk_gb": 20,
-    "approx_size_bytes": 2800000000,
-    "requires_license": false,
-    "download_url": "http://sft.if.usp.br/parrot/iso/7.3/Parrot-home-7.3_amd64.iso",
-    "mirrors": [
-      "http://sft.if.usp.br/parrot/iso/7.3/Parrot-home-7.3_amd64.iso"
-    ],
-    "notes": "Lightweight daily-driver security desktop with privacy tools and sandboxed development environments."
-  },
-  {
-    "id": "parrot-core-tty-amd64",
+    "id": "parrot-core-amd64",
     "category": "Parrot OS",
     "family": "linux",
     "distro": "Parrot OS Minimal Core",
@@ -80,13 +45,12 @@
     "arch": "amd64",
     "min_disk_gb": 10,
     "approx_size_bytes": 450000000,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://deb.parrot.sh/direct/parrot/iso/latest/parrot-amd64.tar.xz",
-    "mirrors": [
-      "https://deb.parrot.sh/direct/parrot/iso/latest/parrot-amd64.tar.xz"
-    ],
-    "notes": "Minimalist headless terminal-only deployment."
+    "mirrors": ["https://deb.parrot.sh/direct/parrot/iso/latest/parrot-amd64.tar.xz"]
   },
+
+  # --- CategoryUbuntu (Ubuntu / Debian / Mint) ---
   {
     "id": "ubuntu-desktop-amd64",
     "category": "Ubuntu / Debian",
@@ -98,11 +62,9 @@
     "arch": "amd64",
     "min_disk_gb": 25,
     "approx_size_bytes": 6120349696,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://releases.ubuntu.com/24.04/ubuntu-24.04.4-desktop-amd64.iso",
-    "mirrors": [
-      "https://releases.ubuntu.com/24.04/ubuntu-24.04.4-desktop-amd64.iso"
-    ]
+    "mirrors": ["https://releases.ubuntu.com/24.04/ubuntu-24.04.4-desktop-amd64.iso"]
   },
   {
     "id": "ubuntu-server-amd64",
@@ -115,11 +77,9 @@
     "arch": "amd64",
     "min_disk_gb": 15,
     "approx_size_bytes": 2831155200,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://releases.ubuntu.com/24.04/ubuntu-24.04.4-live-server-amd64.iso",
-    "mirrors": [
-      "https://releases.ubuntu.com/24.04/ubuntu-24.04.4-live-server-amd64.iso"
-    ]
+    "mirrors": ["https://releases.ubuntu.com/24.04/ubuntu-24.04.4-live-server-amd64.iso"]
   },
   {
     "id": "linux-mint-cinnamon-amd64",
@@ -132,11 +92,9 @@
     "arch": "amd64",
     "min_disk_gb": 25,
     "approx_size_bytes": 2936012800,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://mirrors.kernel.org/linuxmint/stable/22/linuxmint-22-cinnamon-64bit.iso",
-    "mirrors": [
-      "https://mirrors.kernel.org/linuxmint/stable/22/linuxmint-22-cinnamon-64bit.iso"
-    ]
+    "mirrors": ["https://mirrors.kernel.org/linuxmint/stable/22/linuxmint-22-cinnamon-64bit.iso"]
   },
   {
     "id": "debian-netboot-amd64",
@@ -149,12 +107,12 @@
     "arch": "amd64",
     "min_disk_gb": 10,
     "approx_size_bytes": 60817408,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/mini.iso",
-    "mirrors": [
-      "https://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/mini.iso"
-    ]
+    "mirrors": ["https://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/mini.iso"]
   },
+
+  # --- CategoryArchOther (Fedora, openSUSE, Arch, RHEL ecosystem, Alpine, Gentoo, Slackware) ---
   {
     "id": "fedora-workstation-amd64",
     "category": "Arch & Specialty Distros",
@@ -166,11 +124,9 @@
     "arch": "amd64",
     "min_disk_gb": 25,
     "approx_size_bytes": 2254857856,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/40/Workstation/x86_64/iso/Fedora-Workstation-Live-x86_64-40-1.14.iso",
-    "mirrors": [
-      "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/40/Workstation/x86_64/iso/Fedora-Workstation-Live-x86_64-40-1.14.iso"
-    ]
+    "mirrors": ["https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/40/Workstation/x86_64/iso/Fedora-Workstation-Live-x86_64-40-1.14.iso"]
   },
   {
     "id": "fedora-server-amd64",
@@ -183,11 +139,9 @@
     "arch": "amd64",
     "min_disk_gb": 15,
     "approx_size_bytes": 812312576,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/40/Server/x86_64/iso/Fedora-Server-netinst-x86_64-40-1.14.iso",
-    "mirrors": [
-      "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/40/Server/x86_64/iso/Fedora-Server-netinst-x86_64-40-1.14.iso"
-    ]
+    "mirrors": ["https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/40/Server/x86_64/iso/Fedora-Server-netinst-x86_64-40-1.14.iso"]
   },
   {
     "id": "opensuse-tumbleweed-gui-amd64",
@@ -200,11 +154,9 @@
     "arch": "amd64",
     "min_disk_gb": 25,
     "approx_size_bytes": 1153433600,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://download.opensuse.org/tumbleweed/iso/openSUSE-Tumbleweed-GNOME-Live-x86_64-Current.iso",
-    "mirrors": [
-      "https://download.opensuse.org/tumbleweed/iso/openSUSE-Tumbleweed-GNOME-Live-x86_64-Current.iso"
-    ]
+    "mirrors": ["https://download.opensuse.org/tumbleweed/iso/openSUSE-Tumbleweed-GNOME-Live-x86_64-Current.iso"]
   },
   {
     "id": "opensuse-tumbleweed-netinst-amd64",
@@ -217,11 +169,9 @@
     "arch": "amd64",
     "min_disk_gb": 20,
     "approx_size_bytes": 416284672,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://download.opensuse.org/tumbleweed/iso/openSUSE-Tumbleweed-NET-x86_64-Current.iso",
-    "mirrors": [
-      "https://download.opensuse.org/tumbleweed/iso/openSUSE-Tumbleweed-NET-x86_64-Current.iso"
-    ]
+    "mirrors": ["https://download.opensuse.org/tumbleweed/iso/openSUSE-Tumbleweed-NET-x86_64-Current.iso"]
   },
   {
     "id": "arch-linux-amd64",
@@ -234,11 +184,9 @@
     "arch": "amd64",
     "min_disk_gb": 15,
     "approx_size_bytes": 1153433600,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso",
-    "mirrors": [
-      "https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso"
-    ]
+    "mirrors": ["https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso"]
   },
   {
     "id": "alpine-linux-amd64",
@@ -251,11 +199,9 @@
     "arch": "amd64",
     "min_disk_gb": 5,
     "approx_size_bytes": 220200960,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-standard-3.20.3-x86_64.iso",
-    "mirrors": [
-      "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-standard-3.20.3-x86_64.iso"
-    ]
+    "mirrors": ["https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-standard-3.20.3-x86_64.iso"]
   },
   {
     "id": "centos-7-dvd-amd64",
@@ -268,12 +214,10 @@
     "arch": "amd64",
     "min_disk_gb": 25,
     "approx_size_bytes": 4700000000,
-    "requires_license": false,
-    "eol": true,
+    "requires_license": False,
+    "eol": True,
     "download_url": "https://archive.kernel.org/centos-vault/7.9.2009/isos/x86_64/CentOS-7-x86_64-DVD-2009.iso",
-    "mirrors": [
-      "https://archive.kernel.org/centos-vault/7.9.2009/isos/x86_64/CentOS-7-x86_64-DVD-2009.iso"
-    ]
+    "mirrors": ["https://archive.kernel.org/centos-vault/7.9.2009/isos/x86_64/CentOS-7-x86_64-DVD-2009.iso"]
   },
   {
     "id": "centos-7-minimal-amd64",
@@ -286,12 +230,10 @@
     "arch": "amd64",
     "min_disk_gb": 15,
     "approx_size_bytes": 1020264448,
-    "requires_license": false,
-    "eol": true,
+    "requires_license": False,
+    "eol": True,
     "download_url": "https://archive.kernel.org/centos-vault/7.9.2009/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso",
-    "mirrors": [
-      "https://archive.kernel.org/centos-vault/7.9.2009/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
-    ]
+    "mirrors": ["https://archive.kernel.org/centos-vault/7.9.2009/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"]
   },
   {
     "id": "centos-stream-9-amd64",
@@ -304,11 +246,9 @@
     "arch": "amd64",
     "min_disk_gb": 20,
     "approx_size_bytes": 950000000,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/iso/CentOS-Stream-9-latest-x86_64-boot.iso",
-    "mirrors": [
-      "https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/iso/CentOS-Stream-9-latest-x86_64-boot.iso"
-    ]
+    "mirrors": ["https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/iso/CentOS-Stream-9-latest-x86_64-boot.iso"]
   },
   {
     "id": "rocky-9-workstation-amd64",
@@ -321,11 +261,9 @@
     "arch": "amd64",
     "min_disk_gb": 25,
     "approx_size_bytes": 2411724800,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://download.rockylinux.org/pub/rocky/9/live/x86_64/Rocky-9-Workstation-x86_64-latest.iso",
-    "mirrors": [
-      "https://download.rockylinux.org/pub/rocky/9/live/x86_64/Rocky-9-Workstation-x86_64-latest.iso"
-    ]
+    "mirrors": ["https://download.rockylinux.org/pub/rocky/9/live/x86_64/Rocky-9-Workstation-x86_64-latest.iso"]
   },
   {
     "id": "rocky-9-minimal-amd64",
@@ -338,11 +276,9 @@
     "arch": "amd64",
     "min_disk_gb": 20,
     "approx_size_bytes": 1782579200,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://download.rockylinux.org/pub/rocky/9/isos/x86_64/Rocky-9-latest-x86_64-minimal.iso",
-    "mirrors": [
-      "https://download.rockylinux.org/pub/rocky/9/isos/x86_64/Rocky-9-latest-x86_64-minimal.iso"
-    ]
+    "mirrors": ["https://download.rockylinux.org/pub/rocky/9/isos/x86_64/Rocky-9-latest-x86_64-minimal.iso"]
   },
   {
     "id": "almalinux-9-minimal-amd64",
@@ -355,11 +291,9 @@
     "arch": "amd64",
     "min_disk_gb": 20,
     "approx_size_bytes": 1887436800,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://repo.almalinux.org/almalinux/9/isos/x86_64/AlmaLinux-9-latest-x86_64-minimal.iso",
-    "mirrors": [
-      "https://repo.almalinux.org/almalinux/9/isos/x86_64/AlmaLinux-9-latest-x86_64-minimal.iso"
-    ]
+    "mirrors": ["https://repo.almalinux.org/almalinux/9/isos/x86_64/AlmaLinux-9-latest-x86_64-minimal.iso"]
   },
   {
     "id": "gentoo-stage3-amd64",
@@ -372,11 +306,9 @@
     "arch": "amd64",
     "min_disk_gb": 20,
     "approx_size_bytes": 356515840,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://distfiles.gentoo.org/releases/amd64/autobuilds/latest-stage3-amd64-openrc.txt",
-    "mirrors": [
-      "https://distfiles.gentoo.org/releases/amd64/autobuilds/latest-stage3-amd64-openrc.txt"
-    ]
+    "mirrors": ["https://distfiles.gentoo.org/releases/amd64/autobuilds/latest-stage3-amd64-openrc.txt"]
   },
   {
     "id": "slackware-15-amd64",
@@ -389,10 +321,13 @@
     "arch": "amd64",
     "min_disk_gb": 15,
     "approx_size_bytes": 146800640,
-    "requires_license": false,
+    "requires_license": False,
     "download_url": "https://mirrors.kernel.org/slackware/slackware64-15.0/usb-and-pxe-installers/usbboot.img",
-    "mirrors": [
-      "https://mirrors.kernel.org/slackware/slackware64-15.0/usb-and-pxe-installers/usbboot.img"
-    ]
+    "mirrors": ["https://mirrors.kernel.org/slackware/slackware64-15.0/usb-and-pxe-installers/usbboot.img"]
   }
 ]
+
+with open('discovery/manifests/linux.json', 'w') as f:
+    json.dump(entries, f, indent=2)
+
+print(f"=> Generated discovery/manifests/linux.json with {len(entries)} strictly matched entries!")
