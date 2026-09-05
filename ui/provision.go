@@ -69,8 +69,11 @@ func (m Model) handleProvisionStep(msg provisionStepMsg, ch chan provisionStepMs
 	}
 
 	// Real-Time Dynamic Progress Bar Parser
-	// Matches: "downloading: 45.2% (12.4 MB/s)"
-	if strings.HasPrefix(line, "downloading:") {
+	// Matches BOTH "downloading: 45.2%..." AND "compressing: 45.2%..."
+	isDownload := strings.HasPrefix(line, "downloading:")
+	isCompress := strings.HasPrefix(line, "compressing:")
+
+	if isDownload || isCompress {
 		parts := strings.Fields(line)
 		if len(parts) >= 2 {
 			pctStr := strings.TrimSuffix(parts[1], "%")
@@ -81,8 +84,14 @@ func (m Model) handleProvisionStep(msg provisionStepMsg, ch chan provisionStepMs
 				}
 			}
 		}
+
+		prefix := "downloading:"
+		if isCompress {
+			prefix = "compressing:"
+		}
+
 		// In-place update to prevent terminal scrolling clutter
-		if len(m.statusLog) > 0 && strings.HasPrefix(m.statusLog[len(m.statusLog)-1], "downloading:") {
+		if len(m.statusLog) > 0 && strings.HasPrefix(m.statusLog[len(m.statusLog)-1], prefix) {
 			m.statusLog[len(m.statusLog)-1] = line
 		} else {
 			m.statusLog = append(m.statusLog, line)

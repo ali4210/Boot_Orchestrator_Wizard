@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -102,6 +103,7 @@ type Model struct {
 	selectedArchive   *engine.BackupArchiveDescriptor
 	restoreStatusMsg  string
 	isScanning        bool
+	scanSpinner       spinner.Model
 
 	progressBar progress.Model
 	speed       *SpeedTracker
@@ -158,6 +160,10 @@ func NewModel() Model {
 	eraseTi.CharLimit = 10
 	eraseTi.Width = 32
 
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = BadgeInfo
+
 	pb := progress.New(
 		progress.WithGradient("#00F0FF", "#00E676"),
 		progress.WithWidth(72),
@@ -184,6 +190,7 @@ func NewModel() Model {
 		osList:            oList,
 		searchInput:       ti,
 		eraseConfirmInput: eraseTi,
+		scanSpinner:       sp,
 		progressBar:       pb,
 		unfinishedState:   unfin,
 		journal:           jrn,
@@ -192,7 +199,7 @@ func NewModel() Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return nil
+	return m.scanSpinner.Tick
 }
 
 type envCheckDoneMsg struct {
@@ -240,20 +247,27 @@ func runEnvironmentChecks(targetPath string, footprintBytes uint64) tea.Cmd {
 
 func scanBackupDrivesCmd() tea.Cmd {
 	return func() tea.Msg {
+		time.Sleep(500 * time.Millisecond)
 		targets, err := engine.DetectBackupTargets()
 		return backupScanDoneMsg{targets: targets, err: err}
 	}
 }
 
-func triggerBackupCmd(destPath string) tea.Cmd {
+func triggerLiveBackupCmd(targetPath string, ch chan provisionStepMsg) tea.Cmd {
 	return func() tea.Msg {
-		path, err := engine.CreateHostBackup(destPath, nil)
-		return backupFinishedMsg{archivePath: path, err: err}
+		archivePath, err := engine.CreateHostBackupWithProgress(targetPath, func(written int64, step string) {
+			ch <- provisionStepMsg{
+				StepName: step,
+				Done: false,
+			}
+		})
+		return backupFinishedMsg{archivePath: archivePath, err: err}
 	}
 }
 
 func scanDisasterBackupsCmd() tea.Cmd {
 	return func() tea.Msg {
+		time.Sleep(600 * time.Millisecond)
 		bkups, err := engine.FindBackupArchives()
 		return disasterScanDoneMsg{backups: bkups, err: err}
 	}
@@ -274,6 +288,11 @@ func tickCmd() tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.scanSpinner, cmd = m.scanSpinner.Update(msg)
+		return m, cmd
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -297,19 +316,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateForScreen(msg)
 
 	case backupScanDoneMsg:
+		m.isScanning = false
 		m.backupTargets = msg.targets
 		return m, nil
 
 	case backupFinishedMsg:
 		m.isBackingUp = false
 		if msg.err != nil {
-			m.backupStatusMsg = fmt.Sprintf("Backup failed: %v", msg.err)
-		} else {
-			m.backupStatusMsg = fmt.Sprintf("Backup verified: %s", msg.archivePath)
-			m.screen = ScreenConfirm
-			m.eraseConfirmInput.Reset()
-			m.eraseConfirmInput.Focus()
+			m.fatalErr = msg.err
+			m.screen = ScreenError
+			return m, nil
 		}
+		m.statusLog = append(m.statusLog, "=> [BACKUP VERIFIED] "+msg.archivePath)
+		m.screen = ScreenConfirm
+		m.eraseConfirmInput.Reset()
+		m.eraseConfirmInput.Focus()
 		return m, nil
 
 	case disasterScanDoneMsg:
@@ -445,7 +466,7 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = ScreenDisasterRecovery
 			m.restoreCursor = 0
 			m.isScanning = true
-			return m, scanDisasterBackupsCmd()
+			return m, tea.Batch(scanDisasterBackupsCmd(), m.scanSpinner.Tick)
 		case "enter":
 			switch m.hubCursor {
 			case 0:
@@ -478,7 +499,7 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.screen = ScreenDisasterRecovery
 				m.restoreCursor = 0
 				m.isScanning = true
-				return m, scanDisasterBackupsCmd()
+				return m, tea.Batch(scanDisasterBackupsCmd(), m.scanSpinner.Tick)
 			}
 		}
 
@@ -527,7 +548,8 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.screen = ScreenBackupPrompt
 					m.backupCursor = 0
 					m.backupStatusMsg = ""
-					return m, scanBackupDrivesCmd()
+					m.isScanning = true
+					return m, tea.Batch(scanBackupDrivesCmd(), m.scanSpinner.Tick)
 				}
 
 				m.screen = ScreenConfirm
@@ -544,6 +566,9 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc", "0":
 			m.screen = ScreenOSSelect
 			return m, nil
+		case "r":
+			m.isScanning = true
+			return m, tea.Batch(scanBackupDrivesCmd(), m.scanSpinner.Tick)
 		case "up", "k":
 			if m.backupCursor > 0 {
 				m.backupCursor--
@@ -562,13 +587,23 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 			if len(m.backupTargets) > 0 && m.backupCursor < len(m.backupTargets) {
 				tgt := m.backupTargets[m.backupCursor]
-				m.isBackingUp = true
 				targetPath := tgt.Mountpoint
 				if targetPath == "" {
 					targetPath = tgt.Name
 				}
-				m.backupStatusMsg = fmt.Sprintf("Compressing host OS to %s...", targetPath)
-				return m, triggerBackupCmd(targetPath)
+
+				m.screen = ScreenProgress
+				m.isBackingUp = true
+				approxBytes := engine.EstimateHostBackupSize()
+				m.speed = NewSpeedTracker(approxBytes)
+				m.statusLog = append(m.statusLog, fmt.Sprintf("=> Initiating live snapshot stream to %s...", targetPath))
+
+				m.stepUpdates = make(chan provisionStepMsg, 64)
+				return m, tea.Batch(
+					triggerLiveBackupCmd(targetPath, m.stepUpdates),
+					listenForStepUpdates(m.stepUpdates),
+					tickCmd(),
+				)
 			}
 		}
 
@@ -579,7 +614,7 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "r":
 			m.isScanning = true
-			return m, scanDisasterBackupsCmd()
+			return m, tea.Batch(scanDisasterBackupsCmd(), m.scanSpinner.Tick)
 		case "up", "k":
 			if m.restoreCursor > 0 {
 				m.restoreCursor--
@@ -604,7 +639,7 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				pDisk = "/dev/sda"
 			}
 			m.screen = ScreenProgress
-			m.statusLog = append(m.statusLog, "=> [DISASTER RESTORE] Rebuilding partition and extracting OS image...")
+			m.statusLog = append(m.statusLog, "=> [DISASTER RESTORE] Rebuilding partition table and restoring host OS...")
 			return m, triggerRestoreCmd(m.selectedArchive.FilePath, pDisk)
 		case "n", "esc", "0":
 			m.screen = ScreenDisasterRecovery

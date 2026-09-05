@@ -1,50 +1,103 @@
 package engine
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
 
 type BlockDevice struct {
-	Name       string `json:"name"`
-	Size       string `json:"size"`
-	Type       string `json:"type"`
-	Mountpoint string `json:"mountpoint"`
-	Model      string `json:"model"`
-	RM         bool   `json:"rm"`
-	FSType     string `json:"fstype"`
+	Name       string        `json:"name"`
+	Size       string        `json:"size"`
+	Type       string        `json:"type"`
+	Mountpoint string        `json:"mountpoint"`
+	Model      string        `json:"model"`
+	RM         bool          `json:"rm"`
+	FSType     string        `json:"fstype"`
+	Children   []BlockDevice `json:"children,omitempty"`
 }
 
 type lsblkOutput struct {
 	BlockDevices []BlockDevice `json:"blockdevices"`
 }
 
-// AutoMountDrive mounts an unmounted drive to a deterministic mountpoint.
-func AutoMountDrive(devPath string) (string, func(), error) {
+func ensureNTFS3G(logFn func(string)) error {
+	if _, err := exec.LookPath("ntfs-3g"); err == nil {
+		return nil
+	}
+
+	logFn("=> [DRIVER CHECK] ntfs-3g missing. Installing non-interactively...")
+
+	if _, err := exec.LookPath("apt-get"); err == nil {
+		cmd := exec.Command("apt-get", "update", "-qq")
+		cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+		_ = cmd.Run()
+
+		cmdInstall := exec.Command("apt-get", "install", "-y", "-qq", "ntfs-3g")
+		cmdInstall.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+		if out, err := cmdInstall.CombinedOutput(); err != nil {
+			return fmt.Errorf("installing ntfs-3g failed: %w (%s)", err, strings.TrimSpace(string(out)))
+		}
+		logFn("=> [DRIVER OK] ntfs-3g installed.")
+		return nil
+	}
+	return fmt.Errorf("apt-get not available to install ntfs-3g")
+}
+
+func AutoMountDrive(devPath string, logFn func(string)) (string, func(), error) {
+	if logFn == nil {
+		logFn = func(string) {}
+	}
+
 	mountPoint := filepath.Join("/mnt", "orch_drive_"+filepath.Base(devPath))
 	_ = os.MkdirAll(mountPoint, 0755)
 
-	if out, err := exec.Command("mount", devPath, mountPoint).CombinedOutput(); err != nil {
-		return "", func() {}, fmt.Errorf("mounting %s to %s failed: %w (%s)", devPath, mountPoint, err, string(out))
+	fsTypeOut, _ := exec.Command("blkid", "-s", "TYPE", "-o", "value", devPath).Output()
+	detectedFS := strings.ToLower(strings.TrimSpace(string(fsTypeOut)))
+
+	if detectedFS == "ntfs" {
+		if err := ensureNTFS3G(logFn); err != nil {
+			return "", func() {}, err
+		}
+		cmdNTFS := exec.Command("ntfs-3g", "-o", "remove_hiberfile,rw", devPath, mountPoint)
+		if _, err := cmdNTFS.CombinedOutput(); err == nil {
+			return mountPoint, makeCleanup(mountPoint), nil
+		}
+		cmdFallback := exec.Command("mount", "-t", "ntfs-3g", devPath, mountPoint)
+		if _, errF := cmdFallback.CombinedOutput(); errF == nil {
+			return mountPoint, makeCleanup(mountPoint), nil
+		}
 	}
 
-	cleanup := func() {
+	cmd := exec.Command("mount", devPath, mountPoint)
+	if _, err := cmd.CombinedOutput(); err == nil {
+		return mountPoint, makeCleanup(mountPoint), nil
+	}
+
+	if errInstall := ensureNTFS3G(logFn); errInstall == nil {
+		cmdRetry := exec.Command("ntfs-3g", devPath, mountPoint)
+		if _, errRetry := cmdRetry.CombinedOutput(); errRetry == nil {
+			return mountPoint, makeCleanup(mountPoint), nil
+		}
+	}
+
+	return "", func() {}, fmt.Errorf("failed to mount %s", devPath)
+}
+
+func makeCleanup(mountPoint string) func() {
+	return func() {
 		_ = exec.Command("umount", "-l", mountPoint).Run()
 		_ = os.Remove(mountPoint)
 	}
-
-	return mountPoint, cleanup, nil
 }
 
-// DetectBackupTargets finds all valid external USBs, secondary disks, and non-root partitions.
 func DetectBackupTargets() ([]BlockDevice, error) {
-	out, err := exec.Command("lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,MODEL,RM,FSTYPE").Output()
+	out, err := exec.Command("lsblk", "-J", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,MODEL,RM,FSTYPE").Output()
 	if err != nil {
 		return nil, fmt.Errorf("querying storage topology: %w", err)
 	}
@@ -58,42 +111,74 @@ func DetectBackupTargets() ([]BlockDevice, error) {
 	pDiskBase := filepath.Base(pDisk)
 
 	var valid []BlockDevice
-	for _, dev := range parsed.BlockDevices {
-		// Ignore swap and the active root disk
-		if strings.HasPrefix(dev.Name, pDiskBase) || dev.Mountpoint == "/" || dev.Mountpoint == "[SWAP]" {
-			continue
-		}
 
-		// Include any partition with a recognizable filesystem or removable disk
-		if dev.Type == "part" || dev.Type == "disk" || dev.RM {
-			devPath := "/dev/" + dev.Name
-			// Format human readable size if numeric
+	var processDevice func(d BlockDevice)
+	processDevice = func(d BlockDevice) {
+		if strings.HasPrefix(d.Name, "sr") || d.Type == "rom" || d.Mountpoint == "[SWAP]" {
+			return
+		}
+		if strings.HasPrefix(d.Name, pDiskBase) || d.Mountpoint == "/" {
+			return
+		}
+		if len(d.Children) > 0 {
+			for _, child := range d.Children {
+				processDevice(child)
+			}
+			return
+		}
+		if d.Type == "part" || (d.Type == "loop" && d.FSType != "") || (d.Type == "disk" && d.FSType != "") {
+			devPath := "/dev/" + d.Name
 			valid = append(valid, BlockDevice{
 				Name:       devPath,
-				Size:       dev.Size,
-				Type:       dev.Type,
-				Mountpoint: dev.Mountpoint,
-				Model:      dev.Model,
-				RM:         dev.RM,
-				FSType:     dev.FSType,
+				Size:       d.Size,
+				Type:       d.Type,
+				Mountpoint: d.Mountpoint,
+				Model:      d.Model,
+				RM:         d.RM,
+				FSType:     d.FSType,
 			})
 		}
 	}
 
+	for _, dev := range parsed.BlockDevices {
+		processDevice(dev)
+	}
 	return valid, nil
 }
 
-// CreateHostBackup streams an online compressed snapshot of system directories to the destination drive.
-func CreateHostBackup(targetPath string, logFn func(string)) (string, error) {
-	if logFn == nil {
-		logFn = func(string) {}
+func EstimateHostBackupSize() uint64 {
+	sources := []string{"/home", "/etc", "/root", "/var/local", "/opt"}
+	var total uint64
+	for _, s := range sources {
+		out, err := exec.Command("du", "-sb", s).Output()
+		if err == nil {
+			parts := strings.Fields(string(out))
+			if len(parts) > 0 {
+				if b, parseErr := strconv.ParseUint(parts[0], 10, 64); parseErr == nil {
+					total += b
+				}
+			}
+		}
 	}
+	if total == 0 {
+		total = 5 * 1024 * 1024 * 1024
+	}
+	// Estimate compressed size (~45% of uncompressed data)
+	compressedEstimate := uint64(float64(total) * 0.45)
+	if compressedEstimate < 100*1024*1024 {
+		compressedEstimate = 100 * 1024 * 1024
+	}
+	return compressedEstimate
+}
 
+func CreateHostBackupWithProgress(targetPath string, onProgress func(written int64, step string)) (string, error) {
 	destDir := targetPath
 	var cleanup func()
-	// If the user selected a raw block device (e.g., /dev/sdb1), auto-mount it
+
 	if strings.HasPrefix(targetPath, "/dev/") {
-		mp, clean, err := AutoMountDrive(targetPath)
+		mp, clean, err := AutoMountDrive(targetPath, func(msg string) {
+			onProgress(0, msg)
+		})
 		if err != nil {
 			return "", err
 		}
@@ -108,8 +193,6 @@ func CreateHostBackup(targetPath string, logFn func(string)) (string, error) {
 	backupFileName := fmt.Sprintf("host_os_backup_%s.tar.gz", timestamp)
 	fullDestPath := filepath.Join(destDir, backupFileName)
 
-	logFn(fmt.Sprintf("=> [BACKUP] Streaming compressed host image to %s...", fullDestPath))
-
 	sources := []string{"/home", "/etc", "/root", "/var/local", "/opt"}
 	var validSources []string
 	for _, s := range sources {
@@ -117,6 +200,8 @@ func CreateHostBackup(targetPath string, logFn func(string)) (string, error) {
 			validSources = append(validSources, s)
 		}
 	}
+
+	targetEst := EstimateHostBackupSize()
 
 	tarArgs := append([]string{
 		"-czpf", fullDestPath,
@@ -126,37 +211,59 @@ func CreateHostBackup(targetPath string, logFn func(string)) (string, error) {
 	}, validSources...)
 
 	cmd := exec.Command("tar", tarArgs...)
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return "", fmt.Errorf("attaching log pipe: %w", err)
-	}
-
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("starting backup: %w", err)
 	}
 
-	scanner := bufio.NewScanner(stderrPipe)
+	ticker := time.NewTicker(300 * time.Millisecond)
+	done := make(chan error, 1)
+
 	go func() {
-		for scanner.Scan() {
-			logFn(fmt.Sprintf("=> [TAR] %s", scanner.Text()))
-		}
+		done <- cmd.Wait()
 	}()
 
-	if err := cmd.Wait(); err != nil {
-		return "", fmt.Errorf("archive creation failed: %w", err)
-	}
+	for {
+		select {
+		case err := <-done:
+			ticker.Stop()
+			if err != nil {
+				return "", fmt.Errorf("compression failed: %w", err)
+			}
+			onProgress(int64(targetEst), "compressing: 100.0% (Finalizing sync)")
+			onProgress(0, "=> Computing SHA256 checksum manifest on USB media...")
+			chkCmd := exec.Command("sha256sum", filepath.Base(fullDestPath))
+			chkCmd.Dir = destDir
+			if chkOut, cErr := chkCmd.Output(); cErr == nil {
+				_ = os.WriteFile(fullDestPath+".sha256", chkOut, 0644)
+			}
+			_ = exec.Command("sync").Run()
+			return fullDestPath, nil
 
-	// Create cryptographic SHA256 manifest
-	logFn("=> Generating SHA256 manifest on backup storage...")
-	chkCmd := exec.Command("sha256sum", filepath.Base(fullDestPath))
-	chkCmd.Dir = destDir
-	if chkOut, cErr := chkCmd.Output(); cErr == nil {
-		_ = os.WriteFile(fullDestPath+".sha256", chkOut, 0644)
+		case <-ticker.C:
+			if fi, err := os.Stat(fullDestPath); err == nil {
+				curSize := fi.Size()
+				pct := (float64(curSize) / float64(targetEst)) * 100.0
+				if pct > 99.0 {
+					pct = 99.0
+				}
+				stepMsg := fmt.Sprintf("compressing: %.1f%% (%s written)", pct, formatBytes(uint64(curSize)))
+				onProgress(curSize, stepMsg)
+			}
+		}
 	}
+}
 
-	_ = exec.Command("sync").Run()
-	logFn(fmt.Sprintf("=> Host backup successfully written: %s", backupFileName))
-	return fullDestPath, nil
+func formatBytes(b uint64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
 type BackupArchiveDescriptor struct {
@@ -168,7 +275,6 @@ type BackupArchiveDescriptor struct {
 	HasChecksum bool
 }
 
-// FindBackupArchives scans mounted directories AND unmounted partitions for backup files.
 func FindBackupArchives() ([]BackupArchiveDescriptor, error) {
 	targets, err := DetectBackupTargets()
 	if err != nil {
@@ -182,9 +288,9 @@ func FindBackupArchives() ([]BackupArchiveDescriptor, error) {
 		var cleanup func()
 
 		if mountDir == "" {
-			mp, clean, err := AutoMountDrive(t.Name)
+			mp, clean, err := AutoMountDrive(t.Name, nil)
 			if err != nil {
-				continue // skip partitions that can't be mounted
+				continue
 			}
 			mountDir = mp
 			cleanup = clean
@@ -220,7 +326,6 @@ func FindBackupArchives() ([]BackupArchiveDescriptor, error) {
 	return found, nil
 }
 
-// RestoreHostFromBackup restores partition structure, extracts the rootfs, and reinstalls GRUB.
 func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) error {
 	if logFn == nil {
 		logFn = func(string) {}

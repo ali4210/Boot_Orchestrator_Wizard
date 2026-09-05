@@ -11,13 +11,6 @@ import (
 	"strings"
 )
 
-type RealRevertParams struct {
-	DiskDevice        string `json:"disk_device"`
-	PartitionNum      string `json:"partition_num"`
-	HostPartNum       string `json:"host_part_num"`
-	EFIDirNameToPurge string `json:"efi_dir_to_purge"`
-	EFIBootEntryNum   string `json:"efi_boot_entry_num"`
-}
 
 func ExecuteRealReversion(p RealRevertParams, logFn func(string)) error {
 	if logFn == nil {
