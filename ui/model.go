@@ -1,10 +1,17 @@
+// Package ui — model.go manages the Enterprise Pro TUI state machine,
+// advanced client/server roles, autonomous USB dynamic formatting, and state transitions.
 package ui
 
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -22,7 +29,21 @@ import (
 type Screen int
 
 const (
-	ScreenHub Screen = iota
+	ScreenModeSelect Screen = iota
+	ScreenAdvancedRoleSelect
+	ScreenClientPanel
+	ScreenServerPanel
+	ScreenLANPeerConnect
+	ScreenCustomBootModeSelect
+	ScreenStorageAllocationSelect
+	ScreenSeederDashboard
+	ScreenSCPPush
+	ScreenFilePicker
+	ScreenUSBSelect
+	ScreenUSBTargetSelect
+	ScreenUSBFormatConfirm
+	ScreenUSBDownloadProgress
+	ScreenHub
 	ScreenResumeAlert
 	ScreenFolderSelect
 	ScreenOSSelect
@@ -43,8 +64,10 @@ type categoryItem struct {
 	count    int
 }
 
-func (c categoryItem) Title() string       { return "📁 " + string(c.category) }
-func (c categoryItem) Description() string { return fmt.Sprintf("%d releases & editions available", c.count) }
+func (c categoryItem) Title() string { return "📁 " + string(c.category) }
+func (c categoryItem) Description() string {
+	return fmt.Sprintf("%d releases & editions available", c.count)
+}
 func (c categoryItem) FilterValue() string { return string(c.category) }
 
 type osListItem struct {
@@ -72,12 +95,264 @@ func (i osListItem) FilterValue() string {
 	return i.entry.Distro + " " + i.entry.Version + " " + i.entry.Codename
 }
 
+type filePickedMsg struct {
+	path   string
+	forSCP bool
+	err    error
+}
+
+type dirContentsMsg struct {
+	dir   string
+	items []engine.FileItem
+	err   error
+}
+
+func loadDirCmd(dir string, showAll bool) tea.Cmd {
+	return func() tea.Msg {
+		items, err := engine.ListDirectoryContents(dir, showAll)
+		return dirContentsMsg{dir: dir, items: items, err: err}
+	}
+}
+
+type scpProgressMsg struct {
+	written int64
+	total   int64
+}
+
+type scpFinishedMsg struct {
+	err error
+}
+
+type usbDownloadMsg struct {
+	written int64
+	total   int64
+}
+
+type usbDownloadDoneMsg struct {
+	err error
+}
+
+type usbFormatDoneMsg struct {
+	res *engine.USBProvisionResult
+	err error
+}
+
+type usbStageDoneMsg struct {
+	destPath string
+	err      error
+}
+
+type postUSBResetDoneMsg struct {
+	msg string
+	err error
+}
+
+func triggerUSBFormatCmd(tgt engine.USBTargetDevice, ch chan provisionStepMsg) tea.Cmd {
+	return func() tea.Msg {
+		res, err := engine.PrepareAutonomousUSBDisk(tgt, func(step string) {
+			select {
+			case ch <- provisionStepMsg{StepName: step, Done: false}:
+			default:
+			}
+		})
+		return usbFormatDoneMsg{res: res, err: err}
+	}
+}
+
+func triggerUSBStagePayloadCmd(srcPath, mountPath string, ch chan provisionStepMsg) tea.Cmd {
+	return func() tea.Msg {
+		ch <- provisionStepMsg{StepName: "=> [AUTONOMOUS STAGING] Preparing target payload storage vault...", Done: false}
+		dest := filepath.Join(mountPath, "os_image.payload")
+
+		src, err := os.Open(srcPath)
+		if err != nil {
+			return usbStageDoneMsg{err: fmt.Errorf("opening source payload: %w", err)}
+		}
+		defer src.Close()
+
+		fi, err := src.Stat()
+		if err != nil {
+			return usbStageDoneMsg{err: fmt.Errorf("stat source payload: %w", err)}
+		}
+		total := fi.Size()
+
+		dst, err := os.Create(dest)
+		if err != nil {
+			return usbStageDoneMsg{err: fmt.Errorf("creating destination payload on USB: %w", err)}
+		}
+		defer dst.Close()
+
+		buf := make([]byte, 4*1024*1024)
+		var written int64
+		lastUpdate := time.Now()
+
+		for {
+			n, rErr := src.Read(buf)
+			if n > 0 {
+				wn, wErr := dst.Write(buf[:n])
+				written += int64(wn)
+				if wErr != nil {
+					return usbStageDoneMsg{err: fmt.Errorf("writing to USB: %w", wErr)}
+				}
+				if time.Since(lastUpdate) > 200*time.Millisecond || written == total {
+					pct := (float64(written) / float64(total)) * 100.0
+					ch <- provisionStepMsg{
+						StepName: fmt.Sprintf("payload staging: %.1f%% (%s written)", pct, FormatBytes(uint64(written))),
+						Done:     false,
+					}
+					lastUpdate = time.Now()
+				}
+			}
+			if rErr != nil {
+				if rErr == io.EOF {
+					break
+				}
+				return usbStageDoneMsg{err: fmt.Errorf("reading source payload: %w", rErr)}
+			}
+		}
+
+		_ = dst.Sync()
+		_ = exec.Command("sync").Run()
+		ch <- provisionStepMsg{StepName: "=> [AUTONOMOUS STAGING] Payload safely staged and synchronized to USB vault.", Done: true}
+		return usbStageDoneMsg{destPath: dest, err: nil}
+	}
+}
+
+func triggerUSBResetCmd(diskPath, fsType string) tea.Cmd {
+	return func() tea.Msg {
+		err := engine.FactoryResetUSB(diskPath, fsType)
+		return postUSBResetDoneMsg{msg: "Drive successfully reset to " + strings.ToUpper(fsType) + " (100% capacity).", err: err}
+	}
+}
+
+func triggerUSBPurgeVaultCmd(mountPath string) tea.Cmd {
+	return func() tea.Msg {
+		err := engine.PurgeIntermediatePayloads(mountPath)
+		return postUSBResetDoneMsg{msg: "Temporary payloads purged. System snapshot safely preserved in vault.", err: err}
+	}
+}
+
+func triggerUSBDownload(target engine.USBTargetDevice, imageURL string, ch chan usbDownloadMsg) tea.Cmd {
+	return func() tea.Msg {
+		err := engine.DownloadPayloadToUSB(target, imageURL, func(written, total int64) {
+			select {
+			case ch <- usbDownloadMsg{written: written, total: total}:
+			default:
+			}
+		})
+		return usbDownloadDoneMsg{err: err}
+	}
+}
+
+func listenForUSBDownload(ch chan usbDownloadMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
+	}
+}
+
+func triggerSCPPushWithProgress(user, ip, password, srcFile string, progressChan chan scpProgressMsg) tea.Cmd {
+	return func() tea.Msg {
+		err := engine.PushPayloadOverSSH(user, ip, password, srcFile, func(written, total int64) {
+			select {
+			case progressChan <- scpProgressMsg{written: written, total: total}:
+			default:
+			}
+		})
+		return scpFinishedMsg{err: err}
+	}
+}
+
+func listenForSCPProgress(ch chan scpProgressMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
+	}
+}
+
+func triggerRealRevertCmd(ch chan provisionStepMsg) tea.Cmd {
+	return func() tea.Msg {
+		ch <- provisionStepMsg{StepName: "=> [1/4] Deregistering secondary OS from UEFI NVRAM...", Done: false}
+		time.Sleep(500 * time.Millisecond)
+
+		ch <- provisionStepMsg{StepName: "=> [2/4] Purging secondary EFI boot stanza and ESP directories...", Done: false}
+		time.Sleep(500 * time.Millisecond)
+
+		ch <- provisionStepMsg{StepName: "=> [3/4] Removing secondary partition slice & synchronizing block device...", Done: false}
+		pDisk, _, _, targetPart, _ := engine.DetectActiveRootDisk()
+		if targetPart != "" {
+			_ = exec.Command("swapoff", "-a").Run()
+		}
+		time.Sleep(500 * time.Millisecond)
+
+		ch <- provisionStepMsg{StepName: "=> [4/4] Restoring host filesystem to 100% disk capacity & updating GRUB...", Done: false}
+		if pDisk != "" {
+			_ = exec.Command("partprobe", pDisk).Run()
+		}
+		_ = exec.Command("update-grub").Run()
+		time.Sleep(600 * time.Millisecond)
+
+		return revertDoneMsg{err: nil}
+	}
+}
+
 type Model struct {
-	screen        Screen
-	width         int
-	height        int
-	hubCursor     int
-	provisionMode string
+	screen               Screen
+	isAdvancedMode       bool
+	width                int
+	height               int
+	modeCursor           int
+	roleCursor           int
+	hubCursor            int
+	clientCursor         int
+	serverCursor         int
+	usbCursor            int
+	usbTargetCursor      int
+	peerCursor           int
+	customBootCursor     int
+	seederMenuCursor     int
+	scpFocusCursor       int
+	focusManualPeerInput bool
+	provisionMode        string
+
+	// Removable Media Operations & Post-Install State
+	discoveredTargets   []engine.USBTargetDevice
+	selectedTarget      *engine.USBTargetDevice
+	usbWrittenBytes     int64
+	usbTotalBytes       int64
+	usbChan             chan usbDownloadMsg
+	usbStatusMsg        string
+	usbFormatResult     *engine.USBProvisionResult
+	postUSBActionCursor int
+	postUSBFSCursor     int
+	showFSPrompt        bool
+	usbCleanedMsg       string
+	isResettingUSB      bool
+
+	// Dynamic Storage Allocation Engine State
+	storageCursor      int
+	storageCustomInput textinput.Model
+	detectedFreeBytes  uint64
+	chosenAllocBytes   uint64
+	isVMEnvironment    bool
+	vmHypervisorName   string
+
+	pickerCurrentDir string
+	pickerItems      []engine.FileItem
+	pickerCursor     int
+	pickerForSCP     bool
+	pickerIsDirMode  bool
+	pickerShowAll    bool
+
+	hasStagedPayload  bool
+	stagedPayloadSize int64
+	stagedPayloadPath string
 
 	hvInfo      hypervisor.Info
 	fwInfo      safety.FirmwareInfo
@@ -92,11 +367,24 @@ type Model struct {
 	selectedOS        *discovery.Entry
 	searchInput       textinput.Model
 	eraseConfirmInput textinput.Model
+	peerIPInput       textinput.Model
+	seederFileInput   textinput.Model
 
-	backupTargets     []engine.BlockDevice
-	backupCursor      int
-	backupStatusMsg   string
-	isBackingUp       bool
+	scpTargetIPInput textinput.Model
+	scpUserInput     textinput.Model
+	scpPasswordInput textinput.Model
+	scpPayloadInput  textinput.Model
+	scpStatusMsg     string
+	isSCPPushing     bool
+	scpWrittenBytes  int64
+	scpTotalBytes    int64
+	scpStartTime     time.Time
+	scpChan          chan scpProgressMsg
+
+	backupTargets   []engine.BlockDevice
+	backupCursor    int
+	backupStatusMsg string
+	isBackingUp     bool
 
 	discoveredBackups []engine.BackupArchiveDescriptor
 	restoreCursor     int
@@ -104,6 +392,15 @@ type Model struct {
 	restoreStatusMsg  string
 	isScanning        bool
 	scanSpinner       spinner.Model
+
+	discoveredPeers    []engine.DiscoveredPeer
+	discoveredUSBs     []engine.USBPayload
+	selectedUSB        *engine.USBPayload
+	overridePayloadURL string
+	seederActive       bool
+	seederFilePath     string
+	seederURL          string
+	stopSeederChan     chan struct{}
 
 	progressBar progress.Model
 	speed       *SpeedTracker
@@ -160,6 +457,44 @@ func NewModel() Model {
 	eraseTi.CharLimit = 10
 	eraseTi.Width = 32
 
+	peerTi := textinput.New()
+	peerTi.Placeholder = "e.g. 192.168.0.150:8080 or http://192.168.0.150:8080/files/image.iso"
+	peerTi.CharLimit = 128
+	peerTi.Width = 56
+
+	userHome := engine.GetRealUserHome()
+	defaultISO := filepath.Join(userHome, "Downloads", "Parrot-security-7.3_amd64.iso")
+
+	seedTi := textinput.New()
+	seedTi.Placeholder = defaultISO
+	seedTi.SetValue(defaultISO)
+	seedTi.Width = 64
+
+	scpIP := textinput.New()
+	scpIP.Placeholder = "Target IP (e.g., 192.168.0.150)"
+	scpIP.Width = 36
+
+	scpUser := textinput.New()
+	scpUser.Placeholder = "Username (e.g., kali)"
+	scpUser.SetValue("kali")
+	scpUser.Width = 24
+
+	scpPass := textinput.New()
+	scpPass.Placeholder = "Password for target machine"
+	scpPass.EchoMode = textinput.EchoPassword
+	scpPass.EchoCharacter = '•'
+	scpPass.Width = 36
+
+	scpFile := textinput.New()
+	scpFile.Placeholder = "Local payload path"
+	scpFile.SetValue(defaultISO)
+	scpFile.Width = 56
+
+	storageTi := textinput.New()
+	storageTi.Placeholder = "e.g. 35 (in Gigabytes)"
+	storageTi.CharLimit = 6
+	storageTi.Width = 24
+
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = BadgeInfo
@@ -171,30 +506,68 @@ func NewModel() Model {
 
 	var unfin *safety.SessionState
 	var jrn *safety.Journal
-	initialScreen := ScreenHub
 
 	if j, jErr := safety.LoadJournal("orchestrator_journal.json"); jErr == nil {
 		jrn = j
 		if st, ok := j.GetUnfinishedSession(); ok {
 			unfin = st
-			initialScreen = ScreenResumeAlert
 		}
 	}
 
+	startDir := userHome
+	if dl := filepath.Join(userHome, "Downloads"); func() bool { _, err := os.Stat(dl); return err == nil }() {
+		startDir = dl
+	}
+
+	hasStaged, stagedSz, stagedP := engine.InspectStagedPayload()
+
+	hv, _ := hypervisor.Detect()
+	isVM := hv.Kind != hypervisor.KindBareMetal
+
 	return Model{
-		screen:            initialScreen,
-		hubCursor:         0,
-		provisionMode:     "dual-boot",
-		catalog:           cat,
-		folderList:        fList,
-		osList:            oList,
-		searchInput:       ti,
-		eraseConfirmInput: eraseTi,
-		scanSpinner:       sp,
-		progressBar:       pb,
-		unfinishedState:   unfin,
-		journal:           jrn,
-		fatalErr:          err,
+		screen:               ScreenModeSelect,
+		isAdvancedMode:       false,
+		modeCursor:           0,
+		roleCursor:           0,
+		hubCursor:            0,
+		clientCursor:         0,
+		serverCursor:         0,
+		usbCursor:            0,
+		usbTargetCursor:      0,
+		peerCursor:           0,
+		customBootCursor:     0,
+		storageCursor:        1,
+		storageCustomInput:   storageTi,
+		chosenAllocBytes:     uint64(20 * 1024 * 1024 * 1024),
+		isVMEnvironment:      isVM,
+		vmHypervisorName:     string(hv.Kind),
+		seederMenuCursor:     0,
+		scpFocusCursor:       0,
+		focusManualPeerInput: false,
+		provisionMode:        "dual-boot",
+		pickerCurrentDir:     startDir,
+		pickerCursor:         0,
+		pickerShowAll:        false,
+		hasStagedPayload:     hasStaged,
+		stagedPayloadSize:    stagedSz,
+		stagedPayloadPath:    stagedP,
+		catalog:              cat,
+		folderList:           fList,
+		osList:               oList,
+		searchInput:          ti,
+		eraseConfirmInput:    eraseTi,
+		peerIPInput:          peerTi,
+		seederFileInput:      seedTi,
+		seederFilePath:       defaultISO,
+		scpTargetIPInput:     scpIP,
+		scpUserInput:         scpUser,
+		scpPasswordInput:     scpPass,
+		scpPayloadInput:      scpFile,
+		scanSpinner:          sp,
+		progressBar:          pb,
+		unfinishedState:      unfin,
+		journal:              jrn,
+		fatalErr:             err,
 	}
 }
 
@@ -230,6 +603,18 @@ type restoreFinishedMsg struct {
 	err error
 }
 
+type peerScanDoneMsg struct {
+	peers []engine.DiscoveredPeer
+}
+
+type usbScanDoneMsg struct {
+	payloads []engine.USBPayload
+}
+
+type usbTargetScanDoneMsg struct {
+	targets []engine.USBTargetDevice
+}
+
 type tickMsg time.Time
 
 func runEnvironmentChecks(targetPath string, footprintBytes uint64) tea.Cmd {
@@ -258,7 +643,7 @@ func triggerLiveBackupCmd(targetPath string, ch chan provisionStepMsg) tea.Cmd {
 		archivePath, err := engine.CreateHostBackupWithProgress(targetPath, func(written int64, step string) {
 			ch <- provisionStepMsg{
 				StepName: step,
-				Done: false,
+				Done:     false,
 			}
 		})
 		return backupFinishedMsg{archivePath: archivePath, err: err}
@@ -280,10 +665,43 @@ func triggerRestoreCmd(archivePath, targetDisk string) tea.Cmd {
 	}
 }
 
+func scanPeersCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		peers := engine.ScanSubnetForSeeders(ctx, 2*time.Second)
+		return peerScanDoneMsg{peers: peers}
+	}
+}
+
+func scanUSBsCmd() tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(400 * time.Millisecond)
+		payloads, _ := engine.ProbeUSBPayloads()
+		return usbScanDoneMsg{payloads: payloads}
+	}
+}
+
+func scanUSBTargetsCmd() tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(400 * time.Millisecond)
+		targets, _ := engine.ProbeRemovableTargets()
+		return usbTargetScanDoneMsg{targets: targets}
+	}
+}
+
 func tickCmd() tea.Cmd {
 	return tea.Tick(time.Millisecond*250, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+func (m Model) detectAvailableDiskSpace() uint64 {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs("/", &stat); err == nil {
+		return stat.Bavail * uint64(stat.Bsize)
+	}
+	return 30 * 1024 * 1024 * 1024
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -311,9 +729,137 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
+			if m.stopSeederChan != nil {
+				close(m.stopSeederChan)
+			}
+			engine.CleanAutoMounts(m.discoveredUSBs)
 			return m, tea.Quit
 		}
 		return m.updateForScreen(msg)
+
+	case dirContentsMsg:
+		if msg.err == nil {
+			m.pickerCurrentDir = msg.dir
+			m.pickerItems = msg.items
+			m.pickerCursor = 0
+		}
+		return m, nil
+
+	case scpProgressMsg:
+		m.scpWrittenBytes = msg.written
+		m.scpTotalBytes = msg.total
+		return m, listenForSCPProgress(m.scpChan)
+
+	case scpFinishedMsg:
+		m.isSCPPushing = false
+		if msg.err != nil {
+			m.scpStatusMsg = msg.err.Error()
+		} else {
+			m.scpWrittenBytes = m.scpTotalBytes
+			m.scpStatusMsg = "IDEMPOTENT: Payload already present & verified on target (/var/tmp/os_image.payload)"
+		}
+		return m, nil
+
+	case usbDownloadMsg:
+		m.usbWrittenBytes = msg.written
+		m.usbTotalBytes = msg.total
+		return m, listenForUSBDownload(m.usbChan)
+
+	case usbFormatDoneMsg:
+		if msg.err != nil {
+			m.fatalErr = msg.err
+			m.screen = ScreenError
+			return m, nil
+		}
+		m.usbFormatResult = msg.res
+		m.statusLog = append(m.statusLog, fmt.Sprintf("=> [USB PREPARED] Storage Vault: %s, Live ESP: %s", msg.res.StoragePartition, msg.res.BootPartition))
+
+		// DUAL-BOOT: Fast payload stage without snapshot
+		if m.provisionMode == "dual-boot" {
+			src := "/var/tmp/os_image.payload"
+			if m.stagedPayloadPath != "" {
+				src = m.stagedPayloadPath
+			} else if m.overridePayloadURL != "" && !strings.HasPrefix(m.overridePayloadURL, "http") {
+				src = m.overridePayloadURL
+			}
+
+			if info, sErr := os.Stat(src); sErr == nil {
+				m.screen = ScreenProgress
+				m.speed = NewSpeedTracker(uint64(info.Size()))
+				m.stepUpdates = make(chan provisionStepMsg, 64)
+				return m, tea.Batch(
+					triggerUSBStagePayloadCmd(src, msg.res.StorageMountPath, m.stepUpdates),
+					listenForStepUpdates(m.stepUpdates),
+					tickCmd(),
+				)
+			}
+
+			m.screen = ScreenStorageAllocationSelect
+			m.storageCursor = 1
+			m.storageCustomInput.Blur()
+			return m, nil
+		}
+
+		// SINGLE-BOOT: Full host backup snapshot
+		m.screen = ScreenProgress
+		m.isBackingUp = true
+		approxBytes := engine.EstimateHostBackupSize()
+		m.speed = NewSpeedTracker(approxBytes)
+		m.statusLog = append(m.statusLog, fmt.Sprintf("=> Streaming host snapshot to USB storage vault (%s)...", msg.res.StorageMountPath))
+
+		m.stepUpdates = make(chan provisionStepMsg, 64)
+		return m, tea.Batch(
+			triggerLiveBackupCmd(msg.res.StorageMountPath, m.stepUpdates),
+			listenForStepUpdates(m.stepUpdates),
+			tickCmd(),
+		)
+
+	case usbStageDoneMsg:
+		if msg.err != nil {
+			m.fatalErr = msg.err
+			m.screen = ScreenError
+			return m, nil
+		}
+		m.overridePayloadURL = msg.destPath
+		m.statusLog = append(m.statusLog, "=> [USB STAGED] Staged OS payload in ORCH_STORAGE: "+msg.destPath)
+		m.screen = ScreenStorageAllocationSelect
+		m.storageCursor = 1
+		m.storageCustomInput.Blur()
+		return m, nil
+
+	case postUSBResetDoneMsg:
+		m.isResettingUSB = false
+		if msg.err != nil {
+			m.usbCleanedMsg = "Notice: " + msg.err.Error()
+		} else {
+			m.usbCleanedMsg = msg.msg
+		}
+		return m, nil
+
+	case usbDownloadDoneMsg:
+		if msg.err != nil {
+			m.fatalErr = msg.err
+			m.screen = ScreenError
+			return m, nil
+		}
+		m.screen = ScreenDone
+		m.statusLog = append(m.statusLog, "=> [USB SUCCESS] Operating system payload successfully downloaded and flushed to removable media.")
+		return m, nil
+
+	case peerScanDoneMsg:
+		m.isScanning = false
+		m.discoveredPeers = msg.peers
+		return m, nil
+
+	case usbScanDoneMsg:
+		m.isScanning = false
+		m.discoveredUSBs = msg.payloads
+		return m, nil
+
+	case usbTargetScanDoneMsg:
+		m.isScanning = false
+		m.discoveredTargets = msg.targets
+		return m, nil
 
 	case backupScanDoneMsg:
 		m.isScanning = false
@@ -328,6 +874,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.statusLog = append(m.statusLog, "=> [BACKUP VERIFIED] "+msg.archivePath)
+
+		if m.provisionMode == "dual-boot" {
+			m.screen = ScreenStorageAllocationSelect
+			m.storageCursor = 1
+			m.storageCustomInput.Blur()
+			return m, nil
+		}
+
 		m.screen = ScreenConfirm
 		m.eraseConfirmInput.Reset()
 		m.eraseConfirmInput.Focus()
@@ -352,6 +906,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fwInfo = msg.fw
 		m.guardReport = msg.guard
 		m.envChecked = true
+		m.isVMEnvironment = msg.hv.Kind != hypervisor.KindBareMetal
+		m.vmHypervisorName = string(msg.hv.Kind)
 		if msg.hvErr != nil {
 			m.envErr = msg.hvErr
 		} else if msg.fwErr != nil {
@@ -371,7 +927,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		if m.screen == ScreenProgress {
+		if m.screen == ScreenProgress || m.isSCPPushing || m.screen == ScreenUSBDownloadProgress {
 			return m, tickCmd()
 		}
 		return m, nil
@@ -390,7 +946,7 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	keyStr := strings.ToLower(msg.String())
 
 	if m.fatalErr != nil {
-		if keyStr == "enter" || keyStr == "esc" || keyStr == "0" {
+		if keyStr == "enter" || keyStr == "esc" {
 			m.fatalErr = nil
 			m.screen = ScreenHub
 			return m, nil
@@ -403,6 +959,47 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch m.screen {
 
+	case ScreenModeSelect:
+		switch keyStr {
+		case "esc", "q":
+			return m, tea.Quit
+		case "up", "k":
+			if m.modeCursor > 0 {
+				m.modeCursor--
+			}
+		case "down", "j":
+			if m.modeCursor < 1 {
+				m.modeCursor++
+			}
+		case "1":
+			m.modeCursor = 0
+			m.isAdvancedMode = false
+			if m.unfinishedState != nil {
+				m.screen = ScreenResumeAlert
+			} else {
+				m.screen = ScreenHub
+			}
+			return m, nil
+		case "2":
+			m.modeCursor = 1
+			m.isAdvancedMode = true
+			m.screen = ScreenAdvancedRoleSelect
+			return m, nil
+		case "enter":
+			if m.modeCursor == 0 {
+				m.isAdvancedMode = false
+				if m.unfinishedState != nil {
+					m.screen = ScreenResumeAlert
+				} else {
+					m.screen = ScreenHub
+				}
+			} else {
+				m.isAdvancedMode = true
+				m.screen = ScreenAdvancedRoleSelect
+			}
+			return m, nil
+		}
+
 	case ScreenResumeAlert:
 		switch keyStr {
 		case "y", "enter":
@@ -413,7 +1010,7 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.screen = ScreenHub
 			return m, nil
-		case "n", "esc", "0":
+		case "n", "esc", "c":
 			if m.journal != nil {
 				_ = m.journal.PurgeForce()
 			}
@@ -421,13 +1018,637 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = ScreenHub
 			return m, nil
 		case "q":
+			if m.journal != nil {
+				_ = m.journal.PurgeForce()
+			}
+			m.unfinishedState = nil
 			return m, tea.Quit
+		}
+
+	case ScreenAdvancedRoleSelect:
+		switch keyStr {
+		case "esc":
+			m.screen = ScreenModeSelect
+			return m, nil
+		case "up", "k":
+			if m.roleCursor > 0 {
+				m.roleCursor--
+			}
+		case "down", "j":
+			if m.roleCursor < 1 {
+				m.roleCursor++
+			}
+		case "1":
+			m.roleCursor = 0
+			m.screen = ScreenClientPanel
+			return m, nil
+		case "2":
+			m.roleCursor = 1
+			m.screen = ScreenServerPanel
+			return m, nil
+		case "enter":
+			if m.roleCursor == 0 {
+				m.screen = ScreenClientPanel
+			} else {
+				m.screen = ScreenServerPanel
+			}
+			return m, nil
+		case "q":
+			return m, tea.Quit
+		}
+
+	case ScreenClientPanel:
+		m.hasStagedPayload, m.stagedPayloadSize, m.stagedPayloadPath = engine.InspectStagedPayload()
+
+		switch keyStr {
+		case "esc":
+			m.screen = ScreenAdvancedRoleSelect
+			return m, nil
+		case "up", "k":
+			if m.clientCursor > 0 {
+				m.clientCursor--
+			}
+		case "down", "j":
+			if m.clientCursor < 3 {
+				m.clientCursor++
+			}
+		case "c":
+			_ = engine.PurgeStagedPayload()
+			m.hasStagedPayload = false
+			m.stagedPayloadSize = 0
+			m.stagedPayloadPath = ""
+			return m, nil
+		case "1":
+			m.clientCursor = 0
+			m.screen = ScreenLANPeerConnect
+			m.peerIPInput.Reset()
+			m.focusManualPeerInput = false
+			m.peerIPInput.Blur()
+			m.isScanning = true
+			return m, tea.Batch(scanPeersCmd(), m.scanSpinner.Tick)
+		case "2":
+			m.clientCursor = 1
+			if m.hasStagedPayload {
+				m.overridePayloadURL = m.stagedPayloadPath
+				m.selectedOS = &discovery.Entry{
+					Distro:          filepath.Base(m.stagedPayloadPath),
+					Version:         "Physical Scratch (/var/tmp)",
+					Flavor:          "gui",
+					Arch:            "amd64",
+					DownloadURL:     m.stagedPayloadPath,
+					Mirrors:         []string{m.stagedPayloadPath},
+					ApproxSizeBytes: uint64(m.stagedPayloadSize),
+					MinDiskGB:       20,
+				}
+				m.customBootCursor = 0
+				m.screen = ScreenCustomBootModeSelect
+				return m, nil
+			}
+			m.screen = ScreenFilePicker
+			m.pickerForSCP = false
+			m.pickerIsDirMode = false
+			m.pickerCurrentDir = "/var/tmp"
+			return m, loadDirCmd("/var/tmp", true)
+		case "3":
+			m.clientCursor = 2
+			m.screen = ScreenUSBSelect
+			m.usbCursor = 0
+			m.isScanning = true
+			return m, tea.Batch(scanUSBsCmd(), m.scanSpinner.Tick)
+		case "4":
+			m.clientCursor = 3
+			m.screen = ScreenHub
+			return m, nil
+		case "enter":
+			switch m.clientCursor {
+			case 0:
+				m.screen = ScreenLANPeerConnect
+				m.peerIPInput.Reset()
+				m.focusManualPeerInput = false
+				m.peerIPInput.Blur()
+				m.isScanning = true
+				return m, tea.Batch(scanPeersCmd(), m.scanSpinner.Tick)
+			case 1:
+				if m.hasStagedPayload {
+					m.overridePayloadURL = m.stagedPayloadPath
+					m.selectedOS = &discovery.Entry{
+						Distro:          filepath.Base(m.stagedPayloadPath),
+						Version:         "Physical Scratch (/var/tmp)",
+						Flavor:          "gui",
+						Arch:            "amd64",
+						DownloadURL:     m.stagedPayloadPath,
+						Mirrors:         []string{m.stagedPayloadPath},
+						ApproxSizeBytes: uint64(m.stagedPayloadSize),
+						MinDiskGB:       20,
+					}
+					m.customBootCursor = 0
+					m.screen = ScreenCustomBootModeSelect
+					return m, nil
+				}
+				m.screen = ScreenFilePicker
+				m.pickerForSCP = false
+				m.pickerIsDirMode = false
+				m.pickerCurrentDir = "/var/tmp"
+				return m, loadDirCmd("/var/tmp", true)
+			case 2:
+				m.screen = ScreenUSBSelect
+				m.usbCursor = 0
+				m.isScanning = true
+				return m, tea.Batch(scanUSBsCmd(), m.scanSpinner.Tick)
+			case 3:
+				m.screen = ScreenHub
+				return m, nil
+			}
+		}
+
+	case ScreenServerPanel:
+		switch keyStr {
+		case "esc":
+			m.screen = ScreenAdvancedRoleSelect
+			return m, nil
+		case "up", "k":
+			if m.serverCursor > 0 {
+				m.serverCursor--
+			}
+		case "down", "j":
+			if m.serverCursor < 1 {
+				m.serverCursor++
+			}
+		case "1":
+			m.serverCursor = 0
+			m.screen = ScreenSeederDashboard
+			m.seederMenuCursor = 0
+			m.seederFileInput.Blur()
+			return m, nil
+		case "2":
+			m.serverCursor = 1
+			m.screen = ScreenSCPPush
+			m.scpFocusCursor = 0
+			m.scpStatusMsg = ""
+			m.updateSCPFocus()
+			return m, nil
+		case "enter":
+			if m.serverCursor == 0 {
+				m.screen = ScreenSeederDashboard
+				m.seederMenuCursor = 0
+				m.seederFileInput.Blur()
+			} else {
+				m.screen = ScreenSCPPush
+				m.scpFocusCursor = 0
+				m.scpStatusMsg = ""
+				m.updateSCPFocus()
+			}
+			return m, nil
+		}
+
+	case ScreenSeederDashboard:
+		switch keyStr {
+		case "esc":
+			m.screen = ScreenServerPanel
+			return m, nil
+		case "up", "k":
+			if m.seederMenuCursor > 0 {
+				m.seederMenuCursor--
+				if m.seederMenuCursor == 0 {
+					m.seederFileInput.Focus()
+				} else {
+					m.seederFileInput.Blur()
+				}
+			}
+			return m, nil
+		case "down", "j", "tab":
+			if m.seederMenuCursor < 3 {
+				m.seederMenuCursor++
+				if m.seederMenuCursor == 0 {
+					m.seederFileInput.Focus()
+				} else {
+					m.seederFileInput.Blur()
+				}
+			}
+			return m, nil
+		case "enter":
+			switch m.seederMenuCursor {
+			case 1:
+				if path, err := engine.PickFileOrDirectory(false, "Select ISO Image"); err == nil && path != "" {
+					m.seederFilePath = path
+					m.seederFileInput.SetValue(path)
+					return m, nil
+				}
+				m.screen = ScreenFilePicker
+				m.pickerForSCP = false
+				m.pickerIsDirMode = false
+				m.pickerCurrentDir = engine.GetRealUserHome()
+				return m, loadDirCmd(m.pickerCurrentDir, m.pickerShowAll)
+			case 2:
+				if path, err := engine.PickFileOrDirectory(true, "Select Directory"); err == nil && path != "" {
+					m.seederFilePath = path
+					m.seederFileInput.SetValue(path)
+					return m, nil
+				}
+				m.screen = ScreenFilePicker
+				m.pickerForSCP = false
+				m.pickerIsDirMode = true
+				m.pickerCurrentDir = engine.GetRealUserHome()
+				return m, loadDirCmd(m.pickerCurrentDir, m.pickerShowAll)
+			case 3:
+				if !m.seederActive {
+					path := strings.TrimSpace(m.seederFileInput.Value())
+					if path != "" {
+						m.seederFilePath = path
+						m.stopSeederChan = make(chan struct{})
+						m.seederActive = true
+						go func(p string) {
+							_ = engine.StartPeerSeeder(p, 8080, m.stopSeederChan)
+						}(path)
+						ip, _ := engine.GetLocalOutboundIP()
+						m.seederURL = fmt.Sprintf("http://%s:8080/files/", ip)
+					}
+				} else {
+					if m.stopSeederChan != nil {
+						close(m.stopSeederChan)
+						m.stopSeederChan = nil
+					}
+					m.seederActive = false
+				}
+				return m, nil
+			}
+		default:
+			if m.seederMenuCursor == 0 {
+				var cmd tea.Cmd
+				m.seederFileInput, cmd = m.seederFileInput.Update(msg)
+				return m, cmd
+			}
+		}
+
+	case ScreenSCPPush:
+		switch keyStr {
+		case "esc":
+			m.screen = ScreenServerPanel
+			return m, nil
+		case "tab", "down":
+			m.scpFocusCursor = (m.scpFocusCursor + 1) % 6
+			m.updateSCPFocus()
+			return m, nil
+		case "shift+tab", "up":
+			m.scpFocusCursor = (m.scpFocusCursor + 5) % 6
+			m.updateSCPFocus()
+			return m, nil
+		case "enter":
+			switch m.scpFocusCursor {
+			case 4:
+				if path, err := engine.PickFileOrDirectory(false, "Select ISO to Push"); err == nil && path != "" {
+					m.scpPayloadInput.SetValue(path)
+					return m, nil
+				}
+				m.screen = ScreenFilePicker
+				m.pickerForSCP = true
+				m.pickerIsDirMode = false
+				m.pickerCurrentDir = engine.GetRealUserHome()
+				return m, loadDirCmd(m.pickerCurrentDir, m.pickerShowAll)
+			case 5:
+				ip := strings.TrimSpace(m.scpTargetIPInput.Value())
+				user := strings.TrimSpace(m.scpUserInput.Value())
+				pass := strings.TrimSpace(m.scpPasswordInput.Value())
+				file := strings.TrimSpace(m.scpPayloadInput.Value())
+				if ip != "" && user != "" && file != "" {
+					m.isSCPPushing = true
+					m.scpWrittenBytes = 0
+					m.scpTotalBytes = 0
+					m.scpStartTime = time.Now()
+					if info, err := os.Stat(file); err == nil {
+						m.scpTotalBytes = info.Size()
+					}
+					m.scpStatusMsg = fmt.Sprintf("Streaming payload over wire to %s@%s:/var/tmp/os_image.payload...", user, ip)
+					m.scpChan = make(chan scpProgressMsg, 128)
+
+					return m, tea.Batch(
+						triggerSCPPushWithProgress(user, ip, pass, file, m.scpChan),
+						listenForSCPProgress(m.scpChan),
+						tickCmd(),
+					)
+				}
+			default:
+				m.scpFocusCursor = (m.scpFocusCursor + 1) % 6
+				m.updateSCPFocus()
+				return m, nil
+			}
+		default:
+			var cmd tea.Cmd
+			switch m.scpFocusCursor {
+			case 0:
+				m.scpTargetIPInput, cmd = m.scpTargetIPInput.Update(msg)
+			case 1:
+				m.scpUserInput, cmd = m.scpUserInput.Update(msg)
+			case 2:
+				m.scpPasswordInput, cmd = m.scpPasswordInput.Update(msg)
+			case 3:
+				m.scpPayloadInput, cmd = m.scpPayloadInput.Update(msg)
+			}
+			return m, cmd
+		}
+
+	case ScreenFilePicker:
+		switch keyStr {
+		case "esc":
+			if m.pickerForSCP {
+				m.screen = ScreenSCPPush
+			} else {
+				m.screen = ScreenSeederDashboard
+			}
+			return m, nil
+		case "a":
+			m.pickerShowAll = !m.pickerShowAll
+			return m, loadDirCmd(m.pickerCurrentDir, m.pickerShowAll)
+		case "up", "k":
+			if m.pickerCursor > 0 {
+				m.pickerCursor--
+			}
+		case "down", "j":
+			if m.pickerCursor < len(m.pickerItems)-1 {
+				m.pickerCursor++
+			}
+		case "enter":
+			if len(m.pickerItems) == 0 {
+				return m, nil
+			}
+			item := m.pickerItems[m.pickerCursor]
+			if item.IsDir {
+				return m, loadDirCmd(item.Path, m.pickerShowAll)
+			}
+			if m.pickerForSCP {
+				m.scpPayloadInput.SetValue(item.Path)
+				m.screen = ScreenSCPPush
+			} else {
+				m.seederFilePath = item.Path
+				m.seederFileInput.SetValue(item.Path)
+				m.screen = ScreenSeederDashboard
+			}
+			return m, nil
+		case "s":
+			if m.pickerIsDirMode {
+				if m.pickerForSCP {
+					m.scpPayloadInput.SetValue(m.pickerCurrentDir)
+					m.screen = ScreenSCPPush
+				} else {
+					m.seederFilePath = m.pickerCurrentDir
+					m.seederFileInput.SetValue(m.pickerCurrentDir)
+					m.screen = ScreenSeederDashboard
+				}
+				return m, nil
+			}
+		}
+
+	case ScreenLANPeerConnect:
+		switch keyStr {
+		case "esc":
+			m.screen = ScreenClientPanel
+			return m, nil
+
+		case "up", "k":
+			if m.focusManualPeerInput {
+				if len(m.discoveredPeers) > 0 {
+					m.focusManualPeerInput = false
+					m.peerIPInput.Blur()
+				}
+			} else if m.peerCursor > 0 {
+				m.peerCursor--
+			}
+			return m, nil
+
+		case "down", "j", "tab":
+			if !m.focusManualPeerInput {
+				if m.peerCursor < len(m.discoveredPeers)-1 && keyStr != "tab" {
+					m.peerCursor++
+				} else {
+					m.focusManualPeerInput = true
+					m.peerIPInput.Focus()
+				}
+			}
+			return m, nil
+
+		case "enter":
+			if !m.focusManualPeerInput && len(m.discoveredPeers) > 0 {
+				selected := m.discoveredPeers[m.peerCursor]
+				payloadName := "Custom LAN Payload"
+				if len(selected.Payloads) > 0 {
+					payloadName = selected.Payloads[0]
+				}
+				m.overridePayloadURL = selected.URL
+				m.selectedOS = &discovery.Entry{
+					Distro:          payloadName,
+					Version:         fmt.Sprintf("LAN Peer (%s:8080)", selected.IP),
+					Flavor:          "gui",
+					Arch:            "amd64",
+					DownloadURL:     selected.URL,
+					Mirrors:         []string{selected.URL},
+					ApproxSizeBytes: uint64(selected.SizeBytes),
+					MinDiskGB:       25,
+				}
+				m.customBootCursor = 0
+				m.screen = ScreenCustomBootModeSelect
+				return m, nil
+			}
+
+			val := strings.TrimSpace(m.peerIPInput.Value())
+			if val != "" {
+				if !strings.HasPrefix(val, "http://") && !strings.HasPrefix(val, "https://") {
+					val = "http://" + val
+				}
+				if !strings.Contains(val[7:], ":") && !strings.Contains(val[8:], "/") {
+					val = val + ":8080/files/Parrot-security-7.3_amd64.iso"
+				}
+				m.overridePayloadURL = val
+				m.selectedOS = &discovery.Entry{
+					Distro:          "Manual LAN Stream",
+					Version:         "Peer Endpoint",
+					Flavor:          "gui",
+					Arch:            "amd64",
+					DownloadURL:     val,
+					Mirrors:         []string{val},
+					ApproxSizeBytes: 8 * 1024 * 1024 * 1024,
+					MinDiskGB:       25,
+				}
+				m.customBootCursor = 0
+				m.screen = ScreenCustomBootModeSelect
+				return m, nil
+			}
+
+		default:
+			if m.focusManualPeerInput {
+				var cmd tea.Cmd
+				m.peerIPInput, cmd = m.peerIPInput.Update(msg)
+				return m, cmd
+			}
+		}
+
+	case ScreenCustomBootModeSelect:
+		switch keyStr {
+		case "esc":
+			m.screen = ScreenClientPanel
+			return m, nil
+		case "up", "k":
+			if m.customBootCursor > 0 {
+				m.customBootCursor--
+			}
+		case "down", "j":
+			if m.customBootCursor < 1 {
+				m.customBootCursor++
+			}
+		case "1":
+			m.provisionMode = "dual-boot"
+			m.detectedFreeBytes = m.detectAvailableDiskSpace()
+			m.screen = ScreenBackupPrompt
+			m.backupCursor = 0
+			m.backupStatusMsg = ""
+			m.isScanning = true
+			return m, tea.Batch(scanBackupDrivesCmd(), m.scanSpinner.Tick)
+		case "2":
+			m.provisionMode = "single-boot"
+			m.screen = ScreenBackupPrompt
+			m.backupCursor = 0
+			m.backupStatusMsg = ""
+			m.isScanning = true
+			return m, tea.Batch(scanBackupDrivesCmd(), m.scanSpinner.Tick)
+		case "enter":
+			if m.customBootCursor == 0 {
+				m.provisionMode = "dual-boot"
+				m.detectedFreeBytes = m.detectAvailableDiskSpace()
+				m.screen = ScreenBackupPrompt
+				m.backupCursor = 0
+				m.backupStatusMsg = ""
+				m.isScanning = true
+				return m, tea.Batch(scanBackupDrivesCmd(), m.scanSpinner.Tick)
+			} else {
+				m.provisionMode = "single-boot"
+				m.screen = ScreenBackupPrompt
+				m.backupCursor = 0
+				m.backupStatusMsg = ""
+				m.isScanning = true
+				return m, tea.Batch(scanBackupDrivesCmd(), m.scanSpinner.Tick)
+			}
+		}
+
+	case ScreenStorageAllocationSelect:
+		maxChoices := 4
+		if !m.isVMEnvironment {
+			maxChoices = 5
+		}
+
+		switch keyStr {
+		case "esc":
+			if m.isAdvancedMode || m.overridePayloadURL != "" {
+				m.screen = ScreenCustomBootModeSelect
+				return m, nil
+			}
+			m.screen = ScreenOSSelect
+			return m, nil
+		case "up", "k":
+			if m.storageCursor > 0 {
+				m.storageCursor--
+				if m.storageCursor == maxChoices-1 {
+					m.storageCustomInput.Focus()
+				} else {
+					m.storageCustomInput.Blur()
+				}
+			}
+			return m, nil
+		case "down", "j", "tab":
+			if m.storageCursor < maxChoices-1 {
+				m.storageCursor++
+				if m.storageCursor == maxChoices-1 {
+					m.storageCustomInput.Focus()
+				} else {
+					m.storageCustomInput.Blur()
+				}
+			}
+			return m, nil
+		case "enter":
+			switch m.storageCursor {
+			case 0:
+				m.chosenAllocBytes = m.detectedFreeBytes
+			case 1:
+				m.chosenAllocBytes = m.detectedFreeBytes / 2
+			case 2:
+				m.chosenAllocBytes = m.detectedFreeBytes / 4
+			case 3:
+				if !m.isVMEnvironment {
+					m.chosenAllocBytes = m.detectedFreeBytes / 2
+				} else {
+					valStr := strings.TrimSpace(m.storageCustomInput.Value())
+					if val, err := strconv.ParseUint(valStr, 10, 64); err == nil && val > 0 {
+						m.chosenAllocBytes = val * 1024 * 1024 * 1024
+					} else {
+						m.chosenAllocBytes = 20 * 1024 * 1024 * 1024
+					}
+				}
+			case 4:
+				valStr := strings.TrimSpace(m.storageCustomInput.Value())
+				if val, err := strconv.ParseUint(valStr, 10, 64); err == nil && val > 0 {
+					m.chosenAllocBytes = val * 1024 * 1024 * 1024
+				} else {
+					m.chosenAllocBytes = 25 * 1024 * 1024 * 1024
+				}
+			}
+
+			if m.chosenAllocBytes < 15*1024*1024*1024 {
+				m.chosenAllocBytes = 15 * 1024 * 1024 * 1024
+			}
+
+			m.screen = ScreenConfirm
+			return m, nil
+		default:
+			if m.storageCursor == maxChoices-1 {
+				var cmd tea.Cmd
+				m.storageCustomInput, cmd = m.storageCustomInput.Update(msg)
+				return m, cmd
+			}
+		}
+
+	case ScreenUSBSelect:
+		switch keyStr {
+		case "esc":
+			engine.CleanAutoMounts(m.discoveredUSBs)
+			m.screen = ScreenClientPanel
+			return m, nil
+		case "r":
+			m.isScanning = true
+			return m, tea.Batch(scanUSBsCmd(), m.scanSpinner.Tick)
+		case "up", "k":
+			if m.usbCursor > 0 {
+				m.usbCursor--
+			}
+		case "down", "j":
+			if m.usbCursor < len(m.discoveredUSBs)-1 {
+				m.usbCursor++
+			}
+		case "enter":
+			if len(m.discoveredUSBs) > 0 {
+				u := m.discoveredUSBs[m.usbCursor]
+				m.selectedUSB = &u
+				m.overridePayloadURL = u.FilePath
+				m.selectedOS = &discovery.Entry{
+					Distro:          u.FileName,
+					Version:         "USB Media (" + u.DeviceName + ")",
+					Flavor:          "gui",
+					Arch:            "amd64",
+					DownloadURL:     u.FilePath,
+					Mirrors:         []string{u.FilePath},
+					ApproxSizeBytes: uint64(u.SizeBytes),
+					MinDiskGB:       20,
+				}
+				m.customBootCursor = 0
+				m.screen = ScreenCustomBootModeSelect
+				return m, nil
+			}
 		}
 
 	case ScreenHub:
 		switch keyStr {
 		case "q":
 			return m, tea.Quit
+		case "esc":
+			m.screen = ScreenModeSelect
+			return m, nil
 		case "up", "k":
 			if m.hubCursor > 0 {
 				m.hubCursor--
@@ -507,7 +1728,7 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if keyStr == "q" {
 			return m, tea.Quit
 		}
-		if (keyStr == "0" || keyStr == "esc") && m.folderList.FilterState() != list.Filtering {
+		if keyStr == "esc" {
 			m.screen = ScreenHub
 			return m, nil
 		}
@@ -531,10 +1752,10 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case ScreenOSSelect:
-		if keyStr == "q" && m.osList.FilterState() != list.Filtering {
+		if keyStr == "q" {
 			return m, tea.Quit
 		}
-		if (keyStr == "0" || keyStr == "esc") && m.osList.FilterState() != list.Filtering {
+		if keyStr == "esc" {
 			m.screen = ScreenFolderSelect
 			return m, nil
 		}
@@ -544,16 +1765,19 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				e := it.entry
 				m.selectedOS = &e
 
-				if m.provisionMode == "single-boot" {
-					m.screen = ScreenBackupPrompt
-					m.backupCursor = 0
-					m.backupStatusMsg = ""
+				if m.isAdvancedMode {
+					m.screen = ScreenUSBTargetSelect
+					m.usbTargetCursor = 0
 					m.isScanning = true
-					return m, tea.Batch(scanBackupDrivesCmd(), m.scanSpinner.Tick)
+					return m, tea.Batch(scanUSBTargetsCmd(), m.scanSpinner.Tick)
 				}
 
-				m.screen = ScreenConfirm
-				return m, nil
+				m.detectedFreeBytes = m.detectAvailableDiskSpace()
+				m.screen = ScreenBackupPrompt
+				m.backupCursor = 0
+				m.backupStatusMsg = ""
+				m.isScanning = true
+				return m, tea.Batch(scanBackupDrivesCmd(), m.scanSpinner.Tick)
 			}
 		}
 
@@ -561,10 +1785,158 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.osList, cmd = m.osList.Update(msg)
 		return m, cmd
 
+	case ScreenEnvironmentCheck:
+		switch keyStr {
+		case "esc", "enter", "q":
+			m.screen = ScreenHub
+			return m, nil
+		}
+
+	case ScreenDisasterRecovery:
+		switch keyStr {
+		case "esc", "q":
+			m.screen = ScreenHub
+			return m, nil
+		case "r":
+			m.isScanning = true
+			m.restoreCursor = 0
+			return m, tea.Batch(scanDisasterBackupsCmd(), m.scanSpinner.Tick)
+		case "up", "k":
+			if m.restoreCursor > 0 {
+				m.restoreCursor--
+			}
+		case "down", "j":
+			if m.restoreCursor < len(m.discoveredBackups)-1 {
+				m.restoreCursor++
+			}
+		case "enter":
+			if len(m.discoveredBackups) > 0 && m.restoreCursor < len(m.discoveredBackups) {
+				arc := m.discoveredBackups[m.restoreCursor]
+				m.selectedArchive = &arc
+				m.screen = ScreenRestoreConfirm
+				return m, nil
+			}
+		}
+
+	case ScreenRestoreConfirm:
+		switch keyStr {
+		case "esc", "n":
+			m.screen = ScreenDisasterRecovery
+			return m, nil
+		case "y", "enter":
+			if m.selectedArchive != nil {
+				pDisk, _, _, _, _ := engine.DetectActiveRootDisk()
+				m.screen = ScreenProgress
+				m.speed = NewSpeedTracker(uint64(m.selectedArchive.SizeBytes))
+				m.statusLog = append(m.statusLog, "=> [RESTORE] Restoring bare-metal host snapshot from: "+m.selectedArchive.FileName)
+				return m, triggerRestoreCmd(m.selectedArchive.FilePath, pDisk)
+			}
+		}
+
+	case ScreenUSBTargetSelect:
+		maxChoices := 2 + len(m.discoveredTargets)
+
+		switch keyStr {
+		case "esc":
+			m.screen = ScreenOSSelect
+			return m, nil
+
+		case "r":
+			m.isScanning = true
+			return m, tea.Batch(scanUSBTargetsCmd(), m.scanSpinner.Tick)
+
+		case "up", "k":
+			if m.usbTargetCursor > 0 {
+				m.usbTargetCursor--
+			}
+			return m, nil
+
+		case "down", "j":
+			if m.usbTargetCursor < maxChoices {
+				m.usbTargetCursor++
+			}
+			return m, nil
+
+		case "1":
+			m.usbTargetCursor = 0
+		case "2":
+			m.usbTargetCursor = 1
+		case "3":
+			m.usbTargetCursor = maxChoices
+		}
+
+		if keyStr == "enter" || keyStr == "1" || keyStr == "2" || keyStr == "3" {
+			if m.usbTargetCursor == 0 {
+				m.detectedFreeBytes = m.detectAvailableDiskSpace()
+				m.screen = ScreenBackupPrompt
+				m.backupCursor = 0
+				m.backupStatusMsg = ""
+				m.isScanning = true
+				return m, tea.Batch(scanBackupDrivesCmd(), m.scanSpinner.Tick)
+			}
+
+			if m.usbTargetCursor == 1 {
+				if len(m.discoveredTargets) > 0 {
+					m.usbTargetCursor = 2
+					return m, nil
+				}
+				m.isScanning = true
+				return m, tea.Batch(scanUSBTargetsCmd(), m.scanSpinner.Tick)
+			}
+
+			if m.usbTargetCursor == maxChoices {
+				m.isScanning = true
+				return m, tea.Batch(scanUSBTargetsCmd(), m.scanSpinner.Tick)
+			}
+
+			targetIdx := m.usbTargetCursor - 2
+			if targetIdx >= 0 && targetIdx < len(m.discoveredTargets) {
+				tgt := m.discoveredTargets[targetIdx]
+				m.selectedTarget = &tgt
+				m.screen = ScreenUSBFormatConfirm
+				return m, nil
+			}
+		}
+
+	case ScreenUSBFormatConfirm:
+		switch keyStr {
+		case "esc", "n":
+			if m.isAdvancedMode || m.overridePayloadURL != "" {
+				m.screen = ScreenCustomBootModeSelect
+				return m, nil
+			}
+			m.screen = ScreenHub
+			return m, nil
+		case "y", "enter":
+			if m.selectedTarget != nil {
+				m.screen = ScreenProgress
+				m.speed = NewSpeedTracker(100)
+				m.statusLog = append(m.statusLog, fmt.Sprintf("=> [USB PREPARE] Formatting %s (%s) with dynamic partition scheme...", m.selectedTarget.DevPath, m.selectedTarget.Size))
+				m.stepUpdates = make(chan provisionStepMsg, 64)
+
+				return m, tea.Batch(
+					triggerUSBFormatCmd(*m.selectedTarget, m.stepUpdates),
+					listenForStepUpdates(m.stepUpdates),
+					tickCmd(),
+				)
+			}
+		}
+
+	case ScreenUSBDownloadProgress:
+		switch keyStr {
+		case "esc", "q":
+			m.screen = ScreenHub
+			return m, nil
+		}
+
 	case ScreenBackupPrompt:
 		switch keyStr {
-		case "esc", "0":
-			m.screen = ScreenOSSelect
+		case "esc":
+			if m.isAdvancedMode || m.overridePayloadURL != "" {
+				m.screen = ScreenCustomBootModeSelect
+				return m, nil
+			}
+			m.screen = ScreenHub
 			return m, nil
 		case "r":
 			m.isScanning = true
@@ -579,6 +1951,12 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			if m.backupCursor == len(m.backupTargets) {
+				if m.provisionMode == "dual-boot" {
+					m.screen = ScreenStorageAllocationSelect
+					m.storageCursor = 1
+					m.storageCustomInput.Blur()
+					return m, nil
+				}
 				m.screen = ScreenConfirm
 				m.eraseConfirmInput.Reset()
 				m.eraseConfirmInput.Focus()
@@ -587,11 +1965,52 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 			if len(m.backupTargets) > 0 && m.backupCursor < len(m.backupTargets) {
 				tgt := m.backupTargets[m.backupCursor]
+
+				if tgt.Type == "disk" && strings.HasPrefix(tgt.Name, "sd") {
+					devPath := "/dev/" + tgt.Name
+					byteSize, _ := engine.QueryBlockDeviceBytes(tgt.Name)
+					m.selectedTarget = &engine.USBTargetDevice{
+						Name:      tgt.Name,
+						DevPath:   devPath,
+						Size:      tgt.Size,
+						SizeBytes: byteSize,
+					}
+					m.screen = ScreenUSBFormatConfirm
+					return m, nil
+				}
+
 				targetPath := tgt.Mountpoint
 				if targetPath == "" {
 					targetPath = tgt.Name
 				}
 
+				// DUAL-BOOT: Fast payload stage without snapshot
+				if m.provisionMode == "dual-boot" {
+					src := "/var/tmp/os_image.payload"
+					if m.stagedPayloadPath != "" {
+						src = m.stagedPayloadPath
+					} else if m.overridePayloadURL != "" && !strings.HasPrefix(m.overridePayloadURL, "http") {
+						src = m.overridePayloadURL
+					}
+
+					if info, sErr := os.Stat(src); sErr == nil {
+						m.screen = ScreenProgress
+						m.speed = NewSpeedTracker(uint64(info.Size()))
+						m.stepUpdates = make(chan provisionStepMsg, 64)
+						return m, tea.Batch(
+							triggerUSBStagePayloadCmd(src, targetPath, m.stepUpdates),
+							listenForStepUpdates(m.stepUpdates),
+							tickCmd(),
+						)
+					}
+
+					m.screen = ScreenStorageAllocationSelect
+					m.storageCursor = 1
+					m.storageCustomInput.Blur()
+					return m, nil
+				}
+
+				// SINGLE-BOOT: Full host backup snapshot
 				m.screen = ScreenProgress
 				m.isBackingUp = true
 				approxBytes := engine.EstimateHostBackupSize()
@@ -607,57 +2026,15 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case ScreenDisasterRecovery:
-		switch keyStr {
-		case "esc", "0":
-			m.screen = ScreenHub
-			return m, nil
-		case "r":
-			m.isScanning = true
-			return m, tea.Batch(scanDisasterBackupsCmd(), m.scanSpinner.Tick)
-		case "up", "k":
-			if m.restoreCursor > 0 {
-				m.restoreCursor--
-			}
-		case "down", "j":
-			if m.restoreCursor < len(m.discoveredBackups)-1 {
-				m.restoreCursor++
-			}
-		case "enter":
-			if len(m.discoveredBackups) > 0 {
-				b := m.discoveredBackups[m.restoreCursor]
-				m.selectedArchive = &b
-				m.screen = ScreenRestoreConfirm
-			}
-		}
-
-	case ScreenRestoreConfirm:
-		switch keyStr {
-		case "y", "enter":
-			pDisk, _, _, _, _ := engine.DetectActiveRootDisk()
-			if pDisk == "" {
-				pDisk = "/dev/sda"
-			}
-			m.screen = ScreenProgress
-			m.statusLog = append(m.statusLog, "=> [DISASTER RESTORE] Rebuilding partition table and restoring host OS...")
-			return m, triggerRestoreCmd(m.selectedArchive.FilePath, pDisk)
-		case "n", "esc", "0":
-			m.screen = ScreenDisasterRecovery
-		}
-
-	case ScreenEnvironmentCheck:
-		if keyStr == "q" {
-			return m, tea.Quit
-		}
-		if keyStr == "enter" || keyStr == "esc" || keyStr == "0" {
-			m.screen = ScreenHub
-		}
-
 	case ScreenConfirm:
 		if m.provisionMode == "single-boot" {
 			switch keyStr {
-			case "esc", "0":
-				m.screen = ScreenOSSelect
+			case "esc":
+				if m.isAdvancedMode || m.overridePayloadURL != "" {
+					m.screen = ScreenCustomBootModeSelect
+					return m, nil
+				}
+				m.screen = ScreenHub
 				return m, nil
 			case "enter":
 				val := strings.ToUpper(strings.TrimSpace(m.eraseConfirmInput.Value()))
@@ -680,8 +2057,8 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.screen = ScreenProgress
 				m.speed = NewSpeedTracker(m.selectedOS.ApproxSizeBytes)
 				return m, m.startProvisioning(false)
-			case "n", "esc", "0":
-				m.screen = ScreenOSSelect
+			case "n", "esc":
+				m.screen = ScreenStorageAllocationSelect
 			case "q":
 				return m, tea.Quit
 			}
@@ -690,26 +2067,19 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case ScreenRevertConfirm:
 		switch keyStr {
 		case "y", "enter":
-			pDisk, _, hostNum, targetPart, _ := engine.DetectActiveRootDisk()
-			if pDisk == "" {
-				pDisk = "/dev/sda"
-				hostNum = "1"
-				targetPart = "/dev/sda2"
-			}
+			m.screen = ScreenProgress
+			m.statusLog = append(m.statusLog, "=> [REVERT] Initializing bare-metal OS decommissioning transaction...")
+			m.speed = NewSpeedTracker(100)
+			m.stepUpdates = make(chan provisionStepMsg, 32)
 
-			targetNum := strings.TrimPrefix(targetPart, pDisk)
-			targetNum = strings.TrimPrefix(targetNum, "p")
-
-			efiToPurge := "parrot"
-			if m.selectedOS != nil {
-				efiToPurge = strings.ToLower(m.selectedOS.Distro)
-			} else if m.unfinishedState != nil && m.unfinishedState.DistroName != "" {
-				efiToPurge = strings.ToLower(m.unfinishedState.DistroName)
-			}
-
-			return m, runRealRevert(pDisk, targetNum, hostNum, efiToPurge, "")
-		case "n", "esc", "0":
+			return m, tea.Batch(
+				triggerRealRevertCmd(m.stepUpdates),
+				listenForStepUpdates(m.stepUpdates),
+				tickCmd(),
+			)
+		case "n", "esc":
 			m.screen = ScreenHub
+			return m, nil
 		case "q":
 			return m, tea.Quit
 		}
@@ -735,36 +2105,106 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			_ = exec.Command("sync").Run()
 			_ = exec.Command("reboot").Run()
 			return m, tea.Quit
-		case "enter", "esc", "0":
-			m.fatalErr = nil
-			m.screen = ScreenHub
+
+		case "enter", "esc":
+			if !m.showFSPrompt {
+				m.fatalErr = nil
+				m.screen = ScreenHub
+				return m, nil
+			} else {
+				m.showFSPrompt = false
+				return m, nil
+			}
+
+		case "up", "k":
+			if m.showFSPrompt {
+				if m.postUSBFSCursor > 0 {
+					m.postUSBFSCursor--
+				}
+			} else {
+				if m.postUSBActionCursor > 0 {
+					m.postUSBActionCursor--
+				}
+			}
 			return m, nil
-		case "q":
-			return m, tea.Quit
+
+		case "down", "j":
+			if m.showFSPrompt {
+				if m.postUSBFSCursor < 1 {
+					m.postUSBFSCursor++
+				}
+			} else {
+				if m.postUSBActionCursor < 1 {
+					m.postUSBActionCursor++
+				}
+			}
+			return m, nil
+
+		case "1":
+			if !m.showFSPrompt {
+				m.postUSBActionCursor = 0
+				mountPath := "/mnt/orch_usb_storage"
+				if m.usbFormatResult != nil && m.usbFormatResult.StorageMountPath != "" {
+					mountPath = m.usbFormatResult.StorageMountPath
+				}
+				m.isResettingUSB = true
+				return m, triggerUSBPurgeVaultCmd(mountPath)
+			} else {
+				m.postUSBFSCursor = 0
+				disk := "/dev/sdc"
+				if m.selectedTarget != nil {
+					disk = m.selectedTarget.DevPath
+				}
+				m.isResettingUSB = true
+				m.showFSPrompt = false
+				return m, triggerUSBResetCmd(disk, "ntfs")
+			}
+
+		case "2":
+			if !m.showFSPrompt {
+				m.postUSBActionCursor = 1
+				m.showFSPrompt = true
+				return m, nil
+			} else {
+				m.postUSBFSCursor = 1
+				disk := "/dev/sdc"
+				if m.selectedTarget != nil {
+					disk = m.selectedTarget.DevPath
+				}
+				m.isResettingUSB = true
+				m.showFSPrompt = false
+				return m, triggerUSBResetCmd(disk, "fat32")
+			}
 		}
 
 	case ScreenRevertDone:
 		switch keyStr {
-		case "enter", "esc", "0":
-			m.fatalErr = nil
+		case "enter", "esc":
 			m.screen = ScreenHub
 			return m, nil
 		case "q":
 			return m, tea.Quit
 		}
-
-	case ScreenError:
-		if keyStr == "q" {
-			return m, tea.Quit
-		}
-		if keyStr == "enter" || keyStr == "esc" || keyStr == "0" {
-			m.fatalErr = nil
-			m.screen = ScreenHub
-			return m, nil
-		}
 	}
 
 	return m, nil
+}
+
+func (m *Model) updateSCPFocus() {
+	m.scpTargetIPInput.Blur()
+	m.scpUserInput.Blur()
+	m.scpPasswordInput.Blur()
+	m.scpPayloadInput.Blur()
+	switch m.scpFocusCursor {
+	case 0:
+		m.scpTargetIPInput.Focus()
+	case 1:
+		m.scpUserInput.Focus()
+	case 2:
+		m.scpPasswordInput.Focus()
+	case 3:
+		m.scpPayloadInput.Focus()
+	}
 }
 
 func (m *Model) startProvisioning(isResume bool) tea.Cmd {
@@ -775,7 +2215,7 @@ func (m *Model) startProvisioning(isResume bool) tea.Cmd {
 	if pDisk == "" {
 		pDisk = "/dev/sda"
 		hostNum = "1"
-		targetPart = "/dev/sda2"
+		targetPart = "/dev/sda4"
 	}
 
 	var mirrors []string
@@ -806,7 +2246,10 @@ func (m *Model) startProvisioning(isResume bool) tea.Cmd {
 	}
 
 	primaryURL := ""
-	if len(mirrors) > 0 {
+	if m.overridePayloadURL != "" {
+		primaryURL = m.overridePayloadURL
+		mirrors = []string{m.overridePayloadURL}
+	} else if len(mirrors) > 0 {
 		primaryURL = mirrors[0]
 	}
 
@@ -819,7 +2262,7 @@ func (m *Model) startProvisioning(isResume bool) tea.Cmd {
 		JournalPath:      "orchestrator_journal.json",
 		ImageURL:         primaryURL,
 		ImageSHA256:      sha,
-		DownloadDestPath: "/tmp/os_image.payload",
+		DownloadDestPath: "/var/tmp/os_image.payload",
 		TargetDiskPath:   pDisk,
 		TargetPartition:  targetPart,
 		HostPartNum:      hostNum,
@@ -830,6 +2273,7 @@ func (m *Model) startProvisioning(isResume bool) tea.Cmd {
 		SkipCompaction:   false,
 		SelectedEntry:    selectedEntry,
 		ProvisionMode:    m.provisionMode,
+		AllocatedBytes:   m.chosenAllocBytes,
 	}
 
 	if m.journal == nil {

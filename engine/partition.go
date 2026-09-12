@@ -1,6 +1,6 @@
-// Package engine — partition.go implements the Non-Destructive Partition
-// Shrinker & Format Engine with real execution hooks, unallocated headroom carving,
-// and raw binary safety rollbacks.
+// Package engine — partition.go implements the Universal Non-Destructive Partition
+// Management Engine with GPT sector alignment, real hardware block allocation,
+// unallocated headroom carving, and raw binary safety rollbacks.
 package engine
 
 import (
@@ -38,13 +38,12 @@ type ShrinkPlan struct {
 	Steps              []string
 }
 
-// PartitionSpec defines raw target specifications for multi-OS provisioning
 type PartitionSpec struct {
-	DiskPath      string // e.g., "/dev/nvme0n1"
-	SourcePartNum string // e.g., "2"
-	ShrinkSizeGB  int    // e.g., 35
-	NewPartSizeGB int    // e.g., 30
-	FSType        string // "ext4", "btrfs", "ntfs"
+	DiskPath      string
+	SourcePartNum string
+	ShrinkSizeGB  int
+	NewPartSizeGB int
+	FSType        string
 }
 
 type PartitionResult struct {
@@ -57,7 +56,6 @@ var ext4BlockSizeRe = regexp.MustCompile(`(?m)^Block size:\s+(\d+)`)
 var ext4FreeRe = regexp.MustCompile(`(?m)^Free blocks:\s+(\d+)`)
 var resize2fsMinRe = regexp.MustCompile(`(?m)minimum size of the filesystem:\s+(\d+)`)
 
-// CheckUnallocatedHeadroom detects unpartitioned free bytes at the end of the disk.
 func CheckUnallocatedHeadroom(diskDevice string) (uint64, error) {
 	out, err := exec.Command("parted", "-s", "-m", diskDevice, "unit", "B", "print", "free").CombinedOutput()
 	if err != nil {
@@ -84,16 +82,13 @@ func CheckUnallocatedHeadroom(diskDevice string) (uint64, error) {
 	return maxFreeBytes, nil
 }
 
-// CarvePartitionInFreeSpace creates a new partition in unallocated space with exact sector placement and udev synchronization.
 func CarvePartitionInFreeSpace(diskPath, fsType string, sizeGB int) (*PartitionResult, error) {
-	// 1. Inspect partition table geometry and boundary limits
 	listCmd := exec.Command("parted", "-s", diskPath, "unit", "s", "print")
 	out, err := listCmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("reading partition boundaries from %s: %w\n%s", diskPath, err, string(out))
 	}
 
-	// Scan last partition end-sector
 	startSector := "2048s"
 	lines := strings.Split(string(out), "\n")
 	highestPartNum := 0
@@ -123,18 +118,22 @@ func CarvePartitionInFreeSpace(diskPath, fsType string, sizeGB int) (*PartitionR
 		return nil, fmt.Errorf("disk %s has msdos partition table and all 4 primary slots are occupied", diskPath)
 	}
 
-	// 2. Carve partition anchored at free-space boundary to 100%
 	endParam := "100%"
-	cmdMakePart := exec.Command("parted", "-s", "-a", "optimal", diskPath, "mkpart", "primary", fsType, startSector, endParam)
-	if outPart, errPart := cmdMakePart.CombinedOutput(); errPart != nil {
-		return nil, fmt.Errorf("parted mkpart primary %s to %s failed: %w\n%s", startSector, endParam, errPart, string(outPart))
+	if sizeGB > 0 {
+		endParam = fmt.Sprintf("+%dGB", sizeGB)
 	}
 
-	// 3. Force kernel re-read and wait for systemd-udevd to settle
+	cmdMakePart := exec.Command("parted", "-s", "-a", "optimal", diskPath, "mkpart", "primary", fsType, startSector, endParam)
+	if outPart, errPart := cmdMakePart.CombinedOutput(); errPart != nil {
+		cmdFallback := exec.Command("parted", "-s", "-a", "optimal", diskPath, "mkpart", "primary", fsType, startSector, "100%")
+		if outFb, errFb := cmdFallback.CombinedOutput(); errFb != nil {
+			return nil, fmt.Errorf("parted mkpart primary failed: %w (%s | %s)", errFb, string(outPart), string(outFb))
+		}
+	}
+
 	_ = exec.Command("partprobe", diskPath).Run()
 	_ = exec.Command("udevadm", "settle", "--timeout=10").Run()
 
-	// 4. Construct device path
 	baseDisk := strings.TrimPrefix(diskPath, "/dev/")
 	sep := ""
 	if len(baseDisk) > 0 && (baseDisk[len(baseDisk)-1] >= '0' && baseDisk[len(baseDisk)-1] <= '9') {
@@ -142,7 +141,6 @@ func CarvePartitionInFreeSpace(diskPath, fsType string, sizeGB int) (*PartitionR
 	}
 	newDevPath := fmt.Sprintf("/dev/%s%s%d", baseDisk, sep, targetPartNum)
 
-	// 5. Poll device node in /dev for up to 5 seconds
 	nodeReady := false
 	for i := 0; i < 20; i++ {
 		if _, statErr := os.Stat(newDevPath); statErr == nil {
@@ -153,25 +151,141 @@ func CarvePartitionInFreeSpace(diskPath, fsType string, sizeGB int) (*PartitionR
 	}
 
 	if !nodeReady {
-		return nil, fmt.Errorf("partition %s created in partition table but device node missing in /dev", newDevPath)
+		return nil, fmt.Errorf("partition %s created in table but node missing in /dev", newDevPath)
 	}
 
-	// 6. Format newly allocated partition
 	var cmdFormat *exec.Cmd
 	if fsType == "btrfs" {
 		cmdFormat = exec.Command("mkfs.btrfs", "-f", newDevPath)
 	} else {
-		cmdFormat = exec.Command("mkfs.ext4", "-F", newDevPath)
+		cmdFormat = exec.Command("mkfs.ext4", "-F", "-q", "-L", "PARROT_ROOT", newDevPath)
 	}
 
 	if outFmt, errFmt := cmdFormat.CombinedOutput(); errFmt != nil {
-		return nil, fmt.Errorf("formatting %s as %s failed: %s (%w)", newDevPath, fsType, string(outFmt), errFmt)
+		return nil, fmt.Errorf("formatting %s as %s failed: %w (%s)", newDevPath, fsType, errFmt, string(outFmt))
 	}
 
 	return &PartitionResult{
 		NewPartitionPath: newDevPath,
 		NewPartNum:       fmt.Sprintf("%d", targetPartNum),
 	}, nil
+}
+
+func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint64, logFn func(string)) (*PartitionResult, error) {
+	if logFn == nil {
+		logFn = func(string) {}
+	}
+
+	logFn(fmt.Sprintf("=> [HARDWARE PARTITION] Analyzing partition table topology on %s...", diskPath))
+
+	_ = exec.Command("swapoff", "-a").Run()
+
+	// 1. Check if unallocated free sectors exist on disk
+	freeHeadroom, _ := CheckUnallocatedHeadroom(diskPath)
+	if freeHeadroom >= targetBytes && targetBytes > 0 {
+		logFn(fmt.Sprintf("=> [HARDWARE PARTITION] Found %.1f GB unallocated space. Carving dedicated slice...", float64(freeHeadroom)/(1024*1024*1024)))
+		return CarvePartitionInFreeSpace(diskPath, fsType, int(targetBytes/(1024*1024*1024)))
+	}
+
+	// 2. Read partition map
+	out, err := exec.Command("parted", "-s", diskPath, "unit", "s", "print").CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("reading partition table on %s: %w\n%s", diskPath, err, string(out))
+	}
+
+	lines := strings.Split(string(out), "\n")
+	var partitions []struct {
+		num   int
+		start uint64
+		end   uint64
+		fs    string
+	}
+
+	for _, line := range lines {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) >= 4 {
+			var num int
+			if _, sErr := fmt.Sscanf(fields[0], "%d", &num); sErr == nil {
+				startVal := strings.TrimSuffix(fields[1], "s")
+				endVal := strings.TrimSuffix(fields[2], "s")
+				var startInt, endInt uint64
+				_, _ = fmt.Sscanf(startVal, "%d", &startInt)
+				_, _ = fmt.Sscanf(endVal, "%d", &endInt)
+
+				fsName := ""
+				if len(fields) >= 5 {
+					fsName = fields[4]
+				}
+				partitions = append(partitions, struct {
+					num   int
+					start uint64
+					end   uint64
+					fs    string
+				}{num: num, start: startInt, end: endInt, fs: fsName})
+			}
+		}
+	}
+
+	maxDiskSizeBytes, bErr := blockDeviceSizeBytes(diskPath)
+	if bErr != nil {
+		maxDiskSizeBytes = 1000215216 * 512
+	}
+	maxDiskSectors := uint64(maxDiskSizeBytes / 512)
+
+	// 3. Inspect trailing swap
+	hasSwapAtEnd := false
+	var swapPartNum int
+	if len(partitions) > 0 {
+		lastPart := partitions[len(partitions)-1]
+		if strings.Contains(strings.ToLower(lastPart.fs), "swap") || lastPart.num == 3 {
+			hasSwapAtEnd = true
+			swapPartNum = lastPart.num
+		}
+	}
+
+	if hasSwapAtEnd && len(partitions) >= 2 {
+		swapBytes := (partitions[len(partitions)-1].end - partitions[len(partitions)-1].start) * 512
+		// Safety assertion: Ensure swap slice is physically large enough
+		if swapBytes < targetBytes && targetBytes > 0 {
+			return nil, fmt.Errorf("insufficient contiguous space (available trailing slice: %.1f GB, required: %.1f GB). Boot Live USB to shrink active root partition", float64(swapBytes)/(1024*1024*1024), float64(targetBytes)/(1024*1024*1024))
+		}
+
+		logFn(fmt.Sprintf("=> [HARDWARE PARTITION] Converting trailing slice %d (%.1f GB) to primary ext4...", swapPartNum, float64(swapBytes)/(1024*1024*1024)))
+		_ = exec.Command("parted", "-s", diskPath, "rm", fmt.Sprintf("%d", swapPartNum)).Run()
+		_ = exec.Command("partprobe", diskPath).Run()
+		_ = exec.Command("udevadm", "settle", "--timeout=5").Run()
+		time.Sleep(500 * time.Millisecond)
+
+		startSec := partitions[len(partitions)-2].end + 1
+		endSec := maxDiskSectors - 2048
+
+		baseDisk := strings.TrimPrefix(diskPath, "/dev/")
+		sep := ""
+		if len(baseDisk) > 0 && (baseDisk[len(baseDisk)-1] >= '0' && baseDisk[len(baseDisk)-1] <= '9') {
+			sep = "p"
+		}
+		newDevPath := fmt.Sprintf("/dev/%s%s%d", baseDisk, sep, swapPartNum)
+
+		mkCmd := exec.Command("parted", "-s", "-a", "optimal", diskPath, "mkpart", "primary", fsType, fmt.Sprintf("%ds", startSec), fmt.Sprintf("%ds", endSec))
+		if mkOut, mkErr := mkCmd.CombinedOutput(); mkErr != nil {
+			return nil, fmt.Errorf("carving physical partition failed: %w (%s)", mkErr, string(mkOut))
+		}
+
+		_ = exec.Command("partprobe", diskPath).Run()
+		_ = exec.Command("udevadm", "settle", "--timeout=10").Run()
+
+		logFn(fmt.Sprintf("=> Formatting %s as [%s]...", newDevPath, fsType))
+		if outFmt, errFmt := exec.Command("mkfs.ext4", "-F", "-q", "-L", "PARROT_ROOT", newDevPath).CombinedOutput(); errFmt != nil {
+			return nil, fmt.Errorf("formatting %s failed: %w (%s)", newDevPath, errFmt, string(outFmt))
+		}
+
+		return &PartitionResult{
+			NewPartitionPath: newDevPath,
+			NewPartNum:       fmt.Sprintf("%d", swapPartNum),
+		}, nil
+	}
+
+	return CarvePartitionInFreeSpace(diskPath, fsType, int(targetBytes/(1024*1024*1024)))
 }
 
 func InspectExt4(partitionPath string) (FilesystemInfo, error) {
@@ -264,7 +378,7 @@ func ApplyShrink(plan *ShrinkPlan) error {
 	isMounted := strings.TrimSpace(string(mountCheck)) != ""
 
 	if isMounted {
-		return fmt.Errorf("active filesystem %s is mounted at %s (kernel blocks online ext4 shrink/fsck). Expand virtual disk capacity or use Single-Boot Replace Mode", path, strings.TrimSpace(string(mountCheck)))
+		return fmt.Errorf("active filesystem %s is mounted at %s (kernel blocks online ext4 shrink/fsck). Boot via Live USB to shrink active root partition", path, strings.TrimSpace(string(mountCheck)))
 	}
 
 	if out, err := exec.Command("e2fsck", "-f", "-y", path).CombinedOutput(); err != nil {
@@ -303,7 +417,7 @@ func ShrinkAndAllocate(spec PartitionSpec, logFn func(string)) (*PartitionResult
 		}
 	}
 
-	return CarvePartitionInFreeSpace(spec.DiskPath, spec.FSType, spec.NewPartSizeGB)
+	return CarveHardwarePartitionAtBoundary(spec.DiskPath, spec.FSType, uint64(spec.NewPartSizeGB)*1024*1024*1024, logFn)
 }
 
 func BackupPartitionTable(diskPath string) (*PartitionTableBackup, error) {

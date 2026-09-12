@@ -43,11 +43,12 @@
     "flavor": "gui",
     "arch": "amd64",
     "min_disk_gb": 30,
-    "approx_size_bytes": 5120000000,
+    "approx_size_bytes": 8589934592,
     "requires_license": false,
-    "download_url": "http://sft.if.usp.br/parrot/iso/7.3/Parrot-security-7.3_amd64.iso",
+    "download_url": "/home/kali/Downloads/Parrot-security-7.3_amd64.iso",
     "mirrors": [
-      "http://sft.if.usp.br/parrot/iso/7.3/Parrot-security-7.3_amd64.iso"
+      "/home/kali/Downloads/Parrot-security-7.3_amd64.iso",
+      "https://deb.parrot.sh/parrot/iso/7.3/Parrot-security-7.3_amd64.iso"
     ],
     "notes": "Flagship cybersecurity, penetration testing, and digital forensics suite with full MATE Desktop."
   },
@@ -63,9 +64,9 @@
     "min_disk_gb": 20,
     "approx_size_bytes": 2800000000,
     "requires_license": false,
-    "download_url": "http://sft.if.usp.br/parrot/iso/7.3/Parrot-home-7.3_amd64.iso",
+    "download_url": "https://deb.parrot.sh/parrot/iso/7.3/Parrot-home-7.3_amd64.iso",
     "mirrors": [
-      "http://sft.if.usp.br/parrot/iso/7.3/Parrot-home-7.3_amd64.iso"
+      "https://deb.parrot.sh/parrot/iso/7.3/Parrot-home-7.3_amd64.iso"
     ],
     "notes": "Lightweight daily-driver security desktop with privacy tools and sandboxed development environments."
   },
@@ -160,16 +161,17 @@
     "category": "Arch & Specialty Distros",
     "family": "linux",
     "distro": "Fedora Workstation Live",
-    "version": "40 (GNOME)",
-    "codename": "fedora-40",
+    "version": "43 (GNOME)",
+    "codename": "fedora-43",
     "flavor": "gui",
     "arch": "amd64",
     "min_disk_gb": 25,
-    "approx_size_bytes": 2254857856,
+    "approx_size_bytes": 2791728742,
     "requires_license": false,
-    "download_url": "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/40/Workstation/x86_64/iso/Fedora-Workstation-Live-x86_64-40-1.14.iso",
+    "download_url": "https://mirror.imt-systems.com/fedora/linux/releases/43/Workstation/x86_64/iso/Fedora-Workstation-Live-43-1.6.x86_64.iso",
     "mirrors": [
-      "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/40/Workstation/x86_64/iso/Fedora-Workstation-Live-x86_64-40-1.14.iso"
+      "https://mirror.imt-systems.com/fedora/linux/releases/43/Workstation/x86_64/iso/Fedora-Workstation-Live-43-1.6.x86_64.iso",
+      "https://ftp.jaist.ac.jp/pub/Linux/Fedora/releases/43/Workstation/x86_64/iso/Fedora-Workstation-Live-43-1.6.x86_64.iso"
     ]
   },
   {
@@ -177,16 +179,16 @@
     "category": "Arch & Specialty Distros",
     "family": "linux",
     "distro": "Fedora Server Netinst",
-    "version": "40",
-    "codename": "fedora-40",
+    "version": "43",
+    "codename": "fedora-43",
     "flavor": "tty",
     "arch": "amd64",
     "min_disk_gb": 15,
-    "approx_size_bytes": 812312576,
+    "approx_size_bytes": 858783744,
     "requires_license": false,
-    "download_url": "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/40/Server/x86_64/iso/Fedora-Server-netinst-x86_64-40-1.14.iso",
+    "download_url": "https://mirror.imt-systems.com/fedora/linux/releases/43/Workstation/x86_64/iso/Fedora-Workstation-Live-43-1.6.x86_64.iso",
     "mirrors": [
-      "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/40/Server/x86_64/iso/Fedora-Server-netinst-x86_64-40-1.14.iso"
+      "https://mirror.imt-systems.com/fedora/linux/releases/43/Workstation/x86_64/iso/Fedora-Workstation-Live-43-1.6.x86_64.iso"
     ]
   },
   {
@@ -201,9 +203,9 @@
     "min_disk_gb": 25,
     "approx_size_bytes": 1153433600,
     "requires_license": false,
-    "download_url": "https://download.opensuse.org/tumbleweed/iso/openSUSE-Tumbleweed-GNOME-Live-x86_64-Current.iso",
+    "download_url": "https://ftp.gwdg.de/pub/linux/suse/opensuse/tumbleweed/iso/openSUSE-Tumbleweed-DVD-x86_64-Current.iso",
     "mirrors": [
-      "https://download.opensuse.org/tumbleweed/iso/openSUSE-Tumbleweed-GNOME-Live-x86_64-Current.iso"
+      "https://ftp.gwdg.de/pub/linux/suse/opensuse/tumbleweed/iso/openSUSE-Tumbleweed-DVD-x86_64-Current.iso"
     ]
   },
   {
@@ -216,11 +218,11 @@
     "flavor": "tty",
     "arch": "amd64",
     "min_disk_gb": 20,
-    "approx_size_bytes": 416284672,
+    "approx_size_bytes": 418381824,
     "requires_license": false,
-    "download_url": "https://download.opensuse.org/tumbleweed/iso/openSUSE-Tumbleweed-NET-x86_64-Current.iso",
+    "download_url": "https://ftp.gwdg.de/pub/linux/suse/opensuse/tumbleweed/iso/openSUSE-Tumbleweed-NET-x86_64-Current.iso",
     "mirrors": [
-      "https://download.opensuse.org/tumbleweed/iso/openSUSE-Tumbleweed-NET-x86_64-Current.iso"
+      "https://ftp.gwdg.de/pub/linux/suse/opensuse/tumbleweed/iso/openSUSE-Tumbleweed-NET-x86_64-Current.iso"
     ]
   },
   {
@@ -365,17 +367,18 @@
     "id": "gentoo-stage3-amd64",
     "category": "Arch & Specialty Distros",
     "family": "linux",
-    "distro": "Gentoo Linux (Binary Bridge)",
-    "version": "Stage 3 OpenRC",
+    "distro": "Gentoo Linux (Minimal Install)",
+    "version": "Rolling Minimal",
     "codename": "gentoo",
     "flavor": "tty",
     "arch": "amd64",
     "min_disk_gb": 20,
-    "approx_size_bytes": 356515840,
+    "approx_size_bytes": 1008730112,
     "requires_license": false,
-    "download_url": "https://distfiles.gentoo.org/releases/amd64/autobuilds/latest-stage3-amd64-openrc.txt",
+    "download_url": "https://distfiles.gentoo.org/releases/amd64/autobuilds/current-install-amd64-minimal/install-amd64-minimal-20260830T151604Z.iso",
     "mirrors": [
-      "https://distfiles.gentoo.org/releases/amd64/autobuilds/latest-stage3-amd64-openrc.txt"
+      "https://distfiles.gentoo.org/releases/amd64/autobuilds/current-install-amd64-minimal/install-amd64-minimal-20260830T151604Z.iso",
+      "https://gentoo.osuosl.org/releases/amd64/autobuilds/current-livegui-amd64/livegui-amd64-20260830T151604Z.iso"
     ]
   },
   {

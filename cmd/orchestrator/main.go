@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 
@@ -9,7 +10,17 @@ import (
 	"boot-orchestrator/ui"
 )
 
+// CustomISOPath holds any direct image path provided via the command line
+var CustomISOPath string
+
 func main() {
+	isoFlag := flag.String("iso", "", "Direct local path to an ISO or raw disk image")
+	flag.Parse()
+
+	if *isoFlag != "" {
+		CustomISOPath = *isoFlag
+	}
+
 	// Initialize TUI with Alternate Screen buffer and Mouse Cell Motion support
 	p := tea.NewProgram(
 		ui.NewModel(),

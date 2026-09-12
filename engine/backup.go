@@ -1,3 +1,6 @@
+// Package engine — backup.go implements autonomous storage discovery,
+// live filesystem snapshot streaming with SHA256 manifests, NTFS-3G drivers,
+// and firmware-aware (UEFI/GPT vs MBR) bare-metal disaster recovery.
 package engine
 
 import (
@@ -49,10 +52,25 @@ func ensureNTFS3G(logFn func(string)) error {
 	return fmt.Errorf("apt-get not available to install ntfs-3g")
 }
 
+func resolveBackupMountNode(devPath string) string {
+	if strings.HasPrefix(devPath, "/dev/") && !strings.Contains(devPath, "1") && !strings.Contains(devPath, "2") {
+		p1 := devPath + "1"
+		if strings.Contains(devPath, "nvme") || strings.Contains(devPath, "mmcblk") {
+			p1 = devPath + "p1"
+		}
+		if _, err := os.Stat(p1); err == nil {
+			return p1
+		}
+	}
+	return devPath
+}
+
 func AutoMountDrive(devPath string, logFn func(string)) (string, func(), error) {
 	if logFn == nil {
 		logFn = func(string) {}
 	}
+
+	devPath = resolveBackupMountNode(devPath)
 
 	mountPoint := filepath.Join("/mnt", "orch_drive_"+filepath.Base(devPath))
 	_ = os.MkdirAll(mountPoint, 0755)
@@ -96,13 +114,38 @@ func makeCleanup(mountPoint string) func() {
 	}
 }
 
+// DetectBackupTargets queries storage devices. Removable disks are presented as
+// whole raw disk targets (/dev/sdX) so that dynamic autonomous partitioning into
+// ext4 (ORCH_STORAGE) and FAT32 (ORCH_BOOT) is triggered.
 func DetectBackupTargets() ([]BlockDevice, error) {
-	out, err := exec.Command("lsblk", "-J", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,MODEL,RM,FSTYPE").Output()
+	out, err := exec.Command("lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,MODEL,RM,HOTPLUG,FSTYPE").Output()
 	if err != nil {
 		return nil, fmt.Errorf("querying storage topology: %w", err)
 	}
 
-	var parsed lsblkOutput
+	var parsed struct {
+		BlockDevices []struct {
+			Name       string `json:"name"`
+			Size       uint64 `json:"size"`
+			Type       string `json:"type"`
+			Mountpoint string `json:"mountpoint"`
+			Model      string `json:"model"`
+			RM         bool   `json:"rm"`
+			Hotplug    bool   `json:"hotplug"`
+			FSType     string `json:"fstype"`
+			Children   []struct {
+				Name       string `json:"name"`
+				Size       uint64 `json:"size"`
+				Type       string `json:"type"`
+				Mountpoint string `json:"mountpoint"`
+				Model      string `json:"model"`
+				RM         bool   `json:"rm"`
+				Hotplug    bool   `json:"hotplug"`
+				FSType     string `json:"fstype"`
+			} `json:"children"`
+		} `json:"blockdevices"`
+	}
+
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		return nil, fmt.Errorf("parsing lsblk JSON: %w", err)
 	}
@@ -112,37 +155,59 @@ func DetectBackupTargets() ([]BlockDevice, error) {
 
 	var valid []BlockDevice
 
-	var processDevice func(d BlockDevice)
-	processDevice = func(d BlockDevice) {
-		if strings.HasPrefix(d.Name, "sr") || d.Type == "rom" || d.Mountpoint == "[SWAP]" {
-			return
+	for _, dev := range parsed.BlockDevices {
+		if strings.HasPrefix(dev.Name, "sr") || dev.Type == "rom" || dev.Mountpoint == "[SWAP]" {
+			continue
 		}
-		if strings.HasPrefix(d.Name, pDiskBase) || d.Mountpoint == "/" {
-			return
+		if strings.HasPrefix(dev.Name, pDiskBase) || dev.Name == pDiskBase || dev.Mountpoint == "/" {
+			continue
 		}
-		if len(d.Children) > 0 {
-			for _, child := range d.Children {
-				processDevice(child)
+
+		isRemovableDisk := dev.Type == "disk" && (dev.RM || dev.Hotplug || (strings.HasPrefix(dev.Name, "sd") && dev.Name != pDiskBase))
+
+		if isRemovableDisk {
+			valid = append(valid, BlockDevice{
+				Name:       dev.Name,
+				Size:       formatBytes(dev.Size),
+				Type:       "disk",
+				Mountpoint: "(Auto 2-Partition: ext4 + FAT32)",
+				Model:      dev.Model,
+				RM:         dev.RM,
+				FSType:     "dynamic (ext4+fat32)",
+			})
+			continue
+		}
+
+		if len(dev.Children) > 0 {
+			for _, child := range dev.Children {
+				if child.Mountpoint == "/" || child.Mountpoint == "[SWAP]" {
+					continue
+				}
+				devPath := "/dev/" + child.Name
+				valid = append(valid, BlockDevice{
+					Name:       devPath,
+					Size:       formatBytes(child.Size),
+					Type:       child.Type,
+					Mountpoint: child.Mountpoint,
+					Model:      child.Model,
+					RM:         child.RM,
+					FSType:     child.FSType,
+				})
 			}
-			return
-		}
-		if d.Type == "part" || (d.Type == "loop" && d.FSType != "") || (d.Type == "disk" && d.FSType != "") {
-			devPath := "/dev/" + d.Name
+		} else if dev.Type == "part" || dev.FSType != "" {
+			devPath := "/dev/" + dev.Name
 			valid = append(valid, BlockDevice{
 				Name:       devPath,
-				Size:       d.Size,
-				Type:       d.Type,
-				Mountpoint: d.Mountpoint,
-				Model:      d.Model,
-				RM:         d.RM,
-				FSType:     d.FSType,
+				Size:       formatBytes(dev.Size),
+				Type:       dev.Type,
+				Mountpoint: dev.Mountpoint,
+				Model:      dev.Model,
+				RM:         dev.RM,
+				FSType:     dev.FSType,
 			})
 		}
 	}
 
-	for _, dev := range parsed.BlockDevices {
-		processDevice(dev)
-	}
 	return valid, nil
 }
 
@@ -163,7 +228,6 @@ func EstimateHostBackupSize() uint64 {
 	if total == 0 {
 		total = 5 * 1024 * 1024 * 1024
 	}
-	// Estimate compressed size (~45% of uncompressed data)
 	compressedEstimate := uint64(float64(total) * 0.45)
 	if compressedEstimate < 100*1024*1024 {
 		compressedEstimate = 100 * 1024 * 1024
@@ -287,7 +351,7 @@ func FindBackupArchives() ([]BackupArchiveDescriptor, error) {
 		mountDir := t.Mountpoint
 		var cleanup func()
 
-		if mountDir == "" {
+		if mountDir == "" || strings.HasPrefix(mountDir, "(") {
 			mp, clean, err := AutoMountDrive(t.Name, nil)
 			if err != nil {
 				continue
@@ -326,6 +390,11 @@ func FindBackupArchives() ([]BackupArchiveDescriptor, error) {
 	return found, nil
 }
 
+func isUEFIBooted() bool {
+	_, err := os.Stat("/sys/firmware/efi")
+	return err == nil
+}
+
 func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) error {
 	if logFn == nil {
 		logFn = func(string) {}
@@ -341,22 +410,44 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 		logFn("=> Checksum matched: Image verified 100% authentic.")
 	}
 
-	logFn(fmt.Sprintf("=> Partitioning destination disk %s...", targetDisk))
 	_ = exec.Command("swapoff", "-a").Run()
 
-	_ = exec.Command("parted", "-s", targetDisk, "mklabel", "msdos").Run()
-	_ = exec.Command("parted", "-s", targetDisk, "mkpart", "primary", "ext4", "1MiB", "100%").Run()
-	_ = exec.Command("parted", "-s", targetDisk, "set", "1", "boot", "on").Run()
-	_ = exec.Command("partprobe", targetDisk).Run()
-	time.Sleep(1 * time.Second)
-
-	targetPart := targetDisk + "1"
-	if strings.Contains(targetDisk, "nvme") {
-		targetPart = targetDisk + "p1"
+	isUEFI := isUEFIBooted()
+	baseDisk := strings.TrimPrefix(targetDisk, "/dev/")
+	sep := ""
+	if len(baseDisk) > 0 && (baseDisk[len(baseDisk)-1] >= '0' && baseDisk[len(baseDisk)-1] <= '9') {
+		sep = "p"
 	}
 
-	logFn(fmt.Sprintf("=> Formatting root filesystem on %s...", targetPart))
-	if out, err := exec.Command("mkfs.ext4", "-F", "-L", "ROOT", targetPart).CombinedOutput(); err != nil {
+	var espPart, rootPart string
+
+	if isUEFI {
+		logFn(fmt.Sprintf("=> [UEFI DETECTED] Partitioning %s with GPT layout...", targetDisk))
+		_ = exec.Command("parted", "-s", targetDisk, "mklabel", "gpt").Run()
+		_ = exec.Command("parted", "-s", targetDisk, "mkpart", "ESP", "fat32", "1MiB", "1025MiB").Run()
+		_ = exec.Command("parted", "-s", targetDisk, "set", "1", "esp", "on").Run()
+		_ = exec.Command("parted", "-s", targetDisk, "mkpart", "primary", "ext4", "1025MiB", "100%").Run()
+		_ = exec.Command("partprobe", targetDisk).Run()
+		time.Sleep(1 * time.Second)
+
+		espPart = fmt.Sprintf("/dev/%s%s1", baseDisk, sep)
+		rootPart = fmt.Sprintf("/dev/%s%s2", baseDisk, sep)
+
+		logFn(fmt.Sprintf("=> Formatting EFI system partition %s...", espPart))
+		_ = exec.Command("mkfs.vfat", "-F32", "-n", "BOOT", espPart).Run()
+	} else {
+		logFn(fmt.Sprintf("=> [LEGACY BIOS DETECTED] Partitioning %s with MBR layout...", targetDisk))
+		_ = exec.Command("parted", "-s", targetDisk, "mklabel", "msdos").Run()
+		_ = exec.Command("parted", "-s", targetDisk, "mkpart", "primary", "ext4", "1MiB", "100%").Run()
+		_ = exec.Command("parted", "-s", targetDisk, "set", "1", "boot", "on").Run()
+		_ = exec.Command("partprobe", targetDisk).Run()
+		time.Sleep(1 * time.Second)
+
+		rootPart = fmt.Sprintf("/dev/%s%s1", baseDisk, sep)
+	}
+
+	logFn(fmt.Sprintf("=> Formatting root filesystem on %s...", rootPart))
+	if out, err := exec.Command("mkfs.ext4", "-F", "-L", "ROOT", rootPart).CombinedOutput(); err != nil {
 		return fmt.Errorf("mkfs.ext4 failed: %w (%s)", err, string(out))
 	}
 
@@ -366,7 +457,7 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 	}
 	defer os.RemoveAll(stageDir)
 
-	if out, err := exec.Command("mount", targetPart, stageDir).CombinedOutput(); err != nil {
+	if out, err := exec.Command("mount", rootPart, stageDir).CombinedOutput(); err != nil {
 		return fmt.Errorf("mounting restore target failed: %w (%s)", err, string(out))
 	}
 	defer func() {
@@ -374,17 +465,31 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 		_ = exec.Command("sync").Run()
 	}()
 
+	if isUEFI {
+		efiDir := filepath.Join(stageDir, "boot", "efi")
+		_ = os.MkdirAll(efiDir, 0755)
+		_ = exec.Command("mount", espPart, efiDir).Run()
+		defer func() {
+			_ = exec.Command("umount", "-l", efiDir).Run()
+		}()
+	}
+
 	logFn(fmt.Sprintf("=> Extracting system files from %s...", archivePath))
 	tarCmd := exec.Command("tar", "-xpf", archivePath, "-C", stageDir)
 	if out, err := tarCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("extraction failed: %w (%s)", err, string(out))
 	}
 
-	uuidOut, err := exec.Command("blkid", "-s", "UUID", "-o", "value", targetPart).Output()
+	uuidOut, err := exec.Command("blkid", "-s", "UUID", "-o", "value", rootPart).Output()
 	if err == nil {
 		newUUID := strings.TrimSpace(string(uuidOut))
 		fstabPath := filepath.Join(stageDir, "etc", "fstab")
 		fstabContent := fmt.Sprintf("# Created by Disaster Recovery Orchestrator\nUUID=%s / ext4 errors=remount-ro 0 1\n", newUUID)
+		if isUEFI {
+			espUUIDOut, _ := exec.Command("blkid", "-s", "UUID", "-o", "value", espPart).Output()
+			espUUID := strings.TrimSpace(string(espUUIDOut))
+			fstabContent += fmt.Sprintf("UUID=%s /boot/efi vfat umask=0077 0 1\n", espUUID)
+		}
 		_ = os.WriteFile(fstabPath, []byte(fstabContent), 0644)
 	}
 
@@ -405,11 +510,20 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 	}
 
 	logFn(fmt.Sprintf("=> Reinstalling GRUB bootloader to %s...", targetDisk))
-	grubScript := fmt.Sprintf(`
+	var grubScript string
+	if isUEFI {
+		grubScript = `
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=kali --recheck || grub-install /dev/sda
+update-grub || grub-mkconfig -o /boot/grub/grub.cfg
+update-initramfs -u -k all || true
+`
+	} else {
+		grubScript = fmt.Sprintf(`
 grub-install %s || grub-install --recheck %s
 update-grub || grub-mkconfig -o /boot/grub/grub.cfg
 update-initramfs -u -k all || true
 `, targetDisk, targetDisk)
+	}
 
 	chrootCmd := exec.Command("chroot", stageDir, "/bin/sh", "-c", grubScript)
 	_ = chrootCmd.Run()
