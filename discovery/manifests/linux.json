@@ -45,10 +45,10 @@
     "min_disk_gb": 30,
     "approx_size_bytes": 8589934592,
     "requires_license": false,
-    "download_url": "/home/kali/Downloads/Parrot-security-7.3_amd64.iso",
+    "download_url": "https://deb.parrot.sh/parrot/iso/7.3/Parrot-security-7.3_amd64.iso",
     "mirrors": [
-      "/home/kali/Downloads/Parrot-security-7.3_amd64.iso",
-      "https://deb.parrot.sh/parrot/iso/7.3/Parrot-security-7.3_amd64.iso"
+      "https://deb.parrot.sh/parrot/iso/7.3/Parrot-security-7.3_amd64.iso",
+      "https://mirrors.mit.edu/parrot/iso/7.3/Parrot-security-7.3_amd64.iso"
     ],
     "notes": "Flagship cybersecurity, penetration testing, and digital forensics suite with full MATE Desktop."
   },

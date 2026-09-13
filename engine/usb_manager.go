@@ -1,10 +1,13 @@
 // Package engine — usb_manager.go handles strict removable media discovery,
 // dynamic drive capacity queries via sysfs, autonomous 2-partition provisioning
-// (ORCH_STORAGE + ORCH_BOOT), verified loopback ISO staging, and media resets.
+// (ORCH_STORAGE + ORCH_BOOT), universal monolithic EFI bootloader generation,
+// auto-mount discovery of external ISOs/archives, and payload streaming.
 package engine
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -94,7 +97,7 @@ func ProbeRemovableTargets() ([]USBTargetDevice, error) {
 	var targets []USBTargetDevice
 
 	for _, dev := range data.BlockDevices {
-		isUSB := strings.ToLower(dev.Tran) == "usb" || dev.Removable == "1" || dev.Removable == "true"
+		isUSB := strings.ToLower(dev.Tran) == "usb" || dev.Removable == "1" || dev.Removable == "true" || strings.HasPrefix(dev.Name, "sdc") || strings.HasPrefix(dev.Name, "sdd")
 		if isUSB && dev.Type == "disk" {
 			devPath := "/dev/" + dev.Name
 			byteSize, _ := QueryBlockDeviceBytes(dev.Name)
@@ -135,8 +138,6 @@ func PrepareAutonomousUSBDisk(targetDev USBTargetDevice, logFn func(string)) (*U
 
 	logFn(fmt.Sprintf("=> [USB PREPARE] Dynamic capacity confirmed: %.2f GB total", float64(totalBytes)/(1024*1024*1024)))
 
-	// Partition 2: 1 GB FAT32 for pure UEFI boot files (GRUB binary only)
-	// Partition 1: Remainder for raw ISO storage
 	bootBytes := uint64(1 * 1024 * 1024 * 1024)
 	storageBytes := totalBytes - bootBytes
 	storageEndMB := storageBytes / (1024 * 1024)
@@ -203,9 +204,8 @@ func PrepareAutonomousUSBDisk(targetDev USBTargetDevice, logFn func(string)) (*U
 	}, nil
 }
 
-// ArmAutonomousUSBBootloader configures Partition 2 (ORCH_BOOT) with a standalone
-// EFI binary and a zero-timeout GRUB loopback configuration that boots the untouched ISO
-// from Partition 1 with native findiso support.
+// ArmAutonomousUSBBootloader guarantees BOOTX64.EFI exists on Partition 2 (ORCH_BOOT)
+// by compiling a standalone monolithic core with exact verified modules.
 func ArmAutonomousUSBBootloader(bootPart, isoPayloadPath, targetDisk string, logFn func(string)) error {
 	if logFn == nil {
 		logFn = func(string) {}
@@ -215,7 +215,7 @@ func ArmAutonomousUSBBootloader(bootPart, isoPayloadPath, targetDisk string, log
 	_ = os.MkdirAll(bootMount, 0755)
 	_ = exec.Command("umount", "-l", bootMount).Run()
 
-	logFn("=> [EFI ENGINE] Mounting ORCH_BOOT at " + bootMount + "...")
+	logFn("=> [UNIVERSAL EFI] Mounting ORCH_BOOT at " + bootMount + "...")
 	if out, err := exec.Command("mount", bootPart, bootMount).CombinedOutput(); err != nil {
 		return fmt.Errorf("mounting boot partition %s: %w (%s)", bootPart, err, string(out))
 	}
@@ -224,67 +224,200 @@ func ArmAutonomousUSBBootloader(bootPart, isoPayloadPath, targetDisk string, log
 		_ = exec.Command("umount", "-l", bootMount).Run()
 	}()
 
-	// 1. Temporarily mount ISO to extract the official distribution BOOTX64.EFI
-	isoMount := "/mnt/orch_iso_temp"
-	_ = os.MkdirAll(isoMount, 0755)
-	_ = exec.Command("umount", "-l", isoMount).Run()
-
 	efiBootDir := filepath.Join(bootMount, "EFI", "BOOT")
 	_ = os.MkdirAll(efiBootDir, 0755)
-	targetEFI := filepath.Join(efiBootDir, "BOOTX64.EFI")
 
-	mountIsoCmd := exec.Command("mount", "-o", "loop,ro", isoPayloadPath, isoMount)
-	if _, err := mountIsoCmd.CombinedOutput(); err == nil {
-		defer func() {
-			_ = exec.Command("umount", "-l", isoMount).Run()
-			_ = os.Remove(isoMount)
-		}()
+	bootGrubDir := filepath.Join(bootMount, "boot", "grub")
+	_ = os.MkdirAll(bootGrubDir, 0755)
 
-		// Copy verified signed EFI loader directly from distribution media
-		possibleEFIs := []string{
-			filepath.Join(isoMount, "EFI", "BOOT", "BOOTX64.EFI"),
-			filepath.Join(isoMount, "EFI", "boot", "bootx64.efi"),
-			filepath.Join(isoMount, "efi", "boot", "bootx64.efi"),
+	targetShim := filepath.Join(efiBootDir, "BOOTX64.EFI")
+	targetGrub := filepath.Join(efiBootDir, "grubx64.efi")
+
+	// 1. Write the main grub.cfg to all standard search directories
+	logFn("=> [UNIVERSAL EFI] Injecting autonomous offline orchestration boot configuration...")
+	grubCfgContent := fmt.Sprintf(`set default="0"
+set timeout=3
+
+search --no-floppy --set=storage_part --label ORCH_STORAGE
+
+menuentry "Universal OS Orchestrator: Autonomous Offline Resizer & Installer" {
+    set isofile="/os_image.payload"
+    loopback loop ($storage_part)$isofile
+    linux (loop)/live/vmlinuz boot=live findiso=$isofile components quiet splash systemd.run=/transient_resize.sh systemd.run_success_action=reboot
+    initrd (loop)/live/initrd.img
+}
+`, targetDisk)
+
+	_ = os.WriteFile(filepath.Join(efiBootDir, "grub.cfg"), []byte(grubCfgContent), 0644)
+	_ = os.WriteFile(filepath.Join(bootGrubDir, "grub.cfg"), []byte(grubCfgContent), 0644)
+	_ = os.WriteFile(filepath.Join(bootMount, "grub.cfg"), []byte(grubCfgContent), 0644)
+
+	// 2. Prepare early-grub.cfg using verified search commands
+	earlyCfg := filepath.Join("/tmp", "early-grub.cfg")
+	earlyCfgContent := `search --no-floppy --label --set=root ORCH_BOOT
+set prefix=($root)/EFI/BOOT
+normal
+`
+	_ = os.WriteFile(earlyCfg, []byte(earlyCfgContent), 0644)
+	defer os.Remove(earlyCfg)
+
+	// 3. Monolithic compilation using actual available modules on Kali Linux
+	builtMonolithic := false
+	grubModDir := "/usr/lib/grub/x86_64-efi"
+	if fi, err := os.Stat(grubModDir); err == nil && fi.IsDir() {
+		logFn("=> [UNIVERSAL EFI] Compiling monolithic standalone EFI core via grub-mkimage...")
+		mkimageArgs := []string{
+			"-d", grubModDir,
+			"-O", "x86_64-efi",
+			"-o", targetShim,
+			"-c", earlyCfg,
+			"-p", "/EFI/BOOT",
+			"part_gpt", "part_msdos", "fat", "ext2",
+			"search", "search_label", "search_fs_file", "search_fs_uuid",
+			"normal", "configfile", "echo", "test", "reboot",
+			"linux", "boot", "loopback", "iso9660",
 		}
-		for _, e := range possibleEFIs {
-			if _, sErr := os.Stat(e); sErr == nil {
-				_ = exec.Command("cp", "-f", e, targetEFI).Run()
-				break
+		if out, err := exec.Command("grub-mkimage", mkimageArgs...).CombinedOutput(); err == nil {
+			if sFi, sErr := os.Stat(targetShim); sErr == nil && sFi.Size() > 0 {
+				builtMonolithic = true
+				logFn(fmt.Sprintf("=> [UNIVERSAL EFI] Monolithic BOOTX64.EFI compiled successfully (%d KB).", sFi.Size()/1024))
+			}
+		} else {
+			logFn(fmt.Sprintf("=> [WARNING] grub-mkimage failed: %s", string(out)))
+		}
+	}
+
+	// 4. Guaranteed Fallback: Harvest existing host signed binaries if monolithic compilation failed
+	if !builtMonolithic || fileIsEmpty(targetShim) {
+		logFn("=> [UNIVERSAL EFI] Staging verified EFI bootloader from host system...")
+		candidates := []string{
+			"/boot/efi/EFI/kali/grubx64.efi",
+			"/boot/efi/EFI/BOOT/BOOTX64.EFI",
+			"/boot/efi/EFI/debian/grubx64.efi",
+			"/usr/lib/shim/shimx64.efi.signed",
+			"/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed",
+		}
+		for _, c := range candidates {
+			if fi, err := os.Stat(c); err == nil && fi.Size() > 0 {
+				if err := copyFile(c, targetShim); err == nil {
+					logFn(fmt.Sprintf("=> [UNIVERSAL EFI] Populated BOOTX64.EFI from: %s (%d KB)", c, fi.Size()/1024))
+					break
+				}
 			}
 		}
 	}
 
-	// Fallback to host signed UEFI shim if ISO didn't contain it
-	if _, err := os.Stat(targetEFI); err != nil {
-		_ = exec.Command("cp", "-f", "/boot/efi/EFI/BOOT/BOOTX64.EFI", targetEFI).Run()
+	// Always duplicate targetShim to grubx64.efi so both standard UEFI entry paths exist
+	if _, err := os.Stat(targetShim); err == nil {
+		_ = copyFile(targetShim, targetGrub)
 	}
 
-	// 2. Write the 100% reliable GRUB Loopback configuration
-	// Timeout is set to 0: zero menus, zero delays, direct automatic execution.
-	grubCfgContent := `set default="0"
-set timeout=0
-
-# Search for the ext4 storage partition containing the untouched ISO
-search --no-floppy --set=storage_part --label ORCH_STORAGE
-
-menuentry "Autonomous Provisioner & OS Installer" {
-    set isofile="/os_image.payload"
-    loopback loop ($storage_part)$isofile
-    linux (loop)/live/vmlinuz boot=live findiso=$isofile components quiet splash
-    initrd (loop)/live/initrd.img
-}
-`
-
-	_ = os.WriteFile(filepath.Join(efiBootDir, "grub.cfg"), []byte(grubCfgContent), 0644)
-
-	// Also mirror to /boot/grub/grub.cfg in case the EFI binary references that path
-	bootGrubDir := filepath.Join(bootMount, "boot", "grub")
-	_ = os.MkdirAll(bootGrubDir, 0755)
-	_ = os.WriteFile(filepath.Join(bootGrubDir, "grub.cfg"), []byte(grubCfgContent), 0644)
+	// Copy MokManager if available
+	mokSources := []string{
+		"/usr/lib/shim/mmx64.efi.signed",
+		"/boot/efi/EFI/kali/mmx64.efi",
+		"/boot/efi/EFI/debian/mmx64.efi",
+	}
+	targetMok := filepath.Join(efiBootDir, "mmx64.efi")
+	for _, src := range mokSources {
+		if _, err := os.Stat(src); err == nil {
+			_ = copyFile(src, targetMok)
+			break
+		}
+	}
 
 	_ = exec.Command("sync").Run()
-	logFn("=> [EFI ENGINE] Verified loopback runtime armed successfully.")
+
+	// Strict sanity assertion: fail fast if the file is absent or empty
+	fi, err := os.Stat(targetShim)
+	if err != nil || fi.Size() == 0 {
+		return fmt.Errorf("fatal: failed to populate non-zero byte EFI binary at %s", targetShim)
+	}
+
+	logFn(fmt.Sprintf("=> [UNIVERSAL EFI] Stack armed: BOOTX64.EFI (%d KB verified)", fi.Size()/1024))
 	return nil
+}
+
+func fileIsEmpty(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return true
+	}
+	return info.Size() == 0
+}
+
+func StagePayloadWithContext(ctx context.Context, srcPath, destDir string, progressFn func(written, total int64)) (string, error) {
+	destPath := filepath.Join(destDir, "os_image.payload")
+
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return "", fmt.Errorf("opening source payload: %w", err)
+	}
+	defer src.Close()
+
+	fi, err := src.Stat()
+	if err != nil {
+		return "", fmt.Errorf("reading payload stats: %w", err)
+	}
+	total := fi.Size()
+
+	var startOffset int64
+	var dst *os.File
+	if dFi, dErr := os.Stat(destPath); dErr == nil && dFi.Size() < total {
+		startOffset = dFi.Size()
+		dst, err = os.OpenFile(destPath, os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return "", fmt.Errorf("reopening partial payload: %w", err)
+		}
+		if _, sErr := src.Seek(startOffset, io.SeekStart); sErr != nil {
+			dst.Close()
+			return "", fmt.Errorf("seeking source payload: %w", sErr)
+		}
+	} else {
+		dst, err = os.Create(destPath)
+		if err != nil {
+			return "", fmt.Errorf("creating destination payload: %w", err)
+		}
+	}
+	defer dst.Close()
+
+	buf := make([]byte, 4*1024*1024)
+	written := startOffset
+	lastUpdate := time.Now()
+
+	for {
+		select {
+		case <-ctx.Done():
+			_ = dst.Sync()
+			return destPath, ctx.Err()
+		default:
+		}
+
+		n, rErr := src.Read(buf)
+		if n > 0 {
+			wn, wErr := dst.Write(buf[:n])
+			if wErr != nil {
+				return "", fmt.Errorf("writing to storage vault: %w", wErr)
+			}
+			written += int64(wn)
+			if time.Since(lastUpdate) > 150*time.Millisecond || written == total {
+				if progressFn != nil {
+					progressFn(written, total)
+				}
+				lastUpdate = time.Now()
+			}
+		}
+		if rErr != nil {
+			if errors.Is(rErr, io.EOF) {
+				break
+			}
+			return "", fmt.Errorf("reading source payload: %w", rErr)
+		}
+	}
+
+	_ = dst.Sync()
+	_ = exec.Command("sync").Run()
+	return destPath, nil
 }
 
 func DownloadPayloadToUSB(targetDev USBTargetDevice, imageURL string, progressFn func(written, total int64)) error {
@@ -363,74 +496,145 @@ func DownloadPayloadToUSB(targetDev USBTargetDevice, imageURL string, progressFn
 }
 
 func ProbeUSBPayloads() ([]USBPayload, error) {
-	out, err := exec.Command("lsblk", "-J", "-o", "NAME,SIZE,TRAN,MOUNTPOINT,FSTYPE,TYPE,RM").Output()
-	if err != nil {
-		return nil, fmt.Errorf("lsblk probe failed: %w", err)
-	}
-
-	var data usbLsblkResponse
-	if err := json.Unmarshal(out, &data); err != nil {
-		return nil, fmt.Errorf("parsing lsblk telemetry: %w", err)
-	}
-
 	var payloads []USBPayload
+	visitedPaths := make(map[string]bool)
 
-	var inspectDevice func(dev usbDeviceRecord, isUSB bool)
-	inspectDevice = func(dev usbDeviceRecord, isUSB bool) {
-		currentIsUSB := isUSB || dev.Tran == "usb" || dev.Removable == "1" || dev.Removable == "true"
+	addPayload := func(devName, filePath, mountPoint string, autoMounted bool) {
+		if visitedPaths[filePath] {
+			return
+		}
+		fi, err := os.Stat(filePath)
+		if err != nil || fi.IsDir() || fi.Size() < 50*1024*1024 {
+			return
+		}
 
-		if currentIsUSB && dev.Type == "part" {
-			mountPath := dev.Mountpoint
-			autoMounted := false
+		lower := strings.ToLower(fi.Name())
+		displayName := fi.Name()
+		if lower == "os_image.payload" {
+			displayName = fmt.Sprintf("Staged OS Payload [%.1f GB Ready]", float64(fi.Size())/(1024*1024*1024))
+		}
 
-			if mountPath == "" && dev.FSType != "" && dev.FSType != "swap" {
-				tempMount, err := os.MkdirTemp("/tmp", "orch_usb_mount_*")
-				if err == nil {
-					devPath := "/dev/" + dev.Name
-					mountCmd := exec.Command("mount", "-o", "ro", devPath, tempMount)
-					if mountCmd.Run() == nil {
-						mountPath = tempMount
-						autoMounted = true
-					} else {
-						_ = os.Remove(tempMount)
+		payloads = append(payloads, USBPayload{
+			DeviceName:   devName,
+			FilePath:     filePath,
+			FileName:     displayName,
+			SizeBytes:    fi.Size(),
+			MountPoint:   mountPoint,
+			WasAutoMount: autoMounted,
+		})
+		visitedPaths[filePath] = true
+	}
+
+	candidateVaults := []string{
+		"/mnt/orch_usb_storage",
+		"/mnt/orch_drive_sdc1",
+		"/media",
+		"/run/media",
+	}
+
+	for _, vDir := range candidateVaults {
+		if fi, err := os.Stat(vDir); err == nil && fi.IsDir() {
+			_ = filepath.Walk(vDir, func(path string, info os.FileInfo, walkErr error) error {
+				if walkErr == nil && !info.IsDir() {
+					lower := strings.ToLower(info.Name())
+					if isSupportedPayloadFormat(lower) {
+						addPayload(filepath.Base(vDir), path, vDir, false)
 					}
 				}
-			}
+				return nil
+			})
+		}
+	}
 
-			if mountPath != "" {
-				_ = filepath.Walk(mountPath, func(path string, info os.FileInfo, walkErr error) error {
-					if walkErr == nil && !info.IsDir() {
-						lower := strings.ToLower(info.Name())
-						if strings.HasSuffix(lower, ".iso") || strings.HasSuffix(lower, ".img") || strings.HasSuffix(lower, ".payload") || strings.HasSuffix(lower, ".zip") {
-							payloads = append(payloads, USBPayload{
-								DeviceName:   dev.Name,
-								FilePath:     path,
-								FileName:     info.Name(),
-								SizeBytes:    info.Size(),
-								MountPoint:   mountPath,
-								WasAutoMount: autoMounted,
+	out, err := exec.Command("lsblk", "-J", "-o", "NAME,SIZE,TRAN,MOUNTPOINT,FSTYPE,TYPE,RM").Output()
+	if err == nil {
+		var data usbLsblkResponse
+		if jsonErr := json.Unmarshal(out, &data); jsonErr == nil {
+			for _, disk := range data.BlockDevices {
+				isUSBDisk := strings.ToLower(disk.Tran) == "usb" ||
+					disk.Removable == "1" ||
+					strings.HasPrefix(disk.Name, "sdc") ||
+					strings.HasPrefix(disk.Name, "sdd") ||
+					strings.HasPrefix(disk.Name, "sde")
+
+				if isUSBDisk {
+					for _, part := range disk.Children {
+						devPath := "/dev/" + part.Name
+						mountPath := part.Mountpoint
+						autoMounted := false
+
+						if mountPath == "" && part.FSType != "" && part.FSType != "swap" {
+							targetDir := "/mnt/orch_usb_storage"
+							if isMounted(targetDir) {
+								targetDir, _ = os.MkdirTemp("/tmp", "orch_usb_scan_*")
+							} else {
+								_ = os.MkdirAll(targetDir, 0755)
+							}
+
+							_ = exec.Command("mount", devPath, targetDir).Run()
+
+							if isMounted(targetDir) {
+								mountPath = targetDir
+								autoMounted = true
+							}
+						}
+
+						if mountPath != "" {
+							_ = filepath.Walk(mountPath, func(path string, info os.FileInfo, walkErr error) error {
+								if walkErr == nil && !info.IsDir() {
+									lower := strings.ToLower(info.Name())
+									if isSupportedPayloadFormat(lower) {
+										addPayload(part.Name, path, mountPath, autoMounted)
+									}
+								}
+								return nil
 							})
 						}
 					}
-					return nil
-				})
+				}
 			}
 		}
-
-		for _, child := range dev.Children {
-			inspectDevice(child, currentIsUSB)
-		}
-	}
-
-	for _, dev := range data.BlockDevices {
-		inspectDevice(dev, dev.Tran == "usb" || dev.Removable == "1")
 	}
 
 	return payloads, nil
 }
 
+func isMounted(mountPoint string) bool {
+	data, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), mountPoint)
+}
+
+func isSupportedPayloadFormat(filename string) bool {
+	suffixes := []string{
+		".iso",
+		".payload",
+		".img",
+		".raw",
+		".bin",
+		".zip",
+		".7z",
+		".tar.gz",
+		".tgz",
+		".tar.xz",
+		".txz",
+		".tar.zst",
+	}
+	for _, s := range suffixes {
+		if strings.HasSuffix(filename, s) {
+			return true
+		}
+	}
+	return false
+}
+
 func CleanAutoMounts(payloads []USBPayload) {
 	for _, p := range payloads {
+		if p.MountPoint == "/mnt/orch_usb_storage" {
+			continue
+		}
 		if p.WasAutoMount && p.MountPoint != "" {
 			_ = exec.Command("umount", "-l", p.MountPoint).Run()
 			_ = os.Remove(p.MountPoint)

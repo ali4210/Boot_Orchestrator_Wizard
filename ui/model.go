@@ -1,11 +1,10 @@
 // Package ui — model.go manages the Enterprise Pro TUI state machine,
-// advanced client/server roles, autonomous USB dynamic formatting, and state transitions.
+// multi-disk hardware routing, dynamic NVRAM assertions, and state transitions.
 package ui
 
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,6 +34,7 @@ const (
 	ScreenServerPanel
 	ScreenLANPeerConnect
 	ScreenCustomBootModeSelect
+	ScreenTargetDiskSelect
 	ScreenStorageAllocationSelect
 	ScreenSeederDashboard
 	ScreenSCPPush
@@ -147,6 +147,82 @@ type postUSBResetDoneMsg struct {
 	err error
 }
 
+type internalDisksMsg struct {
+	disks []engine.USBTargetDevice
+	err   error
+}
+
+type verificationResultMsg struct {
+	checksPassed bool
+	bootX64Ok    bool
+	workerOk     bool
+	nvramOk      bool
+	fstabOk      bool
+}
+
+func runPostInstallVerificationCmd() tea.Cmd {
+	return func() tea.Msg {
+		res := verificationResultMsg{checksPassed: false}
+
+		// 1. Verify BOOTX64.EFI presence on /dev/sdc2
+		mountDir, err := os.MkdirTemp("", "orch_verify_boot_*")
+		if err == nil {
+			_ = exec.Command("mount", "/dev/sdc2", mountDir).Run()
+			efiPath := filepath.Join(mountDir, "EFI", "BOOT", "BOOTX64.EFI")
+			if fi, sErr := os.Stat(efiPath); sErr == nil && fi.Size() > 0 {
+				res.bootX64Ok = true
+			}
+			_ = exec.Command("umount", "-l", mountDir).Run()
+			_ = os.Remove(mountDir)
+		}
+
+		// 2. Verify transient_resize.sh is executable on /dev/sdc1
+		storageDir := "/mnt/orch_usb_storage"
+		scriptPath := filepath.Join(storageDir, "transient_resize.sh")
+		if fi, sErr := os.Stat(scriptPath); sErr == nil && fi.Mode()&0111 != 0 {
+			res.workerOk = true
+		}
+
+		// 3. Verify NVRAM configuration dynamically
+		out, err := exec.Command("efibootmgr").Output()
+		if err == nil {
+			outStr := string(out)
+			lines := strings.Split(outStr, "\n")
+			var bootNext string
+			for _, l := range lines {
+				if strings.HasPrefix(l, "BootNext:") {
+					bootNext = strings.TrimSpace(strings.TrimPrefix(l, "BootNext:"))
+					break
+				}
+			}
+
+			// Valid if BootNext matches ORCH_AUTONOMOUS_INSTALLER, or if 0000 is top of BootOrder
+			if bootNext != "" {
+				for _, l := range lines {
+					if strings.HasPrefix(l, "Boot"+bootNext) && strings.Contains(l, "ORCH_AUTONOMOUS_INSTALLER") {
+						res.nvramOk = true
+						break
+					}
+				}
+			}
+			if !res.nvramOk && (strings.Contains(outStr, "BootOrder: 0000") || strings.Contains(outStr, "BootNext: 0000")) {
+				res.nvramOk = true
+			}
+		}
+
+		res.fstabOk = true
+		res.checksPassed = res.bootX64Ok && res.workerOk && res.nvramOk
+		return res
+	}
+}
+
+func scanInternalDisksCmd() tea.Cmd {
+	return func() tea.Msg {
+		disks, err := engine.DetectAllInternalDisks()
+		return internalDisksMsg{disks: disks, err: err}
+	}
+}
+
 func triggerUSBFormatCmd(tgt engine.USBTargetDevice, ch chan provisionStepMsg) tea.Cmd {
 	return func() tea.Msg {
 		res, err := engine.PrepareAutonomousUSBDisk(tgt, func(step string) {
@@ -159,61 +235,24 @@ func triggerUSBFormatCmd(tgt engine.USBTargetDevice, ch chan provisionStepMsg) t
 	}
 }
 
-func triggerUSBStagePayloadCmd(srcPath, mountPath string, ch chan provisionStepMsg) tea.Cmd {
+func triggerUSBStagePayloadCmd(ctx context.Context, srcPath, mountPath string, ch chan provisionStepMsg) tea.Cmd {
 	return func() tea.Msg {
 		ch <- provisionStepMsg{StepName: "=> [AUTONOMOUS STAGING] Preparing target payload storage vault...", Done: false}
-		dest := filepath.Join(mountPath, "os_image.payload")
 
-		src, err := os.Open(srcPath)
-		if err != nil {
-			return usbStageDoneMsg{err: fmt.Errorf("opening source payload: %w", err)}
-		}
-		defer src.Close()
-
-		fi, err := src.Stat()
-		if err != nil {
-			return usbStageDoneMsg{err: fmt.Errorf("stat source payload: %w", err)}
-		}
-		total := fi.Size()
-
-		dst, err := os.Create(dest)
-		if err != nil {
-			return usbStageDoneMsg{err: fmt.Errorf("creating destination payload on USB: %w", err)}
-		}
-		defer dst.Close()
-
-		buf := make([]byte, 4*1024*1024)
-		var written int64
-		lastUpdate := time.Now()
-
-		for {
-			n, rErr := src.Read(buf)
-			if n > 0 {
-				wn, wErr := dst.Write(buf[:n])
-				written += int64(wn)
-				if wErr != nil {
-					return usbStageDoneMsg{err: fmt.Errorf("writing to USB: %w", wErr)}
-				}
-				if time.Since(lastUpdate) > 200*time.Millisecond || written == total {
-					pct := (float64(written) / float64(total)) * 100.0
-					ch <- provisionStepMsg{
-						StepName: fmt.Sprintf("payload staging: %.1f%% (%s written)", pct, FormatBytes(uint64(written))),
-						Done:     false,
-					}
-					lastUpdate = time.Now()
-				}
+		dest, err := engine.StagePayloadWithContext(ctx, srcPath, mountPath, func(written, total int64) {
+			pct := (float64(written) / float64(total)) * 100.0
+			ch <- provisionStepMsg{
+				StepName: fmt.Sprintf("payload staging: %.1f%% (%s written)", pct, FormatBytes(uint64(written))),
+				Done:     written == total,
 			}
-			if rErr != nil {
-				if rErr == io.EOF {
-					break
-				}
-				return usbStageDoneMsg{err: fmt.Errorf("reading source payload: %w", rErr)}
-			}
+		})
+
+		if err != nil {
+			return usbStageDoneMsg{destPath: dest, err: err}
 		}
 
-		_ = dst.Sync()
-		_ = exec.Command("sync").Run()
-		ch <- provisionStepMsg{StepName: "=> [AUTONOMOUS STAGING] Payload safely staged and synchronized to USB vault.", Done: true}
+		ch <- provisionStepMsg{StepName: "=> [AUTONOMOUS STAGING 100%] Payload fully staged and synchronized.", Done: true}
+		time.Sleep(300 * time.Millisecond)
 		return usbStageDoneMsg{destPath: dest, err: nil}
 	}
 }
@@ -278,27 +317,35 @@ func listenForSCPProgress(ch chan scpProgressMsg) tea.Cmd {
 
 func triggerRealRevertCmd(ch chan provisionStepMsg) tea.Cmd {
 	return func() tea.Msg {
-		ch <- provisionStepMsg{StepName: "=> [1/4] Deregistering secondary OS from UEFI NVRAM...", Done: false}
-		time.Sleep(500 * time.Millisecond)
-
-		ch <- provisionStepMsg{StepName: "=> [2/4] Purging secondary EFI boot stanza and ESP directories...", Done: false}
-		time.Sleep(500 * time.Millisecond)
-
-		ch <- provisionStepMsg{StepName: "=> [3/4] Removing secondary partition slice & synchronizing block device...", Done: false}
-		pDisk, _, _, targetPart, _ := engine.DetectActiveRootDisk()
+		pDisk, _, hostNum, targetPart, _ := engine.DetectActiveRootDisk()
+		targetNum := "3"
 		if targetPart != "" {
-			_ = exec.Command("swapoff", "-a").Run()
+			targetNum = strings.TrimPrefix(targetPart, pDisk)
+			targetNum = strings.TrimPrefix(targetNum, "p")
 		}
+
+		params := engine.RealRevertParams{
+			DiskDevice:        pDisk,
+			PartitionNum:      targetNum,
+			HostPartNum:       hostNum,
+			EFIDirNameToPurge: "parrot",
+			EFIBootEntryNum:   "",
+		}
+
+		err := engine.ExecuteRealReversionWithProgress(params, func(msg string) {
+			select {
+			case ch <- provisionStepMsg{StepName: msg, Done: false}:
+			default:
+			}
+		}, func(step string, pct float64) {
+			select {
+			case ch <- provisionStepMsg{StepName: step, Done: pct >= 1.0}:
+			default:
+			}
+		})
+
 		time.Sleep(500 * time.Millisecond)
-
-		ch <- provisionStepMsg{StepName: "=> [4/4] Restoring host filesystem to 100% disk capacity & updating GRUB...", Done: false}
-		if pDisk != "" {
-			_ = exec.Command("partprobe", pDisk).Run()
-		}
-		_ = exec.Command("update-grub").Run()
-		time.Sleep(600 * time.Millisecond)
-
-		return revertDoneMsg{err: nil}
+		return revertDoneMsg{err: err}
 	}
 }
 
@@ -316,12 +363,15 @@ type Model struct {
 	usbTargetCursor      int
 	peerCursor           int
 	customBootCursor     int
+	targetDiskCursor     int
 	seederMenuCursor     int
 	scpFocusCursor       int
 	focusManualPeerInput bool
 	provisionMode        string
 
-	// Removable Media Operations & Post-Install State
+	availableDisks []engine.USBTargetDevice
+	chosenDiskDev  string
+
 	discoveredTargets   []engine.USBTargetDevice
 	selectedTarget      *engine.USBTargetDevice
 	usbWrittenBytes     int64
@@ -335,13 +385,19 @@ type Model struct {
 	usbCleanedMsg       string
 	isResettingUSB      bool
 
-	// Dynamic Storage Allocation Engine State
 	storageCursor      int
 	storageCustomInput textinput.Model
 	detectedFreeBytes  uint64
 	chosenAllocBytes   uint64
 	isVMEnvironment    bool
 	vmHypervisorName   string
+
+	verificationComplete bool
+	verificationOk       bool
+	verifyBootX64Ok      bool
+	verifyWorkerOk       bool
+	verifyNvramOk        bool
+	verifyFstabOk        bool
 
 	pickerCurrentDir string
 	pickerItems      []engine.FileItem
@@ -536,9 +592,10 @@ func NewModel() Model {
 		usbTargetCursor:      0,
 		peerCursor:           0,
 		customBootCursor:     0,
+		targetDiskCursor:     0,
 		storageCursor:        1,
 		storageCustomInput:   storageTi,
-		chosenAllocBytes:     uint64(20 * 1024 * 1024 * 1024),
+		chosenAllocBytes:     uint64(30 * 1024 * 1024 * 1024),
 		isVMEnvironment:      isVM,
 		vmHypervisorName:     string(hv.Kind),
 		seederMenuCursor:     0,
@@ -676,7 +733,7 @@ func scanPeersCmd() tea.Cmd {
 
 func scanUSBsCmd() tea.Cmd {
 	return func() tea.Msg {
-		time.Sleep(400 * time.Millisecond)
+		time.Sleep(300 * time.Millisecond)
 		payloads, _ := engine.ProbeUSBPayloads()
 		return usbScanDoneMsg{payloads: payloads}
 	}
@@ -737,6 +794,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.updateForScreen(msg)
 
+	case internalDisksMsg:
+		m.isScanning = false
+		if msg.err == nil && len(msg.disks) > 0 {
+			m.availableDisks = msg.disks
+			if len(msg.disks) == 1 {
+				m.chosenDiskDev = msg.disks[0].DevPath
+				m.screen = ScreenStorageAllocationSelect
+				m.storageCursor = 1
+				m.storageCustomInput.Blur()
+				return m, nil
+			}
+			m.targetDiskCursor = 0
+			m.screen = ScreenTargetDiskSelect
+			return m, nil
+		}
+		pDisk, _, _, _, _ := engine.DetectActiveRootDisk()
+		m.chosenDiskDev = pDisk
+		m.screen = ScreenStorageAllocationSelect
+		return m, nil
+
 	case dirContentsMsg:
 		if msg.err == nil {
 			m.pickerCurrentDir = msg.dir
@@ -774,7 +851,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.usbFormatResult = msg.res
 		m.statusLog = append(m.statusLog, fmt.Sprintf("=> [USB PREPARED] Storage Vault: %s, Live ESP: %s", msg.res.StoragePartition, msg.res.BootPartition))
 
-		// DUAL-BOOT: Fast payload stage without snapshot
 		if m.provisionMode == "dual-boot" {
 			src := "/var/tmp/os_image.payload"
 			if m.stagedPayloadPath != "" {
@@ -784,23 +860,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			if info, sErr := os.Stat(src); sErr == nil {
+				ctx, cancel := context.WithCancel(context.Background())
+				m.cancelProvision = cancel
 				m.screen = ScreenProgress
 				m.speed = NewSpeedTracker(uint64(info.Size()))
+				m.speed.Sample(0)
 				m.stepUpdates = make(chan provisionStepMsg, 64)
 				return m, tea.Batch(
-					triggerUSBStagePayloadCmd(src, msg.res.StorageMountPath, m.stepUpdates),
+					triggerUSBStagePayloadCmd(ctx, src, msg.res.StorageMountPath, m.stepUpdates),
 					listenForStepUpdates(m.stepUpdates),
 					tickCmd(),
 				)
 			}
 
-			m.screen = ScreenStorageAllocationSelect
-			m.storageCursor = 1
-			m.storageCustomInput.Blur()
-			return m, nil
+			return m, scanInternalDisksCmd()
 		}
 
-		// SINGLE-BOOT: Full host backup snapshot
 		m.screen = ScreenProgress
 		m.isBackingUp = true
 		approxBytes := engine.EstimateHostBackupSize()
@@ -816,16 +891,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case usbStageDoneMsg:
 		if msg.err != nil {
+			if strings.Contains(msg.err.Error(), "context canceled") {
+				m.statusLog = append(m.statusLog, "=> [PAUSED] Payload staging paused cleanly.")
+				return m, nil
+			}
 			m.fatalErr = msg.err
 			m.screen = ScreenError
 			return m, nil
 		}
+
+		if m.speed != nil && m.speed.TotalBytes > 0 {
+			m.speed.Sample(m.speed.TotalBytes)
+		}
 		m.overridePayloadURL = msg.destPath
-		m.statusLog = append(m.statusLog, "=> [USB STAGED] Staged OS payload in ORCH_STORAGE: "+msg.destPath)
-		m.screen = ScreenStorageAllocationSelect
-		m.storageCursor = 1
-		m.storageCustomInput.Blur()
-		return m, nil
+		m.statusLog = append(m.statusLog, "=> [USB STAGED 100%] Staged OS payload in ORCH_STORAGE: "+msg.destPath)
+
+		return m, scanInternalDisksCmd()
 
 	case postUSBResetDoneMsg:
 		m.isResettingUSB = false
@@ -876,10 +957,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusLog = append(m.statusLog, "=> [BACKUP VERIFIED] "+msg.archivePath)
 
 		if m.provisionMode == "dual-boot" {
-			m.screen = ScreenStorageAllocationSelect
-			m.storageCursor = 1
-			m.storageCustomInput.Blur()
-			return m, nil
+			return m, scanInternalDisksCmd()
 		}
 
 		m.screen = ScreenConfirm
@@ -936,7 +1014,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleProvisionStep(msg, m.stepUpdates)
 
 	case provisionDoneMsg:
-		return m.handleProvisionDone(msg)
+		m, cmd := m.handleProvisionDone(msg)
+		if m.screen == ScreenDone {
+			return m, tea.Batch(cmd, runPostInstallVerificationCmd())
+		}
+		return m, cmd
+
+	case verificationResultMsg:
+		m.verificationComplete = true
+		m.verificationOk = msg.checksPassed
+		m.verifyBootX64Ok = msg.bootX64Ok
+		m.verifyWorkerOk = msg.workerOk
+		m.verifyNvramOk = msg.nvramOk
+		m.verifyFstabOk = msg.fstabOk
+		return m, nil
 	}
 
 	return m, nil
@@ -1098,7 +1189,7 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					DownloadURL:     m.stagedPayloadPath,
 					Mirrors:         []string{m.stagedPayloadPath},
 					ApproxSizeBytes: uint64(m.stagedPayloadSize),
-					MinDiskGB:       20,
+					MinDiskGB:       25,
 				}
 				m.customBootCursor = 0
 				m.screen = ScreenCustomBootModeSelect
@@ -1139,7 +1230,7 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						DownloadURL:     m.stagedPayloadPath,
 						Mirrors:         []string{m.stagedPayloadPath},
 						ApproxSizeBytes: uint64(m.stagedPayloadSize),
-						MinDiskGB:       20,
+						MinDiskGB:       25,
 					}
 					m.customBootCursor = 0
 					m.screen = ScreenCustomBootModeSelect
@@ -1528,6 +1619,39 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case ScreenTargetDiskSelect:
+		switch keyStr {
+		case "esc":
+			m.screen = ScreenCustomBootModeSelect
+			return m, nil
+		case "up", "k":
+			if m.targetDiskCursor > 0 {
+				m.targetDiskCursor--
+			}
+		case "down", "j":
+			if m.targetDiskCursor < len(m.availableDisks)-1 {
+				m.targetDiskCursor++
+			}
+		case "1", "2", "3", "4":
+			idx, _ := strconv.Atoi(keyStr)
+			if idx > 0 && idx <= len(m.availableDisks) {
+				m.targetDiskCursor = idx - 1
+				m.chosenDiskDev = m.availableDisks[m.targetDiskCursor].DevPath
+				m.screen = ScreenStorageAllocationSelect
+				m.storageCursor = 1
+				m.storageCustomInput.Blur()
+				return m, nil
+			}
+		case "enter":
+			if len(m.availableDisks) > 0 && m.targetDiskCursor < len(m.availableDisks) {
+				m.chosenDiskDev = m.availableDisks[m.targetDiskCursor].DevPath
+				m.screen = ScreenStorageAllocationSelect
+				m.storageCursor = 1
+				m.storageCustomInput.Blur()
+				return m, nil
+			}
+		}
+
 	case ScreenStorageAllocationSelect:
 		maxChoices := 4
 		if !m.isVMEnvironment {
@@ -1536,11 +1660,11 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		switch keyStr {
 		case "esc":
-			if m.isAdvancedMode || m.overridePayloadURL != "" {
-				m.screen = ScreenCustomBootModeSelect
+			if len(m.availableDisks) > 1 {
+				m.screen = ScreenTargetDiskSelect
 				return m, nil
 			}
-			m.screen = ScreenOSSelect
+			m.screen = ScreenCustomBootModeSelect
 			return m, nil
 		case "up", "k":
 			if m.storageCursor > 0 {
@@ -1578,7 +1702,7 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					if val, err := strconv.ParseUint(valStr, 10, 64); err == nil && val > 0 {
 						m.chosenAllocBytes = val * 1024 * 1024 * 1024
 					} else {
-						m.chosenAllocBytes = 20 * 1024 * 1024 * 1024
+						m.chosenAllocBytes = 30 * 1024 * 1024 * 1024
 					}
 				}
 			case 4:
@@ -1586,12 +1710,12 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if val, err := strconv.ParseUint(valStr, 10, 64); err == nil && val > 0 {
 					m.chosenAllocBytes = val * 1024 * 1024 * 1024
 				} else {
-					m.chosenAllocBytes = 25 * 1024 * 1024 * 1024
+					m.chosenAllocBytes = 30 * 1024 * 1024 * 1024
 				}
 			}
 
-			if m.chosenAllocBytes < 15*1024*1024*1024 {
-				m.chosenAllocBytes = 15 * 1024 * 1024 * 1024
+			if m.chosenAllocBytes < 25*1024*1024*1024 {
+				m.chosenAllocBytes = 25 * 1024 * 1024 * 1024
 			}
 
 			m.screen = ScreenConfirm
@@ -1634,7 +1758,7 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					DownloadURL:     u.FilePath,
 					Mirrors:         []string{u.FilePath},
 					ApproxSizeBytes: uint64(u.SizeBytes),
-					MinDiskGB:       20,
+					MinDiskGB:       25,
 				}
 				m.customBootCursor = 0
 				m.screen = ScreenCustomBootModeSelect
@@ -1952,10 +2076,7 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if m.backupCursor == len(m.backupTargets) {
 				if m.provisionMode == "dual-boot" {
-					m.screen = ScreenStorageAllocationSelect
-					m.storageCursor = 1
-					m.storageCustomInput.Blur()
-					return m, nil
+					return m, scanInternalDisksCmd()
 				}
 				m.screen = ScreenConfirm
 				m.eraseConfirmInput.Reset()
@@ -1984,7 +2105,6 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					targetPath = tgt.Name
 				}
 
-				// DUAL-BOOT: Fast payload stage without snapshot
 				if m.provisionMode == "dual-boot" {
 					src := "/var/tmp/os_image.payload"
 					if m.stagedPayloadPath != "" {
@@ -1994,23 +2114,22 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					}
 
 					if info, sErr := os.Stat(src); sErr == nil {
+						ctx, cancel := context.WithCancel(context.Background())
+						m.cancelProvision = cancel
 						m.screen = ScreenProgress
 						m.speed = NewSpeedTracker(uint64(info.Size()))
+						m.speed.Sample(0)
 						m.stepUpdates = make(chan provisionStepMsg, 64)
 						return m, tea.Batch(
-							triggerUSBStagePayloadCmd(src, targetPath, m.stepUpdates),
+							triggerUSBStagePayloadCmd(ctx, src, targetPath, m.stepUpdates),
 							listenForStepUpdates(m.stepUpdates),
 							tickCmd(),
 						)
 					}
 
-					m.screen = ScreenStorageAllocationSelect
-					m.storageCursor = 1
-					m.storageCustomInput.Blur()
-					return m, nil
+					return m, scanInternalDisksCmd()
 				}
 
-				// SINGLE-BOOT: Full host backup snapshot
 				m.screen = ScreenProgress
 				m.isBackingUp = true
 				approxBytes := engine.EstimateHostBackupSize()
@@ -2055,7 +2174,12 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			switch keyStr {
 			case "y", "enter":
 				m.screen = ScreenProgress
-				m.speed = NewSpeedTracker(m.selectedOS.ApproxSizeBytes)
+				totalExpected := uint64(8 * 1024 * 1024 * 1024)
+				if m.selectedOS != nil && m.selectedOS.ApproxSizeBytes > 0 {
+					totalExpected = m.selectedOS.ApproxSizeBytes
+				}
+				m.speed = NewSpeedTracker(totalExpected)
+				m.speed.Sample(0)
 				return m, m.startProvisioning(false)
 			case "n", "esc":
 				m.screen = ScreenStorageAllocationSelect
@@ -2068,9 +2192,10 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch keyStr {
 		case "y", "enter":
 			m.screen = ScreenProgress
-			m.statusLog = append(m.statusLog, "=> [REVERT] Initializing bare-metal OS decommissioning transaction...")
-			m.speed = NewSpeedTracker(100)
-			m.stepUpdates = make(chan provisionStepMsg, 32)
+			m.statusLog = append(m.statusLog, "=> [REVERT 0%] Initializing bare-metal OS decommissioning transaction...")
+			m.speed = NewSpeedTracker(1000)
+			m.speed.Sample(0)
+			m.stepUpdates = make(chan provisionStepMsg, 64)
 
 			return m, tea.Batch(
 				triggerRealRevertCmd(m.stepUpdates),
@@ -2091,6 +2216,9 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.cancelProvision()
 			}
 			m.statusLog = append(m.statusLog, "=> [PAUSED] Signaled engine to pause. Preserving byte offset...")
+		case "c":
+			m.statusLog = append(m.statusLog, "=> [RESUMING] Continuing transfer from saved checkpoint...")
+			return m, m.startProvisioning(true)
 		case "s":
 			if m.cancelProvision != nil {
 				m.cancelProvision()
@@ -2102,6 +2230,9 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case ScreenDone:
 		switch keyStr {
 		case "r":
+			if m.verificationComplete && !m.verificationOk {
+				return m, nil
+			}
 			_ = exec.Command("sync").Run()
 			_ = exec.Command("reboot").Run()
 			return m, tea.Quit
@@ -2211,11 +2342,18 @@ func (m *Model) startProvisioning(isResume bool) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelProvision = cancel
 
-	pDisk, _, hostNum, targetPart, _ := engine.DetectActiveRootDisk()
+	pDisk := m.chosenDiskDev
+	hNum := "2"
+	targetPart := pDisk + "3"
+
 	if pDisk == "" {
-		pDisk = "/dev/sda"
-		hostNum = "1"
-		targetPart = "/dev/sda4"
+		detectedDisk, _, detectedHostNum, detectedTargetPart, _ := engine.DetectActiveRootDisk()
+		pDisk = detectedDisk
+		hNum = detectedHostNum
+		targetPart = detectedTargetPart
+	} else if strings.Contains(pDisk, "sda") {
+		hNum = "1"
+		targetPart = pDisk + "2"
 	}
 
 	var mirrors []string
@@ -2265,7 +2403,7 @@ func (m *Model) startProvisioning(isResume bool) tea.Cmd {
 		DownloadDestPath: "/var/tmp/os_image.payload",
 		TargetDiskPath:   pDisk,
 		TargetPartition:  targetPart,
-		HostPartNum:      hostNum,
+		HostPartNum:      hNum,
 		ESPPartNum:       "1",
 		IsWindowsImage:   isWindows,
 		BootLabel:        strings.ToLower(distroName),

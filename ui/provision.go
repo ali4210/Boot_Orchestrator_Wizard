@@ -38,8 +38,11 @@ func runProvisionWithCancel(ctx context.Context, req engine.ProvisionRequest, gr
 	return cmd, updates
 }
 
-func runRealRevert(disk, partNum, hostPart, efiDir, bootEntry string) tea.Cmd {
-	return func() tea.Msg {
+// runRealRevert connects ExecuteRealReversion to Bubble Tea's event loop via a streaming channel.
+func runRealRevert(disk, partNum, hostPart, efiDir, bootEntry string) (tea.Cmd, chan provisionStepMsg) {
+	updates := make(chan provisionStepMsg, 64)
+
+	cmd := func() tea.Msg {
 		params := engine.RealRevertParams{
 			DiskDevice:        disk,
 			PartitionNum:      partNum,
@@ -47,9 +50,24 @@ func runRealRevert(disk, partNum, hostPart, efiDir, bootEntry string) tea.Cmd {
 			EFIDirNameToPurge: efiDir,
 			EFIBootEntryNum:   bootEntry,
 		}
-		err := engine.ExecuteRealReversion(params, nil)
+
+		err := engine.ExecuteRealReversionWithProgress(params, func(msg string) {
+			select {
+			case updates <- provisionStepMsg{StepName: msg, Done: false}:
+			default:
+			}
+		}, func(step string, pct float64) {
+			select {
+			case updates <- provisionStepMsg{StepName: step, Done: pct >= 1.0}:
+			default:
+			}
+		})
+
+		close(updates)
 		return revertDoneMsg{err: err}
 	}
+
+	return cmd, updates
 }
 
 func listenForStepUpdates(ch chan provisionStepMsg) tea.Cmd {
@@ -70,19 +88,21 @@ func (m Model) handleProvisionStep(msg provisionStepMsg, ch chan provisionStepMs
 
 	lineLower := strings.ToLower(line)
 
-	// 1. Dynamic Extraction Percentage Parser
+	if m.speed == nil || m.speed.TotalBytes == 0 {
+		m.speed = NewSpeedTracker(1000)
+	}
+
+	// 1. Dynamic Extraction Percentage Parser (unsquashfs / rootfs tree unpacking)
 	if strings.Contains(lineLower, "extracting") || strings.Contains(lineLower, "unpacking") || strings.Contains(lineLower, "unsquashfs") {
 		parts := strings.Fields(line)
 		for _, part := range parts {
 			if strings.HasSuffix(part, "%") {
 				pctStr := strings.TrimSuffix(part, "%")
 				if pctVal, err := strconv.ParseFloat(pctStr, 64); err == nil && pctVal >= 0 {
-					overallPct := 0.60 + (pctVal/100.0)*0.25
-					if m.speed != nil && m.speed.TotalBytes > 0 {
-						calcBytes := uint64(overallPct * float64(m.speed.TotalBytes))
-						if m.speed.CurrentBytes < calcBytes {
-							m.speed.Sample(calcBytes)
-						}
+					overallPct := 0.40 + (pctVal/100.0)*0.45
+					calcBytes := uint64(overallPct * float64(m.speed.TotalBytes))
+					if m.speed.CurrentBytes < calcBytes {
+						m.speed.Sample(calcBytes)
 					}
 					if len(m.statusLog) > 0 && (strings.Contains(strings.ToLower(m.statusLog[len(m.statusLog)-1]), "extracting") || strings.Contains(strings.ToLower(m.statusLog[len(m.statusLog)-1]), "unsquashfs")) {
 						m.statusLog[len(m.statusLog)-1] = line
@@ -94,23 +114,49 @@ func (m Model) handleProvisionStep(msg provisionStepMsg, ch chan provisionStepMs
 		}
 	}
 
-	// 2. Network/Disk Stream Parser
-	isDownload := strings.HasPrefix(lineLower, "downloading:") || strings.Contains(lineLower, "payload staging:")
+	// 2. Reversion Step Parser (Option 3 Progress Driver)
+	if strings.Contains(lineLower, "[revert") {
+		parts := strings.Fields(line)
+		for _, part := range parts {
+			if strings.HasSuffix(part, "%]") {
+				raw := strings.TrimPrefix(part, "[revert")
+				raw = strings.TrimSuffix(raw, "%]")
+				raw = strings.TrimPrefix(raw, " ")
+				if pctVal, err := strconv.ParseFloat(raw, 64); err == nil && pctVal >= 0 {
+					calcBytes := uint64((pctVal / 100.0) * float64(m.speed.TotalBytes))
+					if m.speed.CurrentBytes < calcBytes {
+						m.speed.Sample(calcBytes)
+					}
+				}
+				break
+			}
+		}
+		m.statusLog = append(m.statusLog, line)
+		return m, listenForStepUpdates(ch)
+	}
+
+	// 3. Network Stream & USB Payload Staging Parser (Full 0% to 100% scale)
+	isStaging := strings.Contains(lineLower, "payload staging:")
+	isDownload := strings.HasPrefix(lineLower, "downloading:")
 	isCompress := strings.HasPrefix(lineLower, "compressing:")
 
-	if isDownload || isCompress {
+	if isStaging || isDownload || isCompress {
 		parts := strings.Fields(line)
 		for _, part := range parts {
 			if strings.HasSuffix(part, "%") {
 				pctStr := strings.TrimSuffix(part, "%")
 				if pctVal, err := strconv.ParseFloat(pctStr, 64); err == nil && pctVal >= 0 {
-					overallPct := (pctVal / 100.0) * 0.50
-					if m.speed != nil && m.speed.TotalBytes > 0 {
-						calcBytes := uint64(overallPct * float64(m.speed.TotalBytes))
-						if m.speed.CurrentBytes < calcBytes {
-							m.speed.Sample(calcBytes)
-						}
+					var overallPct float64
+					if isStaging {
+						// Payload staging to USB runs 0% -> 100%
+						overallPct = pctVal / 100.0
+					} else {
+						// Remote downloads consume first half of pipeline
+						overallPct = (pctVal / 100.0) * 0.50
 					}
+
+					calcBytes := uint64(overallPct * float64(m.speed.TotalBytes))
+					m.speed.Sample(calcBytes)
 				}
 				break
 			}
@@ -119,8 +165,8 @@ func (m Model) handleProvisionStep(msg provisionStepMsg, ch chan provisionStepMs
 		prefix := "downloading:"
 		if isCompress {
 			prefix = "compressing:"
-		} else if strings.Contains(lineLower, "payload staging:") {
-			prefix = "preflight payload staging:"
+		} else if isStaging {
+			prefix = "payload staging:"
 		}
 
 		if len(m.statusLog) > 0 && strings.HasPrefix(strings.ToLower(m.statusLog[len(m.statusLog)-1]), prefix) {
@@ -131,7 +177,7 @@ func (m Model) handleProvisionStep(msg provisionStepMsg, ch chan provisionStepMs
 		return m, listenForStepUpdates(ch)
 	}
 
-	// 3. Monotonic Milestone Progress Steps
+	// 4. Monotonic Milestone Progress Steps
 	var stepTarget float64
 	switch {
 	case strings.Contains(lineLower, "verifying cryptographic payload"):
@@ -140,17 +186,17 @@ func (m Model) handleProvisionStep(msg provisionStepMsg, ch chan provisionStepMs
 		stepTarget = 0.55
 	case strings.Contains(lineLower, "partition carved") || strings.Contains(lineLower, "physical dual-boot partition carved"):
 		stepTarget = 0.58
-	case strings.Contains(lineLower, "image-deploy"):
-		stepTarget = 0.60
+	case strings.Contains(lineLower, "rootfs deploy") || strings.Contains(lineLower, "image-deploy"):
+		stepTarget = 0.65
 	case strings.Contains(lineLower, "persistence") || strings.Contains(lineLower, "inspecting target partition"):
 		stepTarget = 0.88
 	case strings.Contains(lineLower, "configuring autonomous dual-boot") || strings.Contains(lineLower, "bootloader-configure"):
 		stepTarget = 0.94
-	case strings.Contains(lineLower, "synchronized") || strings.Contains(lineLower, "completed successfully"):
+	case strings.Contains(lineLower, "completed successfully") || strings.Contains(lineLower, "complete 100%"):
 		stepTarget = 1.00
 	}
 
-	if stepTarget > 0 && m.speed != nil && m.speed.TotalBytes > 0 {
+	if stepTarget > 0 && m.speed.TotalBytes > 0 {
 		targetBytes := uint64(stepTarget * float64(m.speed.TotalBytes))
 		if targetBytes > m.speed.CurrentBytes {
 			m.speed.Sample(targetBytes)

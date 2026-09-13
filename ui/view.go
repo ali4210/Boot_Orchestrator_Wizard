@@ -1,5 +1,5 @@
 // Package ui — view.go implements the rendering engine and screen layouts
-// for the Enterprise Pro TUI, including physical disk carving telemetry,
+// for the Enterprise Pro TUI, including physical multi-disk selection telemetry,
 // autonomous dynamic USB partitioning warnings, and target selection panels.
 package ui
 
@@ -45,6 +45,8 @@ func (m Model) View() string {
 		body = m.viewLANPeerConnect()
 	case ScreenCustomBootModeSelect:
 		body = m.viewCustomBootModeSelect()
+	case ScreenTargetDiskSelect:
+		body = m.viewTargetDiskSelect()
 	case ScreenStorageAllocationSelect:
 		body = m.viewStorageAllocationSelect()
 	case ScreenSeederDashboard:
@@ -110,6 +112,8 @@ func (m Model) footerHint() string {
 		hint = "UP/DOWN: Pick Server  |  TAB: Manual Entry  |  ENTER: Commit  |  ESC: Back"
 	case ScreenCustomBootModeSelect:
 		hint = "UP/DOWN: Choose Dual/Single Boot  |  ENTER: Commit  |  ESC: Back"
+	case ScreenTargetDiskSelect:
+		hint = "UP/DOWN: Highlight Physical Drive  |  1-4: Quick Select  |  ENTER: Commit Target Drive  |  ESC: Back"
 	case ScreenStorageAllocationSelect:
 		hint = "UP/DOWN: Pick Scheme  |  TAB: Custom Input  |  ENTER: Confirm Storage  |  ESC: Back"
 	case ScreenSeederDashboard:
@@ -151,9 +155,13 @@ func (m Model) footerHint() string {
 	case ScreenRevertConfirm:
 		hint = "Y/ENTER: Confirm Removal  |  N/ESC: Back to Hub  |  ESC: Quit"
 	case ScreenProgress:
-		hint = "P: Pause & Save State  |  S: Stop & Rollback Everything"
+		hint = "P: Pause & Save State  |  C: Continue / Resume  |  S: Stop & Rollback Everything"
 	case ScreenDone:
-		hint = "R: Reboot Into New OS Now  |  1-2: Media Management  |  ENTER/ESC: Return to Hub"
+		if m.verificationComplete && !m.verificationOk {
+			hint = "VERIFICATION HALT: Review red items above | ENTER/ESC: Hub"
+		} else {
+			hint = "R: Reboot Into Autonomous USB Installer Now  |  ENTER/ESC: Hub"
+		}
 	case ScreenRevertDone:
 		hint = "ENTER/ESC: Return to Hub Menu  |  ESC: Quit"
 	case ScreenError:
@@ -560,6 +568,46 @@ func (m Model) viewCustomBootModeSelect() string {
 	return StylePanel.Render(b.String())
 }
 
+func (m Model) viewTargetDiskSelect() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n\n", StyleTitle.Render("TARGET STORAGE SELECTION: DETECTED INTERNAL DRIVES"))
+	fmt.Fprintf(&b, "%s\n\n", StyleMuted.Render("Multiple non-removable storage drives detected. Select installation destination:"))
+
+	for i, d := range m.availableDisks {
+		cursor := "  "
+		style := StyleNormalItem
+		if m.targetDiskCursor == i {
+			cursor = "=>"
+			style = StyleSelectedItem
+		}
+
+		statusBadge := BadgeSuccess.Render(" READY (SECONDARY STORAGE) ")
+		notes := "Can be partitioned directly without shrinking host OS"
+
+		if strings.Contains(d.DevPath, "sdb") || strings.Contains(d.DevPath, "nvme0n1") {
+			statusBadge = BadgeWarning.Render(" ACTIVE HOST OS DRIVE ")
+			notes = "Contains active Linux root; shrinking requires offline USB handoff"
+		}
+
+		label := d.Vendor + " " + d.Model
+		if strings.TrimSpace(label) == "" {
+			label = "Internal Storage Device"
+		}
+
+		fmt.Fprintf(&b, "%s [%d] %s ── Size: %s  [%s]\n",
+			cursor,
+			i+1,
+			style.Render(d.DevPath),
+			d.Size,
+			StyleMuted.Render(label),
+		)
+		fmt.Fprintf(&b, "     Status: %s\n     Notes:  %s\n\n", statusBadge, StyleMuted.Render(notes))
+	}
+
+	fmt.Fprintf(&b, "=> %s", StyleSubTitle.Render("UP/DOWN: Navigate drives | 1-4: Direct select | ENTER: Commit drive | ESC: Back"))
+	return StylePanel.Render(b.String())
+}
+
 func (m Model) viewStorageAllocationSelect() string {
 	var b strings.Builder
 
@@ -571,6 +619,9 @@ func (m Model) viewStorageAllocationSelect() string {
 		envBadge = BadgeInfo.Render(" VIRTUAL MACHINE DETECTED (" + strings.ToUpper(m.vmHypervisorName) + ") ")
 	}
 	fmt.Fprintf(&b, "  Hardware Environment: %s\n", envBadge)
+	if m.chosenDiskDev != "" {
+		fmt.Fprintf(&b, "  Target Hardware Disk: %s\n", StyleSubTitle.Render(m.chosenDiskDev))
+	}
 	fmt.Fprintf(&b, "  Host Usable Headroom: %s\n\n", StyleSubTitle.Render(fmt.Sprintf("%.1f GB Free Storage Available", freeGB)))
 
 	if m.isVMEnvironment && freeGB < 20.0 {
@@ -649,35 +700,34 @@ func (m Model) viewUSBSelect() string {
 
 	if m.isScanning {
 		fmt.Fprintf(&b, "  %s %s\n\n", BadgeInfo.Render(" SCANNING "), StyleSubTitle.Render("Probing USB devices and scanning filesystem directories..."))
+		return StylePanel.Render(b.String())
 	}
 
-	if len(m.discoveredUSBs) == 0 && !m.isScanning {
+	if len(m.discoveredUSBs) == 0 {
 		fmt.Fprintf(&b, "  %s\n\n", StyleDanger.Render("No bootable ISO, IMG, or archive files found on attached USB storage."))
 		fmt.Fprintf(&b, "  => Connect your USB drive and press %s to scan again.\n", StyleSubTitle.Render("[R]"))
 		fmt.Fprintf(&b, "  => Press %s to return to Client Menu.\n", StyleMuted.Render("[ESC]"))
 		return StylePanel.Render(b.String())
 	}
 
-	if len(m.discoveredUSBs) > 0 {
-		fmt.Fprintf(&b, "%s\n\n", StyleMuted.Render("Select payload to deploy directly to this machine:"))
-		for i, u := range m.discoveredUSBs {
-			cursor := "  "
-			style := StyleNormalItem
-			if m.usbCursor == i {
-				cursor = "=>"
-				style = StyleSelectedItem
-			}
-			fmt.Fprintf(&b, "%s [%d] %s (%s)\n     Device: %s  |  Path: %s\n\n",
-				cursor,
-				i+1,
-				style.Render(u.FileName),
-				FormatBytes(uint64(u.SizeBytes)),
-				u.DeviceName,
-				StyleMuted.Render(u.FilePath),
-			)
+	fmt.Fprintf(&b, "%s\n\n", StyleMuted.Render("Select payload to deploy directly to this machine:"))
+	for i, u := range m.discoveredUSBs {
+		cursor := "  "
+		style := StyleNormalItem
+		if m.usbCursor == i {
+			cursor = "=>"
+			style = StyleSelectedItem
 		}
-		fmt.Fprintf(&b, "=> Press %s to select image for single-boot wipe, or %s to cancel.", StyleSubTitle.Render("[ENTER]"), StyleMuted.Render("[ESC]"))
+		fmt.Fprintf(&b, "%s [%d] %s (%s)\n     Device: %s  |  Path: %s\n\n",
+			cursor,
+			i+1,
+			style.Render(u.FileName),
+			FormatBytes(uint64(u.SizeBytes)),
+			u.DeviceName,
+			StyleMuted.Render(u.FilePath),
+		)
 	}
+	fmt.Fprintf(&b, "=> Press %s to select image for partition deployment, or %s to cancel.", StyleSubTitle.Render("[ENTER]"), StyleMuted.Render("[ESC]"))
 
 	return StylePanel.Render(b.String())
 }
@@ -923,7 +973,7 @@ func (m Model) viewBackupPrompt() string {
 
 func (m Model) viewDisasterRecovery() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n\n", BadgeInfo.Render(" DISASTER RECOVERY: EXTERNAL BACKUP SCANNER "))
+	fmt.Fprintf(&b, "%s\n\n", BadgeInfo.Render(" DISASTER RECOVERY: EXTERQUAL BACKUP SCANNER "))
 	fmt.Fprintf(&b, "Connect the USB drive or external hard drive containing your host backup archive.\n\n")
 
 	if m.isScanning {
@@ -1041,6 +1091,7 @@ func (m Model) viewConfirm() string {
 	fmt.Fprintf(&b, "%s\n\n", StyleTitle.Render("TRANSACTION CONFIRMATION & WRITE ASSERTION"))
 	fmt.Fprintf(&b, "  => Target OS:        %s %s\n", StyleSubTitle.Render(e.Distro), e.Version)
 	fmt.Fprintf(&b, "  => Execution Mode:   %s\n", modeBadge)
+	fmt.Fprintf(&b, "  => Target Disk:      %s\n", StyleSubTitle.Render(m.chosenDiskDev))
 	fmt.Fprintf(&b, "  => Profile:          %s\n", flavorBadge)
 	fmt.Fprintf(&b, "  => Architecture:     %s\n", e.Arch)
 	fmt.Fprintf(&b, "  => Storage Quota:    %s\n", StyleSubTitle.Render(FormatBytes(m.chosenAllocBytes)))
@@ -1075,32 +1126,36 @@ func (m Model) viewRevertConfirm() string {
 
 func (m Model) viewProgress() string {
 	pct := 0.0
-	etaStr := "Calculating..."
-	speedStr := "-- MB/s"
+	etaStr := "In Progress"
+	speedStr := "Hardware Bus Active"
 
 	if m.speed != nil {
 		if p := m.speed.PercentComplete(); p >= 0 {
 			pct = p / 100
 		}
-		d, ok := m.speed.ETA()
-		etaStr = FormatETA(d, ok)
-		speedStr = FormatBytesPerSecond(m.speed.BytesPerSecond())
+		if d, ok := m.speed.ETA(); ok {
+			etaStr = FormatETA(d, ok)
+		}
+		if bps := m.speed.BytesPerSecond(); bps > 0 {
+			speedStr = FormatBytesPerSecond(bps)
+		}
 	}
 
 	bar := m.progressBar.ViewAs(pct)
 	percentBadge := BadgeInfo.Render(fmt.Sprintf(" %.1f%% ", pct*100))
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n\n", StyleTitle.Render("PIPELINE EXECUTION: STREAMING & PROVISIONING"))
+	fmt.Fprintf(&b, "%s\n\n", StyleTitle.Render("PIPELINE EXECUTION: PROVISIONING & RESTORATION"))
 	fmt.Fprintf(&b, "%s\n\n", bar)
-	fmt.Fprintf(&b, "Status: %s    Speed: %s    %s\n",
+	fmt.Fprintf(&b, "Status: %s    Activity: %s    %s\n",
 		percentBadge,
 		StyleProgressLabel.Render(speedStr),
-		StyleETA.Render("ETA: "+etaStr),
+		StyleETA.Render("Timing: "+etaStr),
 	)
 
-	fmt.Fprintf(&b, "\n[CONTROLS]: %s to Pause & Save State  |  %s to Stop & Rollback\n\n",
+	fmt.Fprintf(&b, "\n[CONTROLS]: %s to Pause  |  %s to Continue / Resume  |  %s to Stop & Rollback\n\n",
 		StyleSubTitle.Render("[P]"),
+		StyleSubTitle.Render("[C]"),
 		StyleDanger.Render("[S]"),
 	)
 
@@ -1119,22 +1174,46 @@ func (m Model) viewProgress() string {
 
 func (m Model) viewDone() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n\n", BadgeSuccess.Render(" OPERATION COMPLETED & VERIFIED "))
-	fmt.Fprintf(&b, "Environment has been autonomously provisioned and validated:\n")
-	fmt.Fprintf(&b, "  => %s Linux kernel & ramdisk verified in target /boot\n", BadgeSuccess.Render(" OK "))
-	fmt.Fprintf(&b, "  => %s Dedicated physical partition mapped in /etc/fstab\n", BadgeSuccess.Render(" OK "))
-	fmt.Fprintf(&b, "  => %s Host GRUB bootloader stanza generated & verified\n", BadgeSuccess.Render(" OK "))
-	fmt.Fprintf(&b, "  => %s Staged scratch files autonomously purged from /var/tmp\n", BadgeSuccess.Render(" OK "))
-	fmt.Fprintf(&b, "  => %s Visible boot selection menu enforced (10s timeout)\n\n", BadgeSuccess.Render(" OK "))
+	fmt.Fprintf(&b, "%s\n\n", BadgeSuccess.Render(" OPERATION COMPLETED & STAGED "))
+	fmt.Fprintf(&b, "Environment has been autonomously configured for deployment:\n\n")
+
+	// Autonomous Verification Gate Telemetry
+	fmt.Fprintf(&b, "%s\n", StyleTitle.Render("AUTOMATED PRE-REBOOT SYSTEM ASSERTIONS:"))
+	if !m.verificationComplete {
+		fmt.Fprintf(&b, "  %s Polling motherboard NVRAM, partition tables, and USB EFI stack...\n\n", BadgeInfo.Render(" AUDITING "))
+	} else {
+		bBadge := BadgeSuccess.Render(" OK ")
+		if !m.verifyBootX64Ok {
+			bBadge = BadgeDanger.Render(" FAIL ")
+		}
+		wBadge := BadgeSuccess.Render(" OK ")
+		if !m.verifyWorkerOk {
+			wBadge = BadgeDanger.Render(" FAIL ")
+		}
+		nBadge := BadgeSuccess.Render(" OK ")
+		if !m.verifyNvramOk {
+			nBadge = BadgeDanger.Render(" FAIL ")
+		}
+
+		fmt.Fprintf(&b, "  => %s Universal Fallback \\EFI\\BOOT\\BOOTX64.EFI verified on /dev/sdc2\n", bBadge)
+		fmt.Fprintf(&b, "  => %s Autonomous Resizer transient_resize.sh verified on /dev/sdc1\n", wBadge)
+		fmt.Fprintf(&b, "  => %s UEFI Motherboard NVRAM BootNext: 0000 pointer registered\n\n", nBadge)
+
+		if m.verificationOk {
+			fmt.Fprintf(&b, "  %s %s\n\n", BadgeSuccess.Render(" SYSTEM GREEN "), StyleSubTitle.Render("All firmware and offline staging checks passed. Ready for safe reboot."))
+		} else {
+			fmt.Fprintf(&b, "  %s %s\n\n", BadgeDanger.Render(" ATTENTION REQUIRED "), StyleDanger.Render("One or more offline staging files failed verification."))
+		}
+	}
 
 	fmt.Fprintf(&b, "%s\n", StyleTitle.Render("PRESET SYSTEM CREDENTIALS (AUTONOMOUS INJECTION):"))
 	fmt.Fprintf(&b, "  => Root Admin:     Username: %s     | Password: %s\n",
 		StyleSubTitle.Render("root"),
-		StyleDanger.Render("toor"),
+		StyleDanger.Render("saleem"),
 	)
 	fmt.Fprintf(&b, "  => Standard User:  Username: %s   | Password: %s   (Sudo Enabled)\n\n",
-		StyleSubTitle.Render("parrot"),
-		StyleDanger.Render("parrot"),
+		StyleSubTitle.Render("saleem"),
+		StyleDanger.Render("saleem"),
 	)
 
 	fmt.Fprintf(&b, "%s\n", StyleTitle.Render("REMOVABLE MEDIA (USB) MANAGEMENT:"))
@@ -1181,7 +1260,11 @@ func (m Model) viewDone() string {
 	}
 
 	fmt.Fprintf(&b, "%s\n", StyleTitle.Render("ACTIONS:"))
-	fmt.Fprintf(&b, "  %s  Reboot now directly into the OS\n", StyleSubTitle.Render("[R]      "))
+	if m.verificationComplete && !m.verificationOk {
+		fmt.Fprintf(&b, "  %s\n", StyleDanger.Render("[R LOCKED] Reboot disabled until verification passes."))
+	} else {
+		fmt.Fprintf(&b, "  %s  Reboot now directly into the autonomous USB installer\n", StyleSubTitle.Render("[R]      "))
+	}
 	fmt.Fprintf(&b, "  %s  Return to Enterprise Hub Menu\n\n", StyleMuted.Render("[ENTER/ESC]"))
 
 	return StylePanel.Render(b.String())
