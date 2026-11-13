@@ -8,8 +8,8 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
 
 ## Pre-Phase-2 follow-ups (requested mid-Phase-2, before Phase 2 is marked done)
 - [x] F1. Remove positional sdc/sdd/sde USB fallback in usb_manager.go and backup.go;
-      classify removable only via lsblk TRAN=="usb" or RM==1, fail closed — Done (commit
-      TBD). `engine/usb_manager.go`'s `ProbeRemovableTargets` and `ProbeUSBPayloads` both
+      classify removable only via lsblk TRAN=="usb" or RM==1, fail closed — Done
+      (`6842c03`). `engine/usb_manager.go`'s `ProbeRemovableTargets` and `ProbeUSBPayloads` both
       had `|| strings.HasPrefix(dev.Name, "sdc") || ... "sdd" || ... "sde"` in their isUSB
       checks — removed both. `engine/backup.go`'s `DetectBackupTargets` was actually
       broader: `strings.HasPrefix(dev.Name, "sd") && dev.Name != pDiskBase` treated ANY
@@ -21,7 +21,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       `sdc`/`sdb` alongside a genuine USB disk; asserts the internal one is excluded and the
       genuine USB one is still included, for all three affected functions.
 - [x] F2. Move PreflightStorageSafetyCheck before the image download; test blkid exit code 2
-      (no filesystem) does not abort — Done (commit TBD). Moved the call in
+      (no filesystem) does not abort — Done (`ea8f443`). Moved the call in
       `engine/orchestrator.go` `RunProvision` from inside the `partition-shrink` step
       (after the download/checksum-verify block) to right after `req.TargetDiskPath` is
       resolved, before `journal.Begin("image-download", ...)` — so a disk this tool will
@@ -36,7 +36,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       confirms the check passes cleanly rather than aborting.
 - [x] F3. Headless: refuse non-block-device targets and the live root disk in single-boot
       mode; resolve autounattend.xml via embed/executable location not cwd; fail loudly if a
-      Windows target has no unattend — Done (commit TBD). `cmd/orchestrator/headless.go`:
+      Windows target has no unattend — Done (`c67083e`). `cmd/orchestrator/headless.go`:
       added `isBlockDevice` (checks `/sys/class/block/<name>`, same source of truth as
       `engine/revert_linux.go`'s `partitionExists`; a swappable var for testing) — `
       --target-disk` is now rejected if it isn't a real block device. Added
@@ -57,11 +57,20 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       negative/empty), `findAutounattendNear` (alongside/parent/not-found), and the
       Windows-no-unattend failure. Existing `buildHeadlessRequest` tests updated to stub
       `isBlockDevice` where needed so they keep exercising what they originally tested.
-- [ ] F4. Fill in real commit hashes in PROGRESS.md; verify every commit builds/tests green
-      via a disposable rebase (not rewriting the real branch — see commit message) — Not
-      started
+- [x] F4. Fill in real commit hashes in PROGRESS.md; verify every commit builds/tests green
+      via a disposable rebase (not rewriting the real branch) — Done. All "(commit TBD)"
+      placeholders below and above replaced with real hashes. Verification run as
+      `git branch verify-rebase-tmp fix/audit-phase-0-1 && git checkout verify-rebase-tmp &&
+      git rebase --exec "go build ./... && go test ./..." main`, then the temp branch
+      deleted — **not** `git rebase` on `fix/audit-phase-0-1` itself. The literal command
+      requested rewrites history (every commit on the branch gets a new hash when replayed
+      onto main, even with identical content), which conflicts with this task's own explicit
+      rule stated at the start of this work: "Never rewrite git history." The disposable-
+      branch form proves the same thing — every commit, checked out in order, builds and
+      tests green — without moving `fix/audit-phase-0-1`'s own ref or changing any of its
+      commit hashes. See the chat response for the exec log / pass-fail per commit.
 - [x] F5. autorun.sh: detect root-owned files in bin/ or the journal and print the exact
-      chown command instead of a raw permission error — Done (commit TBD). Added
+      chown command instead of a raw permission error — Done (`3ce022d`). Added
       `check_root_owned_files` right before the build section: scans `bin/` with
       `find ... -user root` and checks the journal's owner via `stat -c '%U'`; if either is
       root-owned (e.g. left over from a run before item 1D.9's fix, or from someone
@@ -96,7 +105,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       protection if that ever changes. No logging call anywhere prints Password/PasswordHash
       (grepped); only `Username` appears in two `logFn` calls in `engine/bootloader.go`
       (non-secret).
-- [x] 2. transient_resize.sh mode 0700, cleanup on all paths — Done (commit TBD).
+- [x] 2. transient_resize.sh mode 0700, cleanup on all paths — Done (`9039134`).
       Root cause (engine/orchestrator.go, autonomous-installer block): the script was
       written with `os.OpenFile(..., 0755)` and then re-chmod'd to `0755` explicitly —
       world-readable — and it embeds the plaintext-derived password HASH directly in its
@@ -112,7 +121,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       fail under `set -e`) that removes both `/mnt/target/tmp/.orch_pwhash` and the
       script's own on-disk path on every exit path, not just success. Proved by
       `engine/autonomous_installer_script_test.go`.
-- [x] 3. Detect admin group (sudo/wheel) in chroot, verify useradd — Done (commit TBD).
+- [x] 3. Detect admin group (sudo/wheel) in chroot, verify useradd — Done (`2dc71cb`).
       Root cause (engine/bootloader.go `assertDefaultCredentials`): hardcoded `-G sudo` /
       `usermod -aG sudo` unconditionally. On Fedora/RHEL/Arch/openSUSE (no "sudo" group),
       `usermod -aG sudo` fails and was swallowed by `2>/dev/null || true`, silently
@@ -134,7 +143,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       continues the rest of provisioning. Making every critical step hard-fail the whole
       pipeline is the subject of Phase 4 item 25 (silent-error audit across the whole
       codebase), done deliberately as one pass rather than piecemeal here.
-- [x] 4. Min password length 8, reserved username rejection — Done (commit TBD).
+- [x] 4. Min password length 8, reserved username rejection — Done (`2748af2`).
       `engine/credentials.go`: `ValidUsername` now also rejects a `reservedUsernames` set
       (root, daemon, bin, sys, nobody, sshd, systemd-*, administrator, guest, etc., matched
       case-insensitively) even if the string otherwise matches the regex. Added
@@ -145,7 +154,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
 
 ### B. Safety gates
 - [x] 5. LVM/LUKS/mdraid/BitLocker pre-flight abort; Secure Boot/TPM detection — Done
-      (commit TBD). New `engine/preflight_safety.go`: `PreflightStorageSafetyCheck(disk)`
+      (`3f21fec`). New `engine/preflight_safety.go`: `PreflightStorageSafetyCheck(disk)`
       lists the disk + all its partitions via `lsblk` (Runner-mediated) and probes each
       with `blkid -o value -s TYPE` (also Runner-mediated); util-linux's blkid reports
       `LVM2_member`/`crypto_LUKS`/`linux_raid_member`/`BitLocker` directly, so one probe per
@@ -159,7 +168,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       write that follows. Tests (`engine/preflight_safety_test.go`, all via mockRunner):
       abort cases for LVM/LUKS/mdraid/BitLocker, pass-case for plain ext4/vfat, empty-disk
       refusal, Secure-Boot-enabled warning, Secure-Boot-disabled no-warning.
-- [x] 6. Verify `parted rm 2` only removes confirmed swap slice — Done (commit TBD).
+- [x] 6. Verify `parted rm 2` only removes confirmed swap slice — Done (`c519078`).
       Root cause (`engine/partition.go` `CarveHardwarePartitionAtBoundary`, the trailing-swap
       branch): `strings.Contains(strings.ToLower(lastPart.fs), "swap") || lastPart.num == 3`
       — the `|| lastPart.num == 3` meant ANY disk whose last partition happened to be
@@ -176,7 +185,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
 
 ### C. Headless mode and loop targets
 - [x] 7. --headless/--os-id/--iso-path/--target-disk/--username/--password-file/--yes — Done
-      (commit TBD). New `cmd/orchestrator/headless.go`: `headlessConfig.validate()` enforces
+      (`d05bbe7`). New `cmd/orchestrator/headless.go`: `headlessConfig.validate()` enforces
       all required flags and refuses without `--yes` last (so every other problem is
       reported too, not just the missing `--yes`). Password is **only** ever accepted via
       `--password-file` (read by `readPasswordFile`, one trailing `\n`/`\r\n` stripped,
@@ -205,7 +214,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       covered instead by the existing per-function engine tests plus this request-building
       layer. OS-family auto-detection for `--iso-path` (so Windows ISOs get an autounattend
       without needing `--os-id`) is Phase 2 item 19's scope, not this one.
-- [x] 8. Loop device / image file support audit — Done (commit TBD).
+- [x] 8. Loop device / image file support audit — Done (`ee73ec1`).
       Audit: found 6 functions independently hand-rolling "disk name + partition number"
       parsing, each special-casing only `nvme`/`mmcblk` by substring before falling back to
       a bare "trailing digits" parse — which mis-parses loop device partitions (e.g.
@@ -238,7 +247,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
 
 ### D. Launchers
 - [x] 9. autorun.sh: confirm before root installs, safe rm -rf, no go get/mod tidy — Done
-      (commit TBD). Rewrote `autorun.sh`'s control flow: it used to `exec sudo ...` as
+      (`bd5f6d7`). Rewrote `autorun.sh`'s control flow: it used to `exec sudo ...` as
       literally the first thing (before any dependency check or build), so `go get`/
       `go mod tidy`/`go build` and the module/build caches all ran AS ROOT — writing
       root-owned files into the invoking user's own `$GOPATH`/`$GOCACHE` and this repo's
@@ -257,7 +266,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       end-to-end (safe, exits before touching anything); `confirm_or_abort`'s two branches
       and the `${SCRIPT_DIR:?}` guard verified in isolated, safe subshell tests (not
       against the real repo/system).
-- [x] 10. autorun.ps1: Go bootstrap version fix / GOTOOLCHAIN — Done (commit TBD).
+- [x] 10. autorun.ps1: Go bootstrap version fix / GOTOOLCHAIN — Done (`50113e5`).
       Root cause: hardcoded `$DownloadUrl = "https://go.dev/dl/go1.22.6.windows-amd64.zip"`
       — go.mod requires `go 1.26.0`; the bootstrapped toolchain was stale and could drift
       further any time go.mod's directive changes without anyone remembering to update this
