@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -88,7 +89,46 @@ func NewJournal(path, txnID string) (*Journal, error) {
 	if err := j.flush(); err != nil {
 		return nil, err
 	}
+	// Follow-up F6: this engine typically runs elevated (via sudo) so it
+	// can perform partition/bootloader operations, but the journal file it
+	// just created would then be left root-owned in the invoking user's
+	// own repo checkout — autorun.sh used to hard-block on exactly that on
+	// the next run. Hand ownership back to the invoking user immediately,
+	// best-effort (not fatal if it fails, e.g. not actually running under
+	// sudo).
+	chownToSudoUser(path)
 	return j, nil
+}
+
+// resolveSudoOwner parses SUDO_UID/SUDO_GID from getenv, returning
+// ok=false if either is unset or not a valid integer (e.g. this process
+// isn't running under sudo at all). Kept separate from chownToSudoUser so
+// the parsing logic is testable without needing root or a real file.
+func resolveSudoOwner(getenv func(string) string) (uid, gid int, ok bool) {
+	uidStr := getenv("SUDO_UID")
+	gidStr := getenv("SUDO_GID")
+	if uidStr == "" || gidStr == "" {
+		return 0, 0, false
+	}
+	u, err := strconv.Atoi(uidStr)
+	if err != nil {
+		return 0, 0, false
+	}
+	g, err := strconv.Atoi(gidStr)
+	if err != nil {
+		return 0, 0, false
+	}
+	return u, g, true
+}
+
+// chownToSudoUser hands ownership of path to SUDO_UID/SUDO_GID if this
+// process is running under sudo. Best-effort: a failed chown doesn't
+// affect journal correctness, only the convenience of not leaving a
+// root-owned file behind.
+func chownToSudoUser(path string) {
+	if uid, gid, ok := resolveSudoOwner(os.Getenv); ok {
+		_ = os.Chown(path, uid, gid)
+	}
 }
 
 // LoadJournal reads an existing journal.json and rejects empty/invalid files cleanly.

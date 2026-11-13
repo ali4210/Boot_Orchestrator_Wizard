@@ -93,6 +93,28 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       from an earlier, pre-session `sudo ./autorun.sh` run — exactly the case this check now
       catches with a clear message instead of a confusing build failure. `bash -n` and
       `shellcheck` both clean.
+- [x] F6. autorun.sh: block only on root-owned bin/; journal gets a warning, not exit 1;
+      engine chowns the journal to SUDO_UID/SUDO_GID after creating it; test the real
+      autorun.sh (sourced), not a pasted copy — Done (commit TBD). Restructured
+      `autorun.sh` so it can be `source`d for testing: `SCRIPT_DIR` now uses
+      `: "${SCRIPT_DIR:=...}"` (respects a pre-set value instead of always recomputing),
+      the action sequence moved into a `main()` function, and a trailing `if [[
+      "${BASH_SOURCE[0]}" == "${0}" ]]; then main "$@"; fi` guard runs it only when the
+      script is executed directly — sourcing just defines the functions. Split
+      `check_root_owned_files`: a root-owned file under `bin/` still hard-blocks (exit 1,
+      prints the `chown` fix); a root-owned journal now only prints a `[WARNING]` and
+      continues. `safety/journal.go`'s `NewJournal` now calls `chownToSudoUser` (new,
+      alongside the pure, testable `resolveSudoOwner`) right after writing the journal for
+      the first time, handing ownership back to `SUDO_UID`/`SUDO_GID` when running under
+      sudo, best-effort. Tests:
+      `autorun_test.go` (new root-level test package) sources the real `autorun.sh` via
+      `source` with `SCRIPT_DIR` pointed at a scratch dir — no pasted copy of the function —
+      covering no-offenders, root-owned-bin-blocks, and root-owned-journal-warns-only (the
+      latter two skip gracefully if passwordless `sudo` isn't available, so this never hangs
+      on a password prompt). `safety/journal_chown_test.go`: `resolveSudoOwner` parsing table
+      test, plus an end-to-end `NewJournal` test that sets `SUDO_UID`/`SUDO_GID` to the test
+      process's own uid/gid (a self-chown needs no elevated privilege) to exercise the real
+      `os.Chown` call path, not just the parsing logic.
 
 ## Phase 1: Hardening and testability
 

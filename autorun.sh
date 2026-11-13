@@ -13,39 +13,18 @@
 #  go.mod/go.sum). Root is now requested only once, right before launching
 #  the already-built binary; everything before that runs as the invoking
 #  user.
+#
+#  Follow-up F6: the function definitions below (and the variable setup that
+#  precedes them) are structured so this file can be `source`d — e.g. by a
+#  test — without running the `main` action sequence at the bottom, which
+#  only fires when the script is executed directly. SCRIPT_DIR also honors
+#  a pre-set value (`: "${SCRIPT_DIR:=...}"`) instead of always
+#  recomputing it, so a test can point it at a scratch directory.
 # ==============================================================================
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${SCRIPT_DIR:?}"
-
-# 1. Quick Help Check
-for arg in "$@"; do
-    case "$arg" in
-        -h|--help)
-            echo "Universal Boot Orchestrator :: Runtime Help"
-            echo ""
-            echo "Usage:"
-            echo "  ./autorun.sh          Standard launch (builds if missing, then elevates to run)"
-            echo "  ./autorun.sh -f       Force clean rebuild + launch"
-            echo "  ./autorun.sh --hard   Deep purge of modules, caches, journals + fresh rebuild + launch"
-            echo "  ./autorun.sh -y       Assume 'yes' to any confirmation (e.g. installing missing packages)"
-            echo "  ./autorun.sh -h       Display this help menu"
-            echo ""
-            exit 0
-            ;;
-    esac
-done
-
-if [ "$EUID" -eq 0 ] && [ -z "$SUDO_USER" ]; then
-    echo "======================================================================"
-    echo " [NOTICE] Running directly as root (no SUDO_USER) — dependency"
-    echo " resolution and compilation will produce root-owned files in this"
-    echo " repository. Prefer running this script as your normal user; it"
-    echo " will ask for root only when it actually needs it."
-    echo "======================================================================"
-fi
+: "${SCRIPT_DIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
 ASSUME_YES=0
 for arg in "$@"; do
@@ -75,7 +54,7 @@ confirm_or_abort() {
 }
 
 # ==============================================================================
-# 2. Autonomous Host Prerequisites Assertion Layer
+# Autonomous Host Prerequisites Assertion Layer
 # ==============================================================================
 assert_host_dependencies() {
     local missing=()
@@ -118,9 +97,8 @@ assert_host_dependencies() {
     fi
     echo "=> [HOST SELF-HEAL] Prerequisites satisfied."
 }
-assert_host_dependencies
 
-# 3. Cache Purge Routine — runs as the invoking user; never needs root.
+# Cache Purge Routine — runs as the invoking user; never needs root.
 purge_cache() {
     local mode="$1"
     echo "======================================================================"
@@ -166,104 +144,154 @@ purge_cache() {
     echo "======================================================================"
 }
 
-# 4. Process Operational Flags
-FORCE_REBUILD=0
-for arg in "$@"; do
-    case "$arg" in
-        --hard)
-            FORCE_REBUILD=1
-            purge_cache "hard"
-            ;;
-        -f|--force)
-            FORCE_REBUILD=1
-            purge_cache "standard"
-            ;;
-    esac
-done
-
-# 5. Root-owned file detection (follow-up F5). Since the build below runs
-# as the invoking user, writing into a bin/ (or a journal) left root-owned
-# by a run from before item 1D.9's fix — or by someone directly invoking
-# `sudo ./autorun.sh` by hand — would otherwise fail with a bare, confusing
-# "permission denied" partway through the build. Detect it up front and
-# print the exact fix instead.
 BIN_PATH="${SCRIPT_DIR:?}/bin/boot-orchestrator"
 LOCAL_TMP="${SCRIPT_DIR:?}/.build_tmp"
 JOURNAL_PATH="${SCRIPT_DIR:?}/orchestrator_journal.json"
 
+# check_root_owned_files (follow-ups F5/F6). Since the build runs as the
+# invoking user, a bin/ left root-owned by a run from before item 1D.9's
+# fix — or by someone directly invoking `sudo ./autorun.sh` by hand — would
+# otherwise fail the build with a bare, confusing "permission denied".
+# bin/ is hard-blocked (the build genuinely cannot proceed). The journal is
+# only warned about, not blocked on: the engine itself now chowns
+# orchestrator_journal.json back to the invoking user (SUDO_UID/SUDO_GID)
+# right after creating it, so a stale root-owned journal is at most a sign
+# of an old run from before that fix, not something that stops this script.
 check_root_owned_files() {
     if [ "$EUID" -eq 0 ]; then
         return 0
     fi
 
-    local offenders=()
+    local bin_offenders=()
     if [ -d "${SCRIPT_DIR:?}/bin" ]; then
         while IFS= read -r -d '' f; do
-            offenders+=("$f")
+            bin_offenders+=("$f")
         done < <(find "${SCRIPT_DIR:?}/bin" -user root -print0 2>/dev/null)
     fi
+
+    if [ ${#bin_offenders[@]} -gt 0 ]; then
+        echo "======================================================================" >&2
+        echo " [BLOCKED] Found root-owned file(s) in bin/ from a previous run:" >&2
+        printf '   %s\n' "${bin_offenders[@]}" >&2
+        echo "" >&2
+        echo " This build runs as your own user and cannot write to these. Fix" >&2
+        echo " ownership, then re-run this script:" >&2
+        echo "" >&2
+        echo "   sudo chown -R \"$(id -un):$(id -gn)\" \"${SCRIPT_DIR:?}/bin\"" >&2
+        echo "======================================================================" >&2
+        exit 1
+    fi
+
     if [ -e "$JOURNAL_PATH" ]; then
         local owner
         owner=$(stat -c '%U' "$JOURNAL_PATH" 2>/dev/null || stat -f '%Su' "$JOURNAL_PATH" 2>/dev/null || echo "")
         if [ "$owner" = "root" ]; then
-            offenders+=("$JOURNAL_PATH")
+            echo "======================================================================" >&2
+            echo " [WARNING] $JOURNAL_PATH is owned by root (left over from an older" >&2
+            echo " run, before this tool started fixing its own ownership). This does" >&2
+            echo " not block anything, but if you see stale or unexpected resume" >&2
+            echo " state, run:" >&2
+            echo "" >&2
+            echo "   sudo chown \"$(id -un):$(id -gn)\" \"$JOURNAL_PATH\"" >&2
+            echo "======================================================================" >&2
         fi
     fi
-
-    if [ ${#offenders[@]} -eq 0 ]; then
-        return 0
-    fi
-
-    echo "======================================================================" >&2
-    echo " [BLOCKED] Found root-owned file(s) left over from a previous run:" >&2
-    printf '   %s\n' "${offenders[@]}" >&2
-    echo "" >&2
-    echo " This build runs as your own user and cannot write to these. Fix" >&2
-    echo " ownership, then re-run this script:" >&2
-    echo "" >&2
-    echo "   sudo chown -R \"$(id -un):$(id -gn)\" \"${SCRIPT_DIR:?}/bin\" \"$JOURNAL_PATH\"" >&2
-    echo "======================================================================" >&2
-    exit 1
 }
-check_root_owned_files
 
-# 6. Dependency Sync & Build — runs as the invoking user (never root), so no
-# build artifact, module cache entry, or compiled binary is ever root-owned
-# (audit 1D.9).
-if [ "$FORCE_REBUILD" -eq 1 ] || [ ! -f "$BIN_PATH" ]; then
-    echo "======================================================================"
-    echo "=> Resolving Go dependencies (go mod download; go.mod/go.sum are not"
-    echo "   modified — run 'go mod tidy' yourself if you intend that)..."
-    echo "======================================================================"
-    go mod download
+main() {
+    cd "${SCRIPT_DIR:?}"
 
-    echo "======================================================================"
-    echo "=> Compiling cmd/orchestrator/main.go into bin/boot-orchestrator..."
-    echo "======================================================================"
-    mkdir -p "${SCRIPT_DIR:?}/bin" "$LOCAL_TMP"
-    rm -f "$BIN_PATH" 2>/dev/null || true
+    # 1. Quick Help Check
+    for arg in "$@"; do
+        case "$arg" in
+            -h|--help)
+                echo "Universal Boot Orchestrator :: Runtime Help"
+                echo ""
+                echo "Usage:"
+                echo "  ./autorun.sh          Standard launch (builds if missing, then elevates to run)"
+                echo "  ./autorun.sh -f       Force clean rebuild + launch"
+                echo "  ./autorun.sh --hard   Deep purge of modules, caches, journals + fresh rebuild + launch"
+                echo "  ./autorun.sh -y       Assume 'yes' to any confirmation (e.g. installing missing packages)"
+                echo "  ./autorun.sh -h       Display this help menu"
+                echo ""
+                exit 0
+                ;;
+        esac
+    done
 
-    # Redirect TMPDIR to physical disk storage to prevent tmpfs RAM exhaustion
-    TMPDIR="$LOCAL_TMP" go build -ldflags="-s -w" -o "$BIN_PATH" "${SCRIPT_DIR:?}/cmd/orchestrator/main.go"
-    rm -rf "$LOCAL_TMP" 2>/dev/null || true
-
-    echo "=> Compilation successful."
-fi
-
-chmod 755 "$BIN_PATH" 2>/dev/null || chmod +x "$BIN_PATH"
-
-# 7. Elevate only now, only to run the already-built binary (it performs
-# partition/bootloader operations that genuinely require root). Nothing
-# before this point ran, or needed to run, as root.
-echo "======================================================================"
-echo "=> Launching Universal Boot Orchestrator..."
-echo "======================================================================"
-if [ "$EUID" -ne 0 ]; then
-    echo " [SECURITY NOTICE] Hardware block operations require root privileges."
-    echo " Authenticating sudo session..."
-    if [ -n "$DISPLAY" ]; then
-        xhost +si:localuser:root 2>/dev/null || true
+    if [ "$EUID" -eq 0 ] && [ -z "$SUDO_USER" ]; then
+        echo "======================================================================"
+        echo " [NOTICE] Running directly as root (no SUDO_USER) — dependency"
+        echo " resolution and compilation will produce root-owned files in this"
+        echo " repository. Prefer running this script as your normal user; it"
+        echo " will ask for root only when it actually needs it."
+        echo "======================================================================"
     fi
-    exec sudo --preserve-env=PATH,DISPLAY,XAUTHORITY "$BIN_PATH"
+
+    assert_host_dependencies
+
+    # Process Operational Flags
+    FORCE_REBUILD=0
+    for arg in "$@"; do
+        case "$arg" in
+            --hard)
+                FORCE_REBUILD=1
+                purge_cache "hard"
+                ;;
+            -f|--force)
+                FORCE_REBUILD=1
+                purge_cache "standard"
+                ;;
+        esac
+    done
+
+    check_root_owned_files
+
+    # Dependency Sync & Build — runs as the invoking user (never root), so
+    # no build artifact, module cache entry, or compiled binary is ever
+    # root-owned (audit 1D.9).
+    if [ "$FORCE_REBUILD" -eq 1 ] || [ ! -f "$BIN_PATH" ]; then
+        echo "======================================================================"
+        echo "=> Resolving Go dependencies (go mod download; go.mod/go.sum are not"
+        echo "   modified — run 'go mod tidy' yourself if you intend that)..."
+        echo "======================================================================"
+        go mod download
+
+        echo "======================================================================"
+        echo "=> Compiling cmd/orchestrator/main.go into bin/boot-orchestrator..."
+        echo "======================================================================"
+        mkdir -p "${SCRIPT_DIR:?}/bin" "$LOCAL_TMP"
+        rm -f "$BIN_PATH" 2>/dev/null || true
+
+        # Redirect TMPDIR to physical disk storage to prevent tmpfs RAM exhaustion
+        TMPDIR="$LOCAL_TMP" go build -ldflags="-s -w" -o "$BIN_PATH" "${SCRIPT_DIR:?}/cmd/orchestrator/main.go"
+        rm -rf "$LOCAL_TMP" 2>/dev/null || true
+
+        echo "=> Compilation successful."
+    fi
+
+    chmod 755 "$BIN_PATH" 2>/dev/null || chmod +x "$BIN_PATH"
+
+    # Elevate only now, only to run the already-built binary (it performs
+    # partition/bootloader operations that genuinely require root). Nothing
+    # before this point ran, or needed to run, as root.
+    echo "======================================================================"
+    echo "=> Launching Universal Boot Orchestrator..."
+    echo "======================================================================"
+    if [ "$EUID" -ne 0 ]; then
+        echo " [SECURITY NOTICE] Hardware block operations require root privileges."
+        echo " Authenticating sudo session..."
+        if [ -n "$DISPLAY" ]; then
+            xhost +si:localuser:root 2>/dev/null || true
+        fi
+        exec sudo --preserve-env=PATH,DISPLAY,XAUTHORITY "$BIN_PATH"
+    fi
+    exec "$BIN_PATH"
+}
+
+# Only run main when this script is executed directly, not when it is
+# `source`d (e.g. by a test that wants the function definitions above
+# without the actual build/launch sequence).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
 fi
-exec "$BIN_PATH"
