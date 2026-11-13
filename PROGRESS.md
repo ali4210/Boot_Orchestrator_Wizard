@@ -72,7 +72,21 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       reserved-name cases, new `TestValidPassword` with boundary cases (7/8/9 chars).
 
 ### B. Safety gates
-- [ ] 5. LVM/LUKS/mdraid/BitLocker pre-flight abort; Secure Boot/TPM detection — Not started
+- [x] 5. LVM/LUKS/mdraid/BitLocker pre-flight abort; Secure Boot/TPM detection — Done
+      (commit TBD). New `engine/preflight_safety.go`: `PreflightStorageSafetyCheck(disk)`
+      lists the disk + all its partitions via `lsblk` (Runner-mediated) and probes each
+      with `blkid -o value -s TYPE` (also Runner-mediated); util-linux's blkid reports
+      `LVM2_member`/`crypto_LUKS`/`linux_raid_member`/`BitLocker` directly, so one probe per
+      device covers all four without needing lvm2/cryptsetup/mdadm installed. Aborts
+      (returns an error, writes nothing) on any match. `DetectSecureBootAndTPM()` checks
+      `mokutil --sb-state` (Runner-mediated) and `/sys/class/tpm/tpm0` (read-only os.Stat)
+      and returns advisory warnings (does not abort — this tool doesn't sign its own
+      bootloader chain, so Secure Boot/TPM are informational). Wired into
+      `engine/orchestrator.go` `RunProvision`, as the very first thing inside the
+      `!journal.Session.IsPaused` block — before `BackupPartitionTable` and every partition
+      write that follows. Tests (`engine/preflight_safety_test.go`, all via mockRunner):
+      abort cases for LVM/LUKS/mdraid/BitLocker, pass-case for plain ext4/vfat, empty-disk
+      refusal, Secure-Boot-enabled warning, Secure-Boot-disabled no-warning.
 - [ ] 6. Verify `parted rm 2` only removes confirmed swap slice — Not started
 
 ### C. Headless mode and loop targets

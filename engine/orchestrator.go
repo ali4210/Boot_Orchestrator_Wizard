@@ -909,6 +909,19 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 	onUpdate(StepUpdate{StepName: "image-download", Done: true})
 
 	if !journal.Session.IsPaused {
+		// Safety gate (Phase 1 item B.5): must run before ANY partition-table
+		// or filesystem write below. Aborts without writing anything if the
+		// target disk has LVM, LUKS, mdraid, or BitLocker anywhere on it —
+		// none of which this tool understands how to handle safely.
+		if err := PreflightStorageSafetyCheck(req.TargetDiskPath); err != nil {
+			return fail("partition-shrink", err)
+		}
+		if _, _, warnings := DetectSecureBootAndTPM(); len(warnings) > 0 {
+			for _, w := range warnings {
+				onUpdate(StepUpdate{StepName: "=> [SAFETY WARNING] " + w, Done: false})
+			}
+		}
+
 		step, err := journal.Begin("partition-shrink", nil)
 		if err != nil {
 			return fail("partition-shrink", err)
