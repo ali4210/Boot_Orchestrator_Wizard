@@ -177,7 +177,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       disk stays excluded and a second, genuinely pluggable USB disk stays included.
 - [x] F10. autorun.sh must not honor an ambient SCRIPT_DIR; always compute it from
       BASH_SOURCE; override only via ORCH_TEST_SCRIPT_DIR + ORCH_AUTORUN_TESTING=1 — Done
-      (commit TBD). Root cause: F6's `: "${SCRIPT_DIR:=...}"` pattern made the script trust
+      (`7b2a233`). Root cause: F6's `: "${SCRIPT_DIR:=...}"` pattern made the script trust
       ANY pre-existing `SCRIPT_DIR` in the environment — since `autorun.sh` later does
       `rm -rf "${SCRIPT_DIR:?}/bin"`, `git gc --aggressive`, and other destructive
       operations scoped to it (the `--hard` purge), an accidental environment collision (or
@@ -197,6 +197,30 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       destructive against wherever it resolved); proving `SCRIPT_DIR`'s own value is
       correctly computed is sufficient, since `--hard`'s purge has no separate directory
       resolution of its own.
+- [x] F11. Move `check_root_owned_files` before flag processing and `purge_cache`; extend
+      it to cover `.runtime/` and other root-run-written directories; test by sourcing the
+      real script — Done (commit TBD). Root cause: `check_root_owned_files` ran AFTER flag
+      processing, so `--hard`'s `purge_cache "hard"` (which does `rm -rf
+      "${SCRIPT_DIR:?}/bin"` and `rm -rf "${SCRIPT_DIR:?}/.runtime"` unconditionally)
+      executed first — a root-owned `bin/` or `.runtime/` would make those `rm -rf` calls
+      fail with a raw, confusing permission error before the clear check ever ran. Moved the
+      call to right after the "running as root directly" notice, before
+      `assert_host_dependencies` and all flag/purge handling. Extended coverage: `.runtime/`
+      is populated by the root-run binary itself (not the unprivileged build step), so a
+      root-owned entry there is actually a *common*, expected case, not a rare leftover —
+      it's now hard-blocked the same way as `bin/` (both are directories: removing/writing
+      inside a root-owned directory genuinely fails for a non-root user). Also found and
+      added `orchestrator_installed_os.json` (a second plain state file the root-run engine
+      writes next to the journal, previously uncovered and missing from `.gitignore` too —
+      added there as well) — treated as warning-only like the journal, since unlinking a
+      *file* only requires write permission on its parent directory, not ownership of the
+      file itself, so `rm -f` on it always succeeds regardless of owner. Shellcheck caught a
+      real bug while writing this (SC2145, mixing a string and `"${array[@]}"` in one
+      argument silently drops all but the first element) — fixed with `printf` and explicit
+      indices before committing. Tests (`autorun_test.go`, sourcing the real script, not a
+      pasted copy): `.runtime/` root-owned blocks (**confirmed failing before the fix** via
+      `git stash` on `autorun.sh` and re-running, then restored) and
+      `orchestrator_installed_os.json` root-owned only warns.
 
 ## Phase 1: Hardening and testability
 

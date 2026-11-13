@@ -8,6 +8,7 @@ bin/
 
 # runtime/debug state, never ship this
 orchestrator_journal.json
+orchestrator_installed_os.json
 
 # build artifacts and test fixtures
 *.img

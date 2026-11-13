@@ -203,3 +203,79 @@ func TestAmbientSCRIPT_DIR_DoesNotRedirectScript(t *testing.T) {
 		t.Fatalf("expected SCRIPT_DIR to resolve to the real script location (%s), got:\n%s", repoRoot, out)
 	}
 }
+
+// TestCheckRootOwnedFiles_RuntimeDirOwnedByRootBlocks is the regression
+// test for follow-up F11: .runtime/ is populated by the root-run binary
+// itself (not the unprivileged build step), and --hard's purge_cache does
+// an unconditional `rm -rf` on it — exactly like bin/, a root-owned
+// .runtime/ must hard-block with a clear message rather than letting that
+// rm -rf fail with a raw permission error.
+func TestCheckRootOwnedFiles_RuntimeDirOwnedByRootBlocks(t *testing.T) {
+	if !hasPasswordlessSudo(t) {
+		t.Skip("passwordless sudo not available in this environment; skipping the real-root-ownership case")
+	}
+
+	scriptDir := t.TempDir()
+	runtimeDir := filepath.Join(scriptDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatalf("mkdir .runtime: %v", err)
+	}
+	statePath := filepath.Join(runtimeDir, "some_state_file")
+	if err := os.WriteFile(statePath, []byte("fake"), 0644); err != nil {
+		t.Fatalf("writing fixture state file: %v", err)
+	}
+
+	if err := exec.Command("sudo", "-n", "chown", "root:root", statePath).Run(); err != nil {
+		t.Fatalf("chowning fixture to root: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("sudo", "-n", "chown", os.Getenv("USER")+":"+os.Getenv("USER"), statePath).Run()
+	})
+
+	out, err := sourceAutorunAndRun(t, scriptDir, "check_root_owned_files")
+	if err == nil {
+		t.Fatalf("expected check_root_owned_files to exit non-zero for a root-owned .runtime/ file, output:\n%s", out)
+	}
+	if !strings.Contains(out, "BLOCKED") {
+		t.Fatalf("expected a [BLOCKED] message, got:\n%s", out)
+	}
+	if !strings.Contains(out, "chown") || !strings.Contains(out, ".runtime") {
+		t.Fatalf("expected the chown command to mention .runtime/, got:\n%s", out)
+	}
+}
+
+// TestCheckRootOwnedFiles_InstalledOSRecordOwnedByRootOnlyWarns proves
+// orchestrator_installed_os.json (the other plain state file the root-run
+// binary writes next to the journal) is treated the same way as the
+// journal: a warning, never a hard block, since unlinking a plain file
+// only requires write permission on its parent directory, not ownership
+// of the file.
+func TestCheckRootOwnedFiles_InstalledOSRecordOwnedByRootOnlyWarns(t *testing.T) {
+	if !hasPasswordlessSudo(t) {
+		t.Skip("passwordless sudo not available in this environment; skipping the real-root-ownership case")
+	}
+
+	scriptDir := t.TempDir()
+	recordPath := filepath.Join(scriptDir, "orchestrator_installed_os.json")
+	if err := os.WriteFile(recordPath, []byte("{}"), 0644); err != nil {
+		t.Fatalf("writing fixture record: %v", err)
+	}
+
+	if err := exec.Command("sudo", "-n", "chown", "root:root", recordPath).Run(); err != nil {
+		t.Fatalf("chowning fixture to root: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("sudo", "-n", "chown", os.Getenv("USER")+":"+os.Getenv("USER"), recordPath).Run()
+	})
+
+	out, err := sourceAutorunAndRun(t, scriptDir, "check_root_owned_files")
+	if err != nil {
+		t.Fatalf("expected check_root_owned_files to exit zero for a root-owned installed-os record (warning only), got err=%v output:\n%s", err, out)
+	}
+	if !strings.Contains(out, "WARNING") {
+		t.Fatalf("expected a [WARNING] message about the installed-os record, got:\n%s", out)
+	}
+	if strings.Contains(out, "BLOCKED") {
+		t.Fatalf("expected no hard block for a root-owned installed-os record alone, got:\n%s", out)
+	}
+}

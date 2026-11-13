@@ -161,54 +161,66 @@ BIN_PATH="${SCRIPT_DIR:?}/bin/boot-orchestrator"
 LOCAL_TMP="${SCRIPT_DIR:?}/.build_tmp"
 JOURNAL_PATH="${SCRIPT_DIR:?}/orchestrator_journal.json"
 
-# check_root_owned_files (follow-ups F5/F6). Since the build runs as the
-# invoking user, a bin/ left root-owned by a run from before item 1D.9's
-# fix — or by someone directly invoking `sudo ./autorun.sh` by hand — would
-# otherwise fail the build with a bare, confusing "permission denied".
-# bin/ is hard-blocked (the build genuinely cannot proceed). The journal is
-# only warned about, not blocked on: the engine itself now chowns
-# orchestrator_journal.json back to the invoking user (SUDO_UID/SUDO_GID)
-# right after creating it, so a stale root-owned journal is at most a sign
-# of an old run from before that fix, not something that stops this script.
+# check_root_owned_files (follow-ups F5/F6/F11). Since the build runs as
+# the invoking user, root-owned content left by a run from before item
+# 1D.9's fix — or by someone directly invoking `sudo ./autorun.sh` by hand
+# — would otherwise fail with a bare, confusing "permission denied".
+#
+# Directories the root-run binary (or an old root-run build) can leave
+# root-owned (bin/, .runtime/) are hard-blocked: removing or writing inside
+# a root-owned directory genuinely fails for a non-root user, and --hard's
+# purge_cache does exactly that (`rm -rf`) to both. Plain files
+# (orchestrator_journal.json, orchestrator_installed_os.json) are only
+# warned about, never blocked on: unlinking a file only requires write
+# permission on its parent directory, not ownership of the file itself, so
+# `rm -f` on a root-owned file in a user-writable directory always
+# succeeds regardless — and the engine now chowns the journal back to the
+# invoking user right after creating it anyway, so a root-owned journal is
+# at most a sign of an old run from before that fix.
 check_root_owned_files() {
     if [ "$EUID" -eq 0 ]; then
         return 0
     fi
 
-    local bin_offenders=()
-    if [ -d "${SCRIPT_DIR:?}/bin" ]; then
-        while IFS= read -r -d '' f; do
-            bin_offenders+=("$f")
-        done < <(find "${SCRIPT_DIR:?}/bin" -user root -print0 2>/dev/null)
-    fi
+    local blocking_dirs=("${SCRIPT_DIR:?}/bin" "${SCRIPT_DIR:?}/.runtime")
+    local dir_offenders=()
+    for d in "${blocking_dirs[@]}"; do
+        if [ -d "$d" ]; then
+            while IFS= read -r -d '' f; do
+                dir_offenders+=("$f")
+            done < <(find "$d" -user root -print0 2>/dev/null)
+        fi
+    done
 
-    if [ ${#bin_offenders[@]} -gt 0 ]; then
+    if [ ${#dir_offenders[@]} -gt 0 ]; then
         echo "======================================================================" >&2
-        echo " [BLOCKED] Found root-owned file(s) in bin/ from a previous run:" >&2
-        printf '   %s\n' "${bin_offenders[@]}" >&2
+        echo " [BLOCKED] Found root-owned file(s) from a previous run:" >&2
+        printf '   %s\n' "${dir_offenders[@]}" >&2
         echo "" >&2
-        echo " This build runs as your own user and cannot write to these. Fix" >&2
-        echo " ownership, then re-run this script:" >&2
+        echo " This script runs as your own user and cannot write to, or purge," >&2
+        echo " these. Fix ownership, then re-run:" >&2
         echo "" >&2
-        echo "   sudo chown -R \"$(id -un):$(id -gn)\" \"${SCRIPT_DIR:?}/bin\"" >&2
+        printf '   sudo chown -R "%s:%s" "%s" "%s"\n' "$(id -un)" "$(id -gn)" "${blocking_dirs[0]}" "${blocking_dirs[1]}" >&2
         echo "======================================================================" >&2
         exit 1
     fi
 
-    if [ -e "$JOURNAL_PATH" ]; then
-        local owner
-        owner=$(stat -c '%U' "$JOURNAL_PATH" 2>/dev/null || stat -f '%Su' "$JOURNAL_PATH" 2>/dev/null || echo "")
-        if [ "$owner" = "root" ]; then
-            echo "======================================================================" >&2
-            echo " [WARNING] $JOURNAL_PATH is owned by root (left over from an older" >&2
-            echo " run, before this tool started fixing its own ownership). This does" >&2
-            echo " not block anything, but if you see stale or unexpected resume" >&2
-            echo " state, run:" >&2
-            echo "" >&2
-            echo "   sudo chown \"$(id -un):$(id -gn)\" \"$JOURNAL_PATH\"" >&2
-            echo "======================================================================" >&2
+    local warn_files=("$JOURNAL_PATH" "${SCRIPT_DIR:?}/orchestrator_installed_os.json")
+    for f in "${warn_files[@]}"; do
+        if [ -e "$f" ]; then
+            local owner
+            owner=$(stat -c '%U' "$f" 2>/dev/null || stat -f '%Su' "$f" 2>/dev/null || echo "")
+            if [ "$owner" = "root" ]; then
+                echo "======================================================================" >&2
+                echo " [WARNING] $f is owned by root (left over from an older" >&2
+                echo " run, before this tool started fixing its own ownership). This does" >&2
+                echo " not block anything, but if you see stale or unexpected state, run:" >&2
+                echo "" >&2
+                echo "   sudo chown \"$(id -un):$(id -gn)\" \"$f\"" >&2
+                echo "======================================================================" >&2
+            fi
         fi
-    fi
+    done
 }
 
 main() {
@@ -241,6 +253,13 @@ main() {
         echo "======================================================================"
     fi
 
+    # Follow-up F11: must run before flag processing/purge_cache, not after
+    # — --hard's purge_cache does `rm -rf` on bin/ and .runtime/
+    # unconditionally, which fails with a raw, confusing permission error
+    # if either is root-owned. Checking first means --hard always gets a
+    # clear message instead.
+    check_root_owned_files
+
     assert_host_dependencies
 
     # Process Operational Flags
@@ -257,8 +276,6 @@ main() {
                 ;;
         esac
     done
-
-    check_root_owned_files
 
     # Dependency Sync & Build — runs as the invoking user (never root), so
     # no build artifact, module cache entry, or compiled binary is ever
