@@ -133,7 +133,36 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       covered instead by the existing per-function engine tests plus this request-building
       layer. OS-family auto-detection for `--iso-path` (so Windows ISOs get an autounattend
       without needing `--os-id`) is Phase 2 item 19's scope, not this one.
-- [ ] 8. Loop device / image file support audit — Not started
+- [x] 8. Loop device / image file support audit — Done (commit TBD).
+      Audit: found 6 functions independently hand-rolling "disk name + partition number"
+      parsing, each special-casing only `nvme`/`mmcblk` by substring before falling back to
+      a bare "trailing digits" parse — which mis-parses loop device partitions (e.g.
+      `/dev/loop0p1` parsed as disk `/dev/loop0p`, part `1`, instead of disk `/dev/loop0`,
+      part `1`). Loop devices are this project's own prescribed safe-testing mechanism, so
+      this bug could have silently broken exactly the kind of test rigs the audit's safety
+      rules call for. Fixed the safe ones (pure string parsing, no system calls, fully
+      round-trip unit-testable):
+      - `engine/partition.go` `SplitDiskAndPartition`: rewritten to detect the "pN" infix
+        structurally (disk name ends in a digit) instead of a substring allowlist.
+      - `engine/orchestrator.go` `DetectActiveRootDisk`: removed its own duplicate inline
+        parser, now calls the shared `SplitDiskAndPartition`/`JoinDiskAndPartition`.
+      - `engine/autodiscover.go` `DiscoverHostStorage`: same — removed the private
+        duplicate `splitDiskAndPartition`/ad-hoc `findESPDevice` fallback, now uses the
+        shared helpers.
+      - `engine/revert_linux.go` `partitionExists`: now builds the `/sys/class/block` name
+        via `JoinDiskAndPartition`.
+      - `engine/backup.go` `resolveBackupMountNode`: now resolves partition 1 via
+        `JoinDiskAndPartition`.
+      Tests (`engine/disk_naming_test.go`): `SplitDiskAndPartition`/`JoinDiskAndPartition`
+      exhaustive table tests across sdX/nvme/mmcblk/loop/vda naming, plus a round-trip
+      (`Join(Split(x)) == x`) test across all of them.
+      **Found but NOT changed (documented, not "safe"):** `engine/usb_manager.go` and
+      `engine/backup.go`'s USB-identification heuristic (`strings.HasPrefix(dev.Name,
+      "sdc"/"sdd"/"sde")` as a fallback alongside the authoritative `lsblk`
+      `TRAN=="usb"`/`RM` checks) assumes USB drives land at a specific positional device
+      letter — a real portability risk on multi-disk machines, but changing disk-role
+      detection heuristics can't be verified without real multi-disk hardware, so left
+      untouched and flagged here rather than guessed at blind.
 
 ### D. Launchers
 - [ ] 9. autorun.sh: confirm before root installs, safe rm -rf, no go get/mod tidy — Not started

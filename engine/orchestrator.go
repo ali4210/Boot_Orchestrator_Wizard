@@ -22,7 +22,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"boot-orchestrator/discovery"
 	"boot-orchestrator/hypervisor"
@@ -133,29 +132,18 @@ func DetectActiveRootDisk() (parentDisk string, hostPart string, hostNum string,
 		rootDev = real
 	}
 
+	// Audit 1C.8: this used to duplicate SplitDiskAndPartition's parsing
+	// inline, with the same "nvme/mmcblk substring allowlist, else assume a
+	// bare trailing digit" logic — which mis-parses loop device partitions
+	// (/dev/loop0p1) exactly like SplitDiskAndPartition itself did. Reusing
+	// the shared, tested, structural parser fixes both at once and keeps
+	// them from drifting apart.
 	if rootDev != "" && strings.HasPrefix(rootDev, "/dev/") {
-		base := filepath.Base(rootDev)
-		if strings.HasPrefix(base, "nvme") || strings.HasPrefix(base, "mmcblk") {
-			idx := strings.LastIndex(base, "p")
-			if idx != -1 && idx < len(base)-1 {
-				pDisk := "/dev/" + base[:idx]
-				pNum := base[idx+1:]
-				pNumInt, _ := strconv.Atoi(pNum)
+		if pDisk, pNum, splitErr := SplitDiskAndPartition(rootDev); splitErr == nil {
+			if pNumInt, convErr := strconv.Atoi(pNum); convErr == nil {
 				tNum := strconv.Itoa(pNumInt + 1)
-				return pDisk, rootDev, pNum, pDisk + "p" + tNum, nil
+				return pDisk, rootDev, pNum, JoinDiskAndPartition(pDisk, tNum), nil
 			}
-		}
-
-		i := len(base) - 1
-		for i >= 0 && unicode.IsDigit(rune(base[i])) {
-			i--
-		}
-		if i < len(base)-1 {
-			pDisk := "/dev/" + base[:i+1]
-			pNum := base[i+1:]
-			pNumInt, _ := strconv.Atoi(pNum)
-			tNum := strconv.Itoa(pNumInt + 1)
-			return pDisk, rootDev, pNum, pDisk + tNum, nil
 		}
 	}
 

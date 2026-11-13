@@ -430,14 +430,14 @@ exec tail -n +3 $0
 	return nil
 }
 
+// partitionExists checks for the partition's /sys/class/block entry. Audit
+// 1C.8: this used to special-case only "nvme"/"mmcblk" by substring before
+// assuming a bare "name+number" join, which mis-parses loop device
+// partitions (loop0p1); now built via the same structural
+// JoinDiskAndPartition the rest of the engine uses.
 func partitionExists(diskDevice, partNum string) bool {
-	devName := filepath.Base(diskDevice)
-	var partName string
-	if strings.Contains(devName, "nvme") || strings.Contains(devName, "mmcblk") {
-		partName = fmt.Sprintf("%sp%s", devName, partNum)
-	} else {
-		partName = fmt.Sprintf("%s%s", devName, partNum)
-	}
+	partPath := JoinDiskAndPartition(diskDevice, partNum)
+	partName := filepath.Base(partPath)
 	_, err := os.Stat(filepath.Join("/sys/class/block", partName))
 	return err == nil
 }

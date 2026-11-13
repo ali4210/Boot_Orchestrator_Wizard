@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"unicode"
 )
 
 // HostStorageProfile contains dynamically detected block geometry.
@@ -36,20 +35,22 @@ func DiscoverHostStorage() (*HostStorageProfile, error) {
 		rootDev = realPath
 	}
 
-	// 3. Deconstruct partition number and parent disk
-	parentDisk, partNum := splitDiskAndPartition(rootDev)
-	if parentDisk == "" || partNum == "" {
-		return nil, fmt.Errorf("unable to determine parent disk for root device %s", rootDev)
+	// 3. Deconstruct partition number and parent disk. Uses the shared,
+	// tested SplitDiskAndPartition (partition.go) rather than a second
+	// hand-rolled parser — audit 1C.8 found this file's own copy mis-parsed
+	// loop device partitions (/dev/loop0p1), exactly as partition.go's did
+	// before being fixed; reusing one implementation keeps them from
+	// drifting apart again.
+	parentDisk, partNum, splitErr := SplitDiskAndPartition(rootDev)
+	if splitErr != nil {
+		return nil, fmt.Errorf("unable to determine parent disk for root device %s: %w", rootDev, splitErr)
 	}
 
 	// 4. Calculate next available target partition number
 	hostNumInt, _ := strconv.Atoi(partNum)
 	targetPartNum := strconv.Itoa(hostNumInt + 1)
 
-	targetPart := parentDisk + targetPartNum
-	if strings.Contains(parentDisk, "nvme") || strings.Contains(parentDisk, "mmcblk") {
-		targetPart = parentDisk + "p" + targetPartNum
-	}
+	targetPart := JoinDiskAndPartition(parentDisk, targetPartNum)
 
 	// 5. Autonomously locate the active EFI System Partition (ESP)
 	espDev := findESPDevice(parentDisk)
@@ -95,29 +96,6 @@ func findRootMount() (string, string, error) {
 	return "", "", fmt.Errorf("root mount / not found in /proc/mounts")
 }
 
-func splitDiskAndPartition(devPath string) (string, string) {
-	base := filepath.Base(devPath)
-
-	// Handle NVMe devices: nvme0n1p2 -> nvme0n1, 2
-	if strings.HasPrefix(base, "nvme") || strings.HasPrefix(base, "mmcblk") {
-		idx := strings.LastIndex(base, "p")
-		if idx != -1 && idx < len(base)-1 {
-			return "/dev/" + base[:idx], base[idx+1:]
-		}
-	}
-
-	// Handle standard disks: sda2 -> sda, 2
-	i := len(base) - 1
-	for i >= 0 && unicode.IsDigit(rune(base[i])) {
-		i--
-	}
-	if i < len(base)-1 {
-		return "/dev/" + base[:i+1], base[i+1:]
-	}
-
-	return "", ""
-}
-
 func findESPDevice(parentDisk string) string {
 	// Look for /boot/efi or /boot mount in findmnt
 	out, err := exec.Command("findmnt", "-n", "-o", "SOURCE", "/boot/efi").Output()
@@ -125,9 +103,6 @@ func findESPDevice(parentDisk string) string {
 		return strings.TrimSpace(string(out))
 	}
 
-	// Fallback: partition 1 of parent disk
-	if strings.Contains(parentDisk, "nvme") {
-		return parentDisk + "p1"
-	}
-	return parentDisk + "1"
+	// Fallback: partition 1 of parent disk.
+	return JoinDiskAndPartition(parentDisk, "1")
 }

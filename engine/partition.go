@@ -634,22 +634,30 @@ func RollbackPartitionShrink(rollbackData json.RawMessage) error {
 }
 
 // SplitDiskAndPartition takes a partition device path (e.g. /dev/sdb3,
-// /dev/nvme0n1p3, /dev/mmcblk0p2) and returns the parent disk path and the
-// partition number.
+// /dev/nvme0n1p3, /dev/mmcblk0p2, /dev/loop0p2 — a loop device, used for all
+// safe disk-image testing per this tool's own safety rules) and returns the
+// parent disk path and the partition number.
+//
+// Audit 1C.8: this used to special-case only "nvme"/"mmcblk" by substring
+// before falling back to a plain "disk name + trailing digits" parse; a
+// loop device partition (e.g. "loop0p1") doesn't contain either substring,
+// so it fell into the fallback branch and parsed as disk="/dev/loop0p",
+// part="1" — wrong, since the real disk is "/dev/loop0". Partition numbers
+// are now detected structurally instead of by an allowlist of device-name
+// substrings: any disk name ending in a digit (nvme0n1, mmcblk0, loop0, ...)
+// uses a "pN" infix, because a bare trailing digit on such a name would be
+// ambiguous with the disk's own numbering; this covers loop devices and any
+// future numbered device naming the same way, with no new allowlist entry
+// needed.
+//
+// partitionPath must be an actual partition path, not a bare disk path: a
+// bare numbered disk like "/dev/loop0" is inherently ambiguous (it could be
+// misread as disk "loop" + partition "0") and this function has no way to
+// know which disk names are "real" versus partition-bearing, so callers are
+// responsible for only passing genuine partition paths.
 func SplitDiskAndPartition(partitionPath string) (diskPath string, partNum string, err error) {
 	base := filepath.Base(partitionPath)
 	dir := filepath.Dir(partitionPath)
-
-	if strings.Contains(base, "nvme") || strings.Contains(base, "mmcblk") {
-		idx := strings.LastIndex(base, "p")
-		if idx == -1 || idx == len(base)-1 {
-			return "", "", fmt.Errorf("could not parse NVMe/eMMC partition number from %s", partitionPath)
-		}
-		if idx == 0 || base[idx-1] < '0' || base[idx-1] > '9' {
-			return "", "", fmt.Errorf("unrecognized NVMe/eMMC naming scheme: %s", partitionPath)
-		}
-		return filepath.Join(dir, base[:idx]), base[idx+1:], nil
-	}
 
 	i := len(base) - 1
 	for i >= 0 && base[i] >= '0' && base[i] <= '9' {
@@ -658,7 +666,14 @@ func SplitDiskAndPartition(partitionPath string) (diskPath string, partNum strin
 	if i == len(base)-1 {
 		return "", "", fmt.Errorf("no partition number found in %s", partitionPath)
 	}
-	return filepath.Join(dir, base[:i+1]), base[i+1:], nil
+	partNum = base[i+1:]
+
+	if i >= 1 && base[i] == 'p' && base[i-1] >= '0' && base[i-1] <= '9' {
+		// The disk name itself ends in a digit, so this "p" is the
+		// partition-number infix, not part of the disk name.
+		return filepath.Join(dir, base[:i]), partNum, nil
+	}
+	return filepath.Join(dir, base[:i+1]), partNum, nil
 }
 
 // JoinDiskAndPartition joins a disk path and a partition number, correctly

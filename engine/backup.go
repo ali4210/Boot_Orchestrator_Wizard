@@ -52,12 +52,14 @@ func ensureNTFS3G(logFn func(string)) error {
 	return fmt.Errorf("apt-get not available to install ntfs-3g")
 }
 
+// resolveBackupMountNode is called with what might already be a whole-disk
+// path; if so, it tries partition 1 of that disk instead. Audit 1C.8: the
+// nvme/mmcblk-substring special case (else bare "path+1") mis-parses loop
+// devices (loop0 -> loop01 instead of loop0p1); built via the shared
+// JoinDiskAndPartition instead.
 func resolveBackupMountNode(devPath string) string {
 	if strings.HasPrefix(devPath, "/dev/") && !strings.Contains(devPath, "1") && !strings.Contains(devPath, "2") {
-		p1 := devPath + "1"
-		if strings.Contains(devPath, "nvme") || strings.Contains(devPath, "mmcblk") {
-			p1 = devPath + "p1"
-		}
+		p1 := JoinDiskAndPartition(devPath, "1")
 		if _, err := os.Stat(p1); err == nil {
 			return p1
 		}
