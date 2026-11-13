@@ -95,7 +95,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       `shellcheck` both clean.
 - [x] F6. autorun.sh: block only on root-owned bin/; journal gets a warning, not exit 1;
       engine chowns the journal to SUDO_UID/SUDO_GID after creating it; test the real
-      autorun.sh (sourced), not a pasted copy — Done (commit TBD). Restructured
+      autorun.sh (sourced), not a pasted copy — Done (`ab9d4a2`). Restructured
       `autorun.sh` so it can be `source`d for testing: `SCRIPT_DIR` now uses
       `: "${SCRIPT_DIR:=...}"` (respects a pre-set value instead of always recomputing),
       the action sequence moved into a `main()` function, and a trailing `if [[
@@ -115,6 +115,25 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       test, plus an end-to-end `NewJournal` test that sets `SUDO_UID`/`SUDO_GID` to the test
       process's own uid/gid (a self-chown needs no elevated privilege) to exercise the real
       `os.Chown` call path, not just the parsing logic.
+- [x] F7. PreflightStorageSafetyCheck: skip ONLY blkid exit code 2; any other blkid/lsblk
+      error aborts (fail closed); use `blkid -p`; tests for exit 4, missing binary, exit 2
+      — Done (commit TBD). Root cause (`engine/preflight_safety.go`
+      `detectDangerousStorage`): `if err != nil { continue }` treated ANY blkid error —
+      wrong exit code, a permission error, an I/O error, or the binary being completely
+      missing — as "couldn't classify, assume not dangerous, keep going": fail-open, the
+      opposite of a safety gate. Rewrote so only a real blkid exit code 2 (util-linux's
+      documented "no recognizable superblock/filesystem found," a normal case e.g. an
+      unformatted partition) is treated as a non-finding; every other outcome —
+      `exitCodeOf(err) == -1` for a missing binary (`exec.Error`/`exec.ErrNotFound`, not an
+      `*exec.ExitError`), or any other nonzero exit — now returns an error that
+      `PreflightStorageSafetyCheck` propagates as an abort, having written nothing. Also
+      switched to `blkid -p` (forces a live low-level probe instead of possibly answering
+      from blkid's on-disk cache, which could report a stale type for a disk reformatted or
+      encrypted since the cache was last built). Tests
+      (`engine/preflight_safety_test.go`): exit code 2 still passes (pre-existing test,
+      re-verified against the new fail-closed logic), new exit code 4 aborts, new missing
+      binary (`exec.ErrNotFound`) aborts — both asserting a non-nil error, the exit-4 case
+      also asserting the error names the exit code.
 
 ## Phase 1: Hardening and testability
 

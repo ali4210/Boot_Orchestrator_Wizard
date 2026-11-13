@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -130,6 +131,62 @@ func TestPreflightStorageSafetyCheck_BlkidExitCode2DoesNotAbort(t *testing.T) {
 
 	if err := PreflightStorageSafetyCheck("/dev/sdz"); err != nil {
 		t.Fatalf("expected blkid exit code 2 (no filesystem) to be treated as a non-finding, got: %v", err)
+	}
+}
+
+// TestPreflightStorageSafetyCheck_BlkidExitCode4Aborts is the regression
+// test for follow-up F7: only blkid exit code 2 is treated as a
+// non-finding. Exit code 4 (blkid: ambiguous probe result / ENOMEDIUM /
+// other non-"no filesystem" condition, depending on version) must abort
+// instead of being silently treated the same as "no filesystem found" —
+// this check cannot prove the device is safe, so it fails closed.
+func TestPreflightStorageSafetyCheck_BlkidExitCode4Aborts(t *testing.T) {
+	withMockRunner(t, &mockRunner{
+		StdoutHandler: func(name string, args []string) ([]byte, error) {
+			switch name {
+			case "lsblk":
+				return []byte("/dev/sdz\n/dev/sdz1\n"), nil
+			case "blkid":
+				return []byte(""), fakeExitError(4)
+			case "mokutil":
+				return []byte(""), nil
+			}
+			return []byte(""), nil
+		},
+	})
+
+	err := PreflightStorageSafetyCheck("/dev/sdz")
+	if err == nil {
+		t.Fatalf("expected blkid exit code 4 to abort (fail closed), got no error")
+	}
+	if !strings.Contains(err.Error(), "exit code 4") {
+		t.Fatalf("expected the error to mention the exit code, got: %v", err)
+	}
+}
+
+// TestPreflightStorageSafetyCheck_BlkidMissingBinaryAborts proves a
+// completely missing blkid binary (the Go runtime's own
+// "executable file not found" error, not an *exec.ExitError — exitCodeOf
+// reports -1 for this) also aborts, rather than being swallowed as "not
+// dangerous" the way any error used to be before this follow-up.
+func TestPreflightStorageSafetyCheck_BlkidMissingBinaryAborts(t *testing.T) {
+	withMockRunner(t, &mockRunner{
+		StdoutHandler: func(name string, args []string) ([]byte, error) {
+			switch name {
+			case "lsblk":
+				return []byte("/dev/sdz\n/dev/sdz1\n"), nil
+			case "blkid":
+				return []byte(""), &exec.Error{Name: "blkid", Err: exec.ErrNotFound}
+			case "mokutil":
+				return []byte(""), nil
+			}
+			return []byte(""), nil
+		},
+	})
+
+	err := PreflightStorageSafetyCheck("/dev/sdz")
+	if err == nil {
+		t.Fatalf("expected a missing blkid binary to abort (fail closed), got no error")
 	}
 }
 

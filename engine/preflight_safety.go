@@ -42,22 +42,40 @@ func listDiskAndPartitions(diskDevice string) ([]string, error) {
 
 // detectDangerousStorage probes each device in devices with blkid and
 // reports the first LVM/LUKS/mdraid/BitLocker match found, if any.
-func detectDangerousStorage(devices []string) (found bool, reason string) {
+//
+// Follow-up F7: this used to treat ANY blkid error (wrong exit code, the
+// binary missing entirely, a permission error, a device I/O error, ...) as
+// "couldn't classify, not dangerous, keep going" — which is fail-OPEN, the
+// opposite of what a safety gate should do. Real blkid's exit code 2 means
+// specifically "no recognizable superblock/filesystem found" (e.g. an
+// unformatted partition) — a normal, common, genuinely non-dangerous case.
+// Every other non-zero exit (bad usage, ambiguous probe, I/O error) or a
+// failure to even run blkid at all (binary missing: exitCodeOf reports -1
+// for a non-*exec.ExitError) now aborts instead: this check cannot prove
+// the device is safe, so it fails closed rather than silently continuing
+// past a disk it couldn't actually inspect.
+//
+// Uses `blkid -p` (force a live low-level superblock probe) rather than
+// plain `blkid`, which can answer from blkid's on-disk cache
+// (/run/blkid/blkid.tab) and so could report a stale type for a disk that
+// has since been reformatted or encrypted.
+func detectDangerousStorage(devices []string) (found bool, reason string, err error) {
 	for _, dev := range devices {
-		out, err := cmdRunner.RunStdout("blkid", "-o", "value", "-s", "TYPE", dev)
-		if err != nil {
-			// Unformatted, unreadable, or blkid doesn't recognize it — not
-			// something this check can classify as dangerous; the normal
-			// partitioning/filesystem logic downstream will surface any
-			// real problem on its own.
-			continue
+		out, runErr := cmdRunner.RunStdout("blkid", "-p", "-o", "value", "-s", "TYPE", dev)
+		if runErr != nil {
+			if exitCodeOf(runErr) == 2 {
+				// No recognizable filesystem — not dangerous, not an
+				// inspection failure. Keep checking the remaining devices.
+				continue
+			}
+			return false, "", fmt.Errorf("could not safely inspect %s with blkid (exit code %d): %w", dev, exitCodeOf(runErr), runErr)
 		}
 		t := strings.TrimSpace(string(out))
 		if label, bad := dangerousStorageTypes[t]; bad {
-			return true, fmt.Sprintf("%s detected on %s (blkid TYPE=%s)", label, dev, t)
+			return true, fmt.Sprintf("%s detected on %s (blkid TYPE=%s)", label, dev, t), nil
 		}
 	}
-	return false, ""
+	return false, "", nil
 }
 
 // PreflightStorageSafetyCheck must be called before any partition-table or
@@ -65,7 +83,9 @@ func detectDangerousStorage(devices []string) (found bool, reason string) {
 // having written nothing) if LVM, LUKS, mdraid, or BitLocker is detected
 // anywhere on diskDevice or any of its partitions — this tool has no
 // support for any of them, and partitioning or formatting blind on top of
-// one risks unrecoverable data loss (Phase 1 item B.5).
+// one risks unrecoverable data loss (Phase 1 item B.5). It also aborts
+// (fails closed) if any device could not be safely inspected at all
+// (follow-up F7), rather than assuming "inspection failed" means "safe".
 func PreflightStorageSafetyCheck(diskDevice string) error {
 	if diskDevice == "" {
 		return fmt.Errorf("refusing to run the storage safety preflight: no target disk specified")
@@ -74,7 +94,11 @@ func PreflightStorageSafetyCheck(diskDevice string) error {
 	if err != nil {
 		return err
 	}
-	if found, reason := detectDangerousStorage(devices); found {
+	found, reason, err := detectDangerousStorage(devices)
+	if err != nil {
+		return fmt.Errorf("refusing to modify %s: %w; nothing was written", diskDevice, err)
+	}
+	if found {
 		return fmt.Errorf("refusing to modify %s: %s — this tool does not support LVM, LUKS, mdraid, or BitLocker; nothing was written", diskDevice, reason)
 	}
 	return nil
