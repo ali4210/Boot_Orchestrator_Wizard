@@ -661,7 +661,7 @@ and retry, instead of silently writing to the wrong filesystem and reporting suc
 rejected; the positive case uses a **real** tmpfs mount (RAM-backed, never touches any real
 disk, created/torn down via passwordless `sudo` and skipped cleanly if unavailable) to prove
 this isn't just "always returns an error" — a genuinely mounted filesystem is accepted.
-### H. "Deploy payload" ISO picker browses /root under sudo — Done (commit TBD)
+### H. "Deploy payload" ISO picker browses /root under sudo — Done (`c56b8f8`)
 - [x] 18. Deploy payload ISO picker — reproduction — Done, see below.
 - [x] 19. Fix ISO/image picker — Done, see below.
 
