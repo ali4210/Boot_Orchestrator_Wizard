@@ -136,7 +136,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       also asserting the error names the exit code.
 - [x] F8. headless `isBlockDevice`: EvalSymlinks first, then os.Stat + require ModeDevice
       without ModeCharDevice; tighten `isLikelyLiveRootDisk` to exact device or
-      device+partition-suffix only — Done (commit TBD). `cmd/orchestrator/headless.go`:
+      device+partition-suffix only — Done (`67796c5`). `cmd/orchestrator/headless.go`:
       `isBlockDevice` no longer infers from a `/sys/class/block/<basename>` lookup (which
       never resolved symlinks like `/dev/disk/by-id/...`, and wasn't checking the target
       path's own type at all); now `filepath.EvalSymlinks` then `os.Stat`s the resolved
@@ -153,6 +153,28 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       own prescribed safe-testing device, read-only — never opened/mounted/written) is
       accepted; `/dev/null` (a real char device) is rejected; `sda` vs `sdaa` no longer
       false-matches (with a sanity check that `sdaa` still matches its own partition).
+- [x] F9. Verify DetectBackupTargets still excludes the disk the tool is running from,
+      including when it is a live USB (root on overlay/airootfs); add a test — Done (commit
+      TBD). Found a real gap, not just a verification: `engine/orchestrator.go`
+      `DetectActiveRootDisk` resolved `rootDev` from `findmnt -o SOURCE /`, but a live-boot
+      session (Debian/Kali/Ubuntu live-boot, Arch archiso) mounts `/` as an
+      overlay/aufs/tmpfs combining a read-only squashfs with a writable layer — `findmnt`
+      reports the source as `overlay` (or similar), never a real block device, even though
+      the session is genuinely running from a USB disk. That non-`/dev/`-prefixed `rootDev`
+      fell straight through to the `DetectAllInternalDisks()`/hardcoded-`/dev/sda` fallback,
+      returning the **wrong** disk — so `DetectBackupTargets`'s self-exclusion check (which
+      trusts `DetectActiveRootDisk` entirely) would never actually exclude the live USB the
+      tool is running from, offering it as a valid target to repartition. Fixed by checking
+      the well-known mountpoints each live-boot family exposes its real boot medium at
+      (`/run/live/medium`, `/lib/live/mount/medium`, `/run/archiso/bootmnt`, `/isodevice`)
+      when the direct `/` source isn't a block device, before falling back further. Test
+      (`engine/backup_test.go`
+      `TestDetectBackupTargets_ExcludesLiveUSBBootDiskEvenOnOverlayRoot`, via a new
+      `withFakeFindmntAndLsblk` helper — fake `findmnt`/`lsblk` on `PATH`, never touches the
+      real system): **confirmed failing before the fix** (verified by temporarily
+      reverting `engine/orchestrator.go` via `git stash` and re-running — the live-boot USB
+      disk was wrongly included) and passing after; also asserts an internal non-removable
+      disk stays excluded and a second, genuinely pluggable USB disk stays included.
 
 ## Phase 1: Hardening and testability
 

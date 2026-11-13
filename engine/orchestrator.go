@@ -128,6 +128,31 @@ func DetectActiveRootDisk() (parentDisk string, hostPart string, hostNum string,
 		}
 	}
 
+	// Follow-up F9: a live-boot session (Debian/Kali/Ubuntu live-boot,
+	// Arch archiso, ...) mounts "/" as an overlay/aufs/tmpfs combining a
+	// read-only squashfs with a writable layer — findmnt/proc/mounts
+	// report the source as "overlay" (or similar), never a real block
+	// device, even though the session is genuinely running from a USB
+	// disk. Falling through with that non-device rootDev would have hit
+	// the DetectAllInternalDisks/"/dev/sda" fallback below and returned
+	// the WRONG disk — meaning DetectBackupTargets's self-exclusion check
+	// (which trusts this function entirely) would fail to exclude the
+	// live USB the tool is actually running from. Each live-boot family
+	// mounts its real boot medium at one of these well-known mountpoints;
+	// resolve through those instead.
+	if rootDev == "" || !strings.HasPrefix(rootDev, "/dev/") {
+		for _, liveMount := range []string{"/run/live/medium", "/lib/live/mount/medium", "/run/archiso/bootmnt", "/isodevice"} {
+			out, lmErr := exec.Command("findmnt", "-n", "-o", "SOURCE", liveMount).Output()
+			if lmErr != nil {
+				continue
+			}
+			if src := strings.TrimSpace(string(out)); strings.HasPrefix(src, "/dev/") {
+				rootDev = src
+				break
+			}
+		}
+	}
+
 	if real, evalErr := filepath.EvalSymlinks(rootDev); evalErr == nil && real != "" {
 		rootDev = real
 	}
