@@ -16,20 +16,23 @@ import (
 // embedding plaintext there is inherent to that format, not a choice made
 // here. Password must never be logged.
 type Credentials struct {
-	Username string
+	Username string `json:"username"`
 
 	// Password is the plaintext, held only transiently (e.g. while the TUI's
 	// credentials screen computes PasswordHash) and never retained in a
 	// ProvisionRequest that travels through the rest of the engine.
-	Password string
+	// json:"-" so it can never leak through json.Marshal, however this
+	// struct ends up embedded or logged in the future.
+	Password string `json:"-"`
 
 	// PasswordHash is a precomputed SHA-512 crypt ("$6$...") hash, normally
 	// set once by the TUI immediately after the user submits the
 	// credentials screen (via HashPassword), so the plaintext Password can
-	// be discarded right away.
-	PasswordHash string
+	// be discarded right away. Still excluded from JSON: it is a valid
+	// credential for `chpasswd -e` and must not end up on disk or in logs.
+	PasswordHash string `json:"-"`
 
-	AllowRootLogin bool // if false (the default), root stays locked
+	AllowRootLogin bool `json:"allow_root_login"` // if false (the default), root stays locked
 }
 
 // ResolvedPasswordHash returns PasswordHash if it is already set, otherwise
