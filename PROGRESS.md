@@ -165,8 +165,44 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       untouched and flagged here rather than guessed at blind.
 
 ### D. Launchers
-- [ ] 9. autorun.sh: confirm before root installs, safe rm -rf, no go get/mod tidy — Not started
-- [ ] 10. autorun.ps1: Go bootstrap version fix / GOTOOLCHAIN — Not started
+- [x] 9. autorun.sh: confirm before root installs, safe rm -rf, no go get/mod tidy — Done
+      (commit TBD). Rewrote `autorun.sh`'s control flow: it used to `exec sudo ...` as
+      literally the first thing (before any dependency check or build), so `go get`/
+      `go mod tidy`/`go build` and the module/build caches all ran AS ROOT — writing
+      root-owned files into the invoking user's own `$GOPATH`/`$GOCACHE` and this repo's
+      `bin/`. Now: dependency checks, confirmation, and the full build run as the invoking
+      user; root is requested exactly once, right before `exec`-ing the already-built
+      binary (which genuinely needs it for partition/bootloader operations). Package
+      installs (`assert_host_dependencies`) now call `confirm_or_abort` first (skippable
+      with `-y`/`--yes`; aborts loudly instead of hanging if stdin isn't a TTY and `-y`
+      wasn't given) and `sudo` only that specific install command, not the whole script.
+      `rm -rf "$SCRIPT_DIR/bin"` and every other destructive `rm -rf "$SCRIPT_DIR/..."` now
+      use `"${SCRIPT_DIR:?}/..."`, verified to abort instead of resolving to `rm -rf /bin`
+      if `SCRIPT_DIR` were ever empty. `go get ...`/`go mod tidy` replaced with
+      `go mod download` (fetches what's already pinned in go.sum; never mutates
+      go.mod/go.sum or hits the network for anything but already-resolved module
+      versions). Verified: `bash -n` and `shellcheck` both clean; `./autorun.sh -h` runs
+      end-to-end (safe, exits before touching anything); `confirm_or_abort`'s two branches
+      and the `${SCRIPT_DIR:?}` guard verified in isolated, safe subshell tests (not
+      against the real repo/system).
+- [x] 10. autorun.ps1: Go bootstrap version fix / GOTOOLCHAIN — Done (commit TBD).
+      Root cause: hardcoded `$DownloadUrl = "https://go.dev/dl/go1.22.6.windows-amd64.zip"`
+      — go.mod requires `go 1.26.0`; the bootstrapped toolchain was stale and could drift
+      further any time go.mod's directive changes without anyone remembering to update this
+      literal. Fixed to parse the required version directly from go.mod
+      (`Select-String -Pattern '^go\s+(\d+\.\d+(?:\.\d+)?)'`, padding a two-part version
+      like "1.26" to "1.26.0" for the archive-name convention) and build the download URL
+      from that; also sets `$env:GOTOOLCHAIN = "auto"` unconditionally (both when Go is
+      already on PATH and after bootstrapping) so Go's own 1.21+ toolchain manager
+      transparently upgrades if the resolved version is ever still behind what go.mod
+      needs. Verified: PowerShell's own parser (`[System.Management.Automation.Language.
+      Parser]::ParseFile`) reports no syntax errors; `PSScriptAnalyzer` reports zero
+      Error-severity findings (only pre-existing, unrelated style/Information-level
+      findings across the whole file — trailing whitespace, `Write-Host` usage — not
+      introduced by this change and not fixed here, out of scope for this item); the
+      version-extraction regex verified against the real go.mod (resolves to `1.26.0`) and
+      against a scratch two-part-version fixture (resolves to `1.24.0`), with no network
+      call or real download performed.
 
 **CHECKPOINT 1:** not reached
 
