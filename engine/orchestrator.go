@@ -705,13 +705,12 @@ var (
 // (failResult, true); the caller must return failResult immediately without
 // committing the journal step or reporting success.
 //
-// NOTE: this still carries audit bug 2.1 verbatim (fixed in a later commit):
-// the generic (non-macOS, non-Windows) branch below calls journal.Fail on
-// error but does not signal failure to the caller, so execution falls
-// through to an unconditional journal.Commit plus a "dual-boot bootloader
-// synchronized" success update even when AutoConfigureDualBoot just failed.
-// This extraction only makes the existing behavior independently testable;
-// it changes no logic yet.
+// Fixes audit 2.1: the generic (non-macOS, non-Windows) branch used to call
+// journal.Fail and then fall through to an unconditional journal.Commit plus
+// a "dual-boot bootloader synchronized" success update even though
+// AutoConfigureDualBoot had just failed, so a broken Linux dual-boot install
+// was reported to the caller as successful. All three branches now fail the
+// same way.
 func configureBootloaderStep(
 	journal *safety.Journal,
 	isMacOS, isWindows bool,
@@ -748,6 +747,7 @@ func configureBootloaderStep(
 			onUpdate(StepUpdate{StepName: msg, Done: false})
 		}); err != nil {
 			journal.Fail(bootStep, err)
+			return fail("bootloader-configure", err), true
 		}
 	}
 
