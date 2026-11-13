@@ -17,14 +17,27 @@
 #  Follow-up F6: the function definitions below (and the variable setup that
 #  precedes them) are structured so this file can be `source`d — e.g. by a
 #  test — without running the `main` action sequence at the bottom, which
-#  only fires when the script is executed directly. SCRIPT_DIR also honors
-#  a pre-set value (`: "${SCRIPT_DIR:=...}"`) instead of always
-#  recomputing it, so a test can point it at a scratch directory.
+#  only fires when the script is executed directly.
+#
+#  Follow-up F10: SCRIPT_DIR is ALWAYS computed from BASH_SOURCE and never
+#  trusts an ambient environment variable of the same name — this script
+#  later does `rm -rf "${SCRIPT_DIR:?}/bin"`, `git gc --aggressive`, and
+#  other destructive operations scoped to it, so honoring a plain
+#  "SCRIPT_DIR" from whatever happened to be in the caller's environment
+#  (accidental collision with another tool, or a hostile one) would let
+#  that value redirect --hard's purge at an arbitrary directory. The only
+#  way to override it is the explicit, narrowly-named
+#  ORCH_AUTORUN_TESTING=1 + ORCH_TEST_SCRIPT_DIR pair, which a test sets on
+#  purpose and nothing else is likely to set by accident.
 # ==============================================================================
 
 set -e
 
-: "${SCRIPT_DIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+if [ "${ORCH_AUTORUN_TESTING:-0}" = "1" ] && [ -n "${ORCH_TEST_SCRIPT_DIR:-}" ]; then
+    SCRIPT_DIR="$ORCH_TEST_SCRIPT_DIR"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 
 ASSUME_YES=0
 for arg in "$@"; do

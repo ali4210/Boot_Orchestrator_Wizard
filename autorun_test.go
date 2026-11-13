@@ -21,12 +21,13 @@ func hasPasswordlessSudo(t *testing.T) bool {
 	return exec.Command("sudo", "-n", "true").Run() == nil
 }
 
-// sourceAutorunAndRun sources the real autorun.sh from the repo root with
-// SCRIPT_DIR pre-set to scriptDir, then runs body (typically a single
-// function call such as "check_root_owned_files"). SCRIPT_DIR's
-// `: "${SCRIPT_DIR:=...}"` guard in autorun.sh respects this pre-set value
-// instead of recomputing it, and the `if [[ "${BASH_SOURCE[0]}" == "${0}"
-// ]]` guard at the bottom of autorun.sh prevents its real build/launch
+// sourceAutorunAndRun sources the real autorun.sh from the repo root,
+// redirecting SCRIPT_DIR to scriptDir via the explicit opt-in pair
+// ORCH_AUTORUN_TESTING=1 / ORCH_TEST_SCRIPT_DIR (follow-up F10 — autorun.sh
+// never honors a plain ambient "SCRIPT_DIR", only this narrowly-named
+// pair), then runs body (typically a single function call such as
+// "check_root_owned_files"). The `if [[ "${BASH_SOURCE[0]}" == "${0}" ]]`
+// guard at the bottom of autorun.sh prevents its real build/launch
 // sequence (main) from running just because it was sourced.
 func sourceAutorunAndRun(t *testing.T, scriptDir, body string) (string, error) {
 	t.Helper()
@@ -41,9 +42,27 @@ func sourceAutorunAndRun(t *testing.T, scriptDir, body string) (string, error) {
 
 	script := "set -e\nsource " + shellQuote(autorunPath) + "\n" + body + "\n"
 	cmd := exec.Command("bash", "-c", script)
-	cmd.Env = append(os.Environ(), "SCRIPT_DIR="+scriptDir)
+	cmd.Env = append(envWithoutScriptDir(),
+		"ORCH_AUTORUN_TESTING=1",
+		"ORCH_TEST_SCRIPT_DIR="+scriptDir,
+	)
 	out, runErr := cmd.CombinedOutput()
 	return string(out), runErr
+}
+
+// envWithoutScriptDir returns the current process's environment with any
+// SCRIPT_DIR variable stripped, so tests never accidentally rely on (or
+// mask a bug via) an ambient SCRIPT_DIR the test process itself might
+// happen to have set.
+func envWithoutScriptDir() []string {
+	var out []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "SCRIPT_DIR=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 func shellQuote(s string) string {
@@ -142,5 +161,45 @@ func TestCheckRootOwnedFiles_JournalOwnedByRootOnlyWarns(t *testing.T) {
 	}
 	if strings.Contains(out, "BLOCKED") {
 		t.Fatalf("expected no hard block for a root-owned journal alone, got:\n%s", out)
+	}
+}
+
+// TestAmbientSCRIPT_DIR_DoesNotRedirectScript is the regression test for
+// follow-up F10: autorun.sh must never honor a plain "SCRIPT_DIR" that
+// merely happens to be set in the environment — otherwise an accidental
+// collision with another tool (or a hostile environment) could redirect
+// --hard's purge_cache (rm -rf "${SCRIPT_DIR:?}/bin", `git gc
+// --aggressive`, ...) at an arbitrary directory. This does not actually
+// invoke purge_cache/--hard for real (that would be destructive against
+// whatever directory it resolves to); it proves the underlying mechanism
+// those destructive operations depend on — SCRIPT_DIR's own value — is
+// computed from BASH_SOURCE and ignores the ambient variable, which is
+// sufficient since purge_cache has no separate directory resolution of its
+// own.
+func TestAmbientSCRIPT_DIR_DoesNotRedirectScript(t *testing.T) {
+	repoRoot, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("resolving repo root: %v", err)
+	}
+	autorunPath := filepath.Join(repoRoot, "autorun.sh")
+
+	const evilDir = "/tmp/orch-test-evil-script-dir-should-never-be-used"
+	script := "set -e\nsource " + shellQuote(autorunPath) + "\necho \"RESOLVED:$SCRIPT_DIR\"\n"
+	cmd := exec.Command("bash", "-c", script)
+	// Deliberately set a plain, ambient SCRIPT_DIR, WITHOUT the
+	// ORCH_AUTORUN_TESTING/ORCH_TEST_SCRIPT_DIR opt-in pair — this is
+	// exactly the case that must be ignored.
+	cmd.Env = append(envWithoutScriptDir(), "SCRIPT_DIR="+evilDir)
+
+	out, runErr := cmd.CombinedOutput()
+	if runErr != nil {
+		t.Fatalf("sourcing autorun.sh: %v\noutput:\n%s", runErr, out)
+	}
+
+	if strings.Contains(string(out), "RESOLVED:"+evilDir) {
+		t.Fatalf("autorun.sh honored an ambient SCRIPT_DIR (%s) with no opt-in — --hard's purge would have operated on it, output:\n%s", evilDir, out)
+	}
+	if !strings.Contains(string(out), "RESOLVED:"+repoRoot) {
+		t.Fatalf("expected SCRIPT_DIR to resolve to the real script location (%s), got:\n%s", repoRoot, out)
 	}
 }

@@ -154,8 +154,8 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       accepted; `/dev/null` (a real char device) is rejected; `sda` vs `sdaa` no longer
       false-matches (with a sanity check that `sdaa` still matches its own partition).
 - [x] F9. Verify DetectBackupTargets still excludes the disk the tool is running from,
-      including when it is a live USB (root on overlay/airootfs); add a test — Done (commit
-      TBD). Found a real gap, not just a verification: `engine/orchestrator.go`
+      including when it is a live USB (root on overlay/airootfs); add a test — Done
+      (`0795fb8`). Found a real gap, not just a verification: `engine/orchestrator.go`
       `DetectActiveRootDisk` resolved `rootDev` from `findmnt -o SOURCE /`, but a live-boot
       session (Debian/Kali/Ubuntu live-boot, Arch archiso) mounts `/` as an
       overlay/aufs/tmpfs combining a read-only squashfs with a writable layer — `findmnt`
@@ -175,6 +175,28 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       reverting `engine/orchestrator.go` via `git stash` and re-running — the live-boot USB
       disk was wrongly included) and passing after; also asserts an internal non-removable
       disk stays excluded and a second, genuinely pluggable USB disk stays included.
+- [x] F10. autorun.sh must not honor an ambient SCRIPT_DIR; always compute it from
+      BASH_SOURCE; override only via ORCH_TEST_SCRIPT_DIR + ORCH_AUTORUN_TESTING=1 — Done
+      (commit TBD). Root cause: F6's `: "${SCRIPT_DIR:=...}"` pattern made the script trust
+      ANY pre-existing `SCRIPT_DIR` in the environment — since `autorun.sh` later does
+      `rm -rf "${SCRIPT_DIR:?}/bin"`, `git gc --aggressive`, and other destructive
+      operations scoped to it (the `--hard` purge), an accidental environment collision (or
+      a hostile one) could redirect all of that at an arbitrary directory. Fixed: `SCRIPT_DIR`
+      is now always computed from `BASH_SOURCE`, except when both
+      `ORCH_AUTORUN_TESTING=1` and a non-empty `ORCH_TEST_SCRIPT_DIR` are set — a
+      narrowly-named, two-variable opt-in a test sets on purpose and nothing else is likely
+      to set by accident. `autorun_test.go`'s `sourceAutorunAndRun` updated to use this pair
+      instead of plain `SCRIPT_DIR`, and now also strips any ambient `SCRIPT_DIR` from the
+      test subprocess's environment via a new `envWithoutScriptDir` helper. New test
+      `TestAmbientSCRIPT_DIR_DoesNotRedirectScript`: sources the real script with a plain
+      `SCRIPT_DIR=/tmp/orch-test-evil-script-dir...` set and NO opt-in, asserting the
+      resulting `$SCRIPT_DIR` is the real repo root, not the planted value. **Confirmed
+      failing before the fix** (verified by temporarily reverting `autorun.sh` via `git
+      stash` and re-running — the ambient value leaked straight through) and passing after.
+      Does not actually invoke `purge_cache`/`--hard` for real in the test (that would be
+      destructive against wherever it resolved); proving `SCRIPT_DIR`'s own value is
+      correctly computed is sufficient, since `--hard`'s purge has no separate directory
+      resolution of its own.
 
 ## Phase 1: Hardening and testability
 
