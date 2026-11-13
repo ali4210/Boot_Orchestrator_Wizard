@@ -204,7 +204,8 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       against a scratch two-part-version fixture (resolves to `1.24.0`), with no network
       call or real download performed.
 
-**CHECKPOINT 1:** not reached
+**CHECKPOINT 1:** Reached. All 10 items done, build/vet/test green on every commit. See chat
+summary delivered at this checkpoint for the full per-commit breakdown.
 
 ## Phase 2: Reported functional bugs
 - [ ] 11. Download stall/incomplete reproduction (httptest cases) — Not started
