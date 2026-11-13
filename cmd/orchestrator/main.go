@@ -59,11 +59,35 @@ func checkDryRun(requested bool) (refuse bool, message string) {
 func main() {
 	isoFlag := flag.String("iso", "", "Direct local path to an ISO or raw disk image")
 	dryRunFlag := flag.Bool("dry-run", false, "Refuse to start (see --help); full dry-run simulation is not implemented yet")
+
+	headlessFlag := flag.Bool("headless", false, "Run non-interactively instead of launching the TUI; requires --yes")
+	osIDFlag := flag.String("os-id", "", "Headless: catalog entry ID to provision (mutually exclusive with --iso-path)")
+	isoPathFlag := flag.String("iso-path", "", "Headless: direct local path to an ISO/image to provision (mutually exclusive with --os-id)")
+	targetDiskFlag := flag.String("target-disk", "", "Headless: target disk device, e.g. /dev/sda")
+	usernameFlag := flag.String("username", "", "Headless: account to create on the provisioned OS")
+	passwordFileFlag := flag.String("password-file", "", "Headless: path to a file containing the account password (plaintext passwords are never accepted as a command-line argument)")
+	yesFlag := flag.Bool("yes", false, "Headless: confirm you want to proceed; required for --headless to do anything")
 	flag.Parse()
 
 	if refuse, message := checkDryRun(*dryRunFlag); refuse {
 		fmt.Fprint(os.Stderr, message)
 		os.Exit(1)
+	}
+
+	if *headlessFlag {
+		cfg := headlessConfig{
+			OSID:         *osIDFlag,
+			ISOPath:      *isoPathFlag,
+			TargetDisk:   *targetDiskFlag,
+			Username:     *usernameFlag,
+			PasswordFile: *passwordFileFlag,
+			Yes:          *yesFlag,
+		}
+		if err := runHeadless(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "headless provisioning failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	if *isoFlag != "" {

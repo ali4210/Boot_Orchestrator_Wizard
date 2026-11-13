@@ -103,7 +103,36 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       `isConfirmedSwapPartition` table test (4 cases).
 
 ### C. Headless mode and loop targets
-- [ ] 7. --headless/--os-id/--iso-path/--target-disk/--username/--password-file/--yes — Not started
+- [x] 7. --headless/--os-id/--iso-path/--target-disk/--username/--password-file/--yes — Done
+      (commit TBD). New `cmd/orchestrator/headless.go`: `headlessConfig.validate()` enforces
+      all required flags and refuses without `--yes` last (so every other problem is
+      reported too, not just the missing `--yes`). Password is **only** ever accepted via
+      `--password-file` (read by `readPasswordFile`, one trailing `\n`/`\r\n` stripped,
+      internal whitespace untouched) — never as a CLI argument, so it's never visible via
+      `ps`/`/proc/<pid>/cmdline`. `buildHeadlessRequest` resolves `--os-id` against
+      `discovery.LoadEmbedded()` (mirrors/SHA256/distro from the matched entry) or
+      `--iso-path` (a local file, routed through the same local-path ingest
+      `engine/streamer.go` already supports for absolute paths — no catalog entry, so no
+      Windows auto-detection, same limitation as the TUI's unwired custom-ISO path), enforces
+      `engine.ValidUsername`/`engine.ValidPassword`, hashes the password
+      (`Credentials.HashPassword`), and resolves dual-boot-vs-single-boot plus host/target
+      partition carryover via `resolveHeadlessTarget` exactly like the TUI's
+      `startProvisioning` does with `engine.DetectActiveRootDisk`. `runHeadless` then calls
+      the identical `engine.RunProvision(ctx, req, "/etc/default/grub", onUpdate)` the TUI
+      uses (`ui/provision.go`'s `runProvisionWithCancel`) — same engine path, same safety
+      gates (including the new B.5 preflight), just with stdout instead of Bubble Tea.
+      Tests (`cmd/orchestrator/headless_test.go`): full `validate()` matrix (each missing
+      flag, mutual exclusion, missing `--yes`), password-file trailing-newline stripping
+      (LF/CRLF/none/internal-whitespace-preserved), missing-password-file, dual-boot vs
+      single-boot target resolution, reserved-username rejection, short-password rejection,
+      unknown `--os-id` rejection, successful catalog-entry resolution (asserting the hash is
+      set and the plaintext password is never carried in the built request), local
+      `--iso-path` resolution, missing-`--iso-path`-file rejection.
+      **Known gap:** no end-to-end test actually invokes `engine.RunProvision` from headless
+      mode (that would require mocking the full partition/download/bootloader pipeline);
+      covered instead by the existing per-function engine tests plus this request-building
+      layer. OS-family auto-detection for `--iso-path` (so Windows ISOs get an autounattend
+      without needing `--os-id`) is Phase 2 item 19's scope, not this one.
 - [ ] 8. Loop device / image file support audit — Not started
 
 ### D. Launchers
