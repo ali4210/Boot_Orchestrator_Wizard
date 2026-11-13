@@ -510,7 +510,7 @@ summary delivered at this checkpoint for the full per-commit breakdown.
 
 ## Phase 2: Reported functional bugs
 
-### E. Downloads stall or end incomplete — Done (commit TBD)
+### E. Downloads stall or end incomplete — Done (`817cb96`)
 - [x] 11. Download stall/incomplete reproduction (httptest cases) — Done, see below.
 - [x] 12. Fix downloader (timeouts, resume, retry, checksum, atomic) — Done, see below.
 - [x] 13. Manifest checksum/URL audit — Done, see below.
