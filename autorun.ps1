@@ -117,14 +117,39 @@ Write-Host "=> Checking Go toolchain to build from source..." -ForegroundColor Y
 $tempGoRoot = "$env:TEMP\go_runtime"
 $bootstrappedGo = $false
 
+# Even when a system Go is already on PATH, let its own toolchain manager
+# (Go 1.21+) transparently fetch/switch to whatever version go.mod requires
+# if the installed one is older (audit 1D.10).
+$env:GOTOOLCHAIN = "auto"
+
 try {
     if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
         Write-Host "=> Go compiler not found in system PATH." -ForegroundColor Yellow
         Write-Host "=> Auto-fetching portable Go runtime to ephemeral storage..." -ForegroundColor Cyan
-        
+
+        # Audit 1D.10: this used to hardcode a specific Go version
+        # (go1.22.6) that silently drifted out of sync with go.mod's own
+        # `go` directive (currently requiring 1.26.0) — an old bootstrapped
+        # toolchain can fail outright, or depend entirely on an implicit
+        # GOTOOLCHAIN auto-upgrade over the network. Parse the required
+        # version straight from go.mod instead, so this always bootstraps a
+        # toolchain that matches what the project actually needs.
+        $GoModPath = Join-Path $ScriptDir "go.mod"
+        $GoModGoLine = Select-String -Path $GoModPath -Pattern '^go\s+(\d+\.\d+(?:\.\d+)?)' | Select-Object -First 1
+        if (-not $GoModGoLine) {
+            throw "Could not find a 'go <version>' directive in $GoModPath to determine which Go toolchain to bootstrap."
+        }
+        $GoModVersion = $GoModGoLine.Matches[0].Groups[1].Value
+        if ($GoModVersion -notmatch '\.\d+\.\d+$' -and $GoModVersion -match '^\d+\.\d+$') {
+            # go.mod may specify a two-part version (e.g. "1.26"); the
+            # downloadable toolchain archives are published as X.Y.0.
+            $GoModVersion = "$GoModVersion.0"
+        }
+        Write-Host "=> go.mod requires Go $GoModVersion; bootstrapping that exact version." -ForegroundColor Cyan
+
         $GoZip = "$env:TEMP\go_bootstrap.zip"
-        $DownloadUrl = "https://go.dev/dl/go1.22.6.windows-amd64.zip"
-        
+        $DownloadUrl = "https://go.dev/dl/go$GoModVersion.windows-amd64.zip"
+
         Invoke-WebRequest -Uri $DownloadUrl -OutFile $GoZip -UseBasicParsing
         
         if (Test-Path $tempGoRoot) {
