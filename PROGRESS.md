@@ -62,7 +62,14 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       continues the rest of provisioning. Making every critical step hard-fail the whole
       pipeline is the subject of Phase 4 item 25 (silent-error audit across the whole
       codebase), done deliberately as one pass rather than piecemeal here.
-- [ ] 4. Min password length 8, reserved username rejection — Not started
+- [x] 4. Min password length 8, reserved username rejection — Done (commit TBD).
+      `engine/credentials.go`: `ValidUsername` now also rejects a `reservedUsernames` set
+      (root, daemon, bin, sys, nobody, sshd, systemd-*, administrator, guest, etc., matched
+      case-insensitively) even if the string otherwise matches the regex. Added
+      `MinPasswordLength = 8` and `ValidPassword`. `ui/model.go`'s credentials screen now
+      calls `engine.ValidPassword` (was `len(password) < 4`) and reports the reserved-name
+      rejection in its username error text. Tests: `TestValidUsername` extended with the
+      reserved-name cases, new `TestValidPassword` with boundary cases (7/8/9 chars).
 
 ### B. Safety gates
 - [ ] 5. LVM/LUKS/mdraid/BitLocker pre-flight abort; Secure Boot/TPM detection — Not started

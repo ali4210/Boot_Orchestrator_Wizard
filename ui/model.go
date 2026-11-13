@@ -2320,11 +2320,11 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				confirm := m.credPasswordConfirmInput.Value()
 
 				if !engine.ValidUsername(username) {
-					m.credError = "username must start with a letter or '_' and contain only lowercase letters, digits, '_' or '-'"
+					m.credError = "username must start with a letter or '_', contain only lowercase letters, digits, '_' or '-', and not be a reserved system account name"
 					return m, nil
 				}
-				if len(password) < 4 {
-					m.credError = "password must be at least 4 characters"
+				if !engine.ValidPassword(password) {
+					m.credError = fmt.Sprintf("password must be at least %d characters", engine.MinPasswordLength)
 					return m, nil
 				}
 				if password != confirm {

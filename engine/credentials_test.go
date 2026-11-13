@@ -31,19 +31,44 @@ func TestResolvedPasswordHash_PrefersPrecomputedHash(t *testing.T) {
 
 func TestValidUsername(t *testing.T) {
 	cases := map[string]bool{
-		"alex":          true,
-		"_svc":          true,
-		"a-b_9":         true,
-		"":              false,
-		"Alex":          false, // uppercase not allowed
-		"9alex":         false, // can't start with a digit
+		"alex":           true,
+		"_svc":           true,
+		"a-b_9":          true,
+		"":               false,
+		"Alex":           false, // uppercase not allowed
+		"9alex":          false, // can't start with a digit
 		"alex; rm -rf /": false,
-		"alex$(whoami)": false,
-		"a b":           false,
+		"alex$(whoami)":  false,
+		"a b":            false,
+		// audit 1A.4: reserved system/builtin accounts, rejected even though
+		// they otherwise match the character-class regex.
+		"root":          false,
+		"daemon":        false,
+		"bin":           false,
+		"sys":           false,
+		"nobody":        false,
+		"administrator": false, // Windows builtin, matched case-insensitively
+		"guest":         false,
 	}
 	for input, want := range cases {
 		if got := ValidUsername(input); got != want {
 			t.Errorf("ValidUsername(%q) = %v, want %v", input, got, want)
+		}
+	}
+}
+
+// TestValidPassword is the regression test for audit 1A.4's minimum
+// password length requirement.
+func TestValidPassword(t *testing.T) {
+	cases := map[string]bool{
+		"":          false, // 0 chars
+		"1234567":   false, // 7 chars: below MinPasswordLength
+		"12345678":  true,  // 8 chars: exactly MinPasswordLength
+		"123456789": true,  // 9 chars: above MinPasswordLength
+	}
+	for input, want := range cases {
+		if got := ValidPassword(input); got != want {
+			t.Errorf("ValidPassword(%q) (len=%d) = %v, want %v", input, len(input), got, want)
 		}
 	}
 }

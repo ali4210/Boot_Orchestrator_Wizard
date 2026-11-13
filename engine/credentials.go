@@ -48,11 +48,43 @@ func (c Credentials) ResolvedPasswordHash() (string, error) {
 // digits, underscore and hyphen, starting with a letter or underscore.
 var validUsernameRe = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 
+// reservedUsernames blocks well-known system/service and builtin accounts
+// that must never be the account this tool creates or repurposes: Debian's
+// default system accounts (root, daemon, bin, sys, ...) and the Windows
+// builtin accounts (administrator, guest) in case this list is ever reused
+// for a Windows-side username check. Matched case-insensitively since
+// Windows account names are case-insensitive even though validUsernameRe
+// only accepts lowercase.
+var reservedUsernames = map[string]bool{
+	"root": true, "daemon": true, "bin": true, "sys": true, "sync": true,
+	"games": true, "man": true, "lp": true, "mail": true, "news": true,
+	"uucp": true, "proxy": true, "www-data": true, "backup": true,
+	"list": true, "irc": true, "gnats": true, "nobody": true, "sshd": true,
+	"systemd-network": true, "systemd-resolve": true, "systemd-timesync": true,
+	"messagebus": true, "administrator": true, "guest": true,
+}
+
 // ValidUsername reports whether username is safe to embed directly into
 // shell scripts and useradd/chpasswd invocations (no shell metacharacters,
-// matches standard Linux username rules).
+// matches standard Linux username rules) and is not a reserved
+// system/builtin account name (audit 1A.4).
 func ValidUsername(username string) bool {
-	return validUsernameRe.MatchString(username)
+	if !validUsernameRe.MatchString(username) {
+		return false
+	}
+	return !reservedUsernames[strings.ToLower(username)]
+}
+
+// MinPasswordLength is the minimum accepted password length (audit 1A.4).
+// 8 matches the most common distro/PAM pam_unix minlen default.
+const MinPasswordLength = 8
+
+// ValidPassword reports whether password meets the minimum length
+// requirement. It intentionally does not check complexity (character
+// classes, dictionary words, etc.) — length alone is the only requirement
+// specified for this tool's account provisioning.
+func ValidPassword(password string) bool {
+	return len(password) >= MinPasswordLength
 }
 
 // HashPassword returns a glibc crypt(3) SHA-512 ("$6$...") hash of
