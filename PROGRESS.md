@@ -715,7 +715,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
 
 - [x] F13. No catalog entry may be silently provisioned unverified; show an "UNVERIFIED
       download" warning and require confirmation in both the TUI and headless mode. Do not
-      invent checksums — Done (commit TBD). **Checksums not backfilled**: per the explicit
+      invent checksums — Done (`a7de3b9`). **Checksums not backfilled**: per the explicit
       instruction, no SHA256 was added for any entry — none of the 29 current entries could
       be sourced from an official *signed* checksum file within this session (see
       `docs/MANIFEST_AUDIT.md`, written in the prior session; still accurate). What *was*
