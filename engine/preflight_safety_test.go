@@ -103,6 +103,36 @@ func TestPreflightStorageSafetyCheck_PassesOnPlainExt4(t *testing.T) {
 	}
 }
 
+// TestPreflightStorageSafetyCheck_BlkidExitCode2DoesNotAbort is the
+// regression test for follow-up F2: blkid exits 2 (with empty stdout) when
+// a partition has no recognized filesystem at all — a normal, common case
+// (e.g. an unformatted or freshly-created partition), not a sign of
+// LVM/LUKS/mdraid/BitLocker. This must never be treated as a dangerous
+// finding; detectDangerousStorage's "blkid error -> skip, don't flag" path
+// must keep working for this exact real-world exit code, not just any
+// error.
+func TestPreflightStorageSafetyCheck_BlkidExitCode2DoesNotAbort(t *testing.T) {
+	withMockRunner(t, &mockRunner{
+		StdoutHandler: func(name string, args []string) ([]byte, error) {
+			switch name {
+			case "lsblk":
+				return []byte("/dev/sdz\n/dev/sdz1\n"), nil
+			case "blkid":
+				// Real blkid: exit code 2, no stdout, when it finds no
+				// recognized superblock/filesystem on the device.
+				return []byte(""), fakeExitError(2)
+			case "mokutil":
+				return []byte(""), nil
+			}
+			return []byte(""), nil
+		},
+	})
+
+	if err := PreflightStorageSafetyCheck("/dev/sdz"); err != nil {
+		t.Fatalf("expected blkid exit code 2 (no filesystem) to be treated as a non-finding, got: %v", err)
+	}
+}
+
 func TestPreflightStorageSafetyCheck_RefusesEmptyDisk(t *testing.T) {
 	if err := PreflightStorageSafetyCheck(""); err == nil {
 		t.Fatalf("expected an empty disk path to be refused")

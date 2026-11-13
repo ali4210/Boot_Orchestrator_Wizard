@@ -20,8 +20,20 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       real system's disks) reporting an internal, non-removable disk coincidentally named
       `sdc`/`sdb` alongside a genuine USB disk; asserts the internal one is excluded and the
       genuine USB one is still included, for all three affected functions.
-- [ ] F2. Move PreflightStorageSafetyCheck before the image download; test blkid exit code 2
-      (no filesystem) does not abort — Not started
+- [x] F2. Move PreflightStorageSafetyCheck before the image download; test blkid exit code 2
+      (no filesystem) does not abort — Done (commit TBD). Moved the call in
+      `engine/orchestrator.go` `RunProvision` from inside the `partition-shrink` step
+      (after the download/checksum-verify block) to right after `req.TargetDiskPath` is
+      resolved, before `journal.Begin("image-download", ...)` — so a disk this tool will
+      refuse to touch is rejected before spending any time/bandwidth downloading a payload
+      for it. Now runs unconditionally (even when resuming a paused session): cheap and
+      read-only, worth re-checking. The Secure Boot/TPM advisory warnings were left where
+      they were (not part of this request, and they don't gate anything). Test
+      (`TestPreflightStorageSafetyCheck_BlkidExitCode2DoesNotAbort`,
+      `engine/preflight_safety_test.go`): mocks blkid returning a genuine exit-code-2
+      `*exec.ExitError` with empty stdout (real blkid's behavior on an unformatted
+      partition — a normal, common case, not a sign of LVM/LUKS/mdraid/BitLocker) and
+      confirms the check passes cleanly rather than aborting.
 - [ ] F3. Headless: refuse non-block-device targets and the live root disk in single-boot
       mode; resolve autounattend.xml via embed/executable location not cwd; fail loudly if a
       Windows target has no unattend — Not started
