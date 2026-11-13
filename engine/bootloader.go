@@ -74,8 +74,8 @@ GRUB_DISABLE_OS_PROBER=false
 
 	// 3. Regenerate GRUB menu cleanly (without overwriting host EFI binaries or NVRAM pointers)
 	logFn("=> Generating boot menu entries via update-grub...")
-	if out, err := exec.Command("update-grub").CombinedOutput(); err != nil {
-		if fbOut, fbErr := exec.Command("grub2-mkconfig", "-o", "/boot/grub2/grub.cfg").CombinedOutput(); fbErr != nil {
+	if out, err := cmdRunner.Run("update-grub"); err != nil {
+		if fbOut, fbErr := cmdRunner.Run("grub2-mkconfig", "-o", "/boot/grub2/grub.cfg"); fbErr != nil {
 			return fmt.Errorf("updating grub bootloader failed: %w\n%s\n%s", err, string(out), string(fbOut))
 		}
 	}
@@ -99,17 +99,17 @@ func ensureOSProberInstalled(logFn func(string)) {
 	}
 	logFn("=> [BOOTLOADER] os-prober missing. Installing via host package manager...")
 	if _, err := exec.LookPath("apt-get"); err == nil {
-		_ = exec.Command("apt-get", "install", "-y", "os-prober").Run()
+		_, _ = cmdRunner.Run("apt-get", "install", "-y", "os-prober")
 	} else if _, err := exec.LookPath("dnf"); err == nil {
-		_ = exec.Command("dnf", "install", "-y", "os-prober").Run()
+		_, _ = cmdRunner.Run("dnf", "install", "-y", "os-prober")
 	} else if _, err := exec.LookPath("pacman"); err == nil {
-		_ = exec.Command("pacman", "-Sy", "--noconfirm", "os-prober").Run()
+		_, _ = cmdRunner.Run("pacman", "-Sy", "--noconfirm", "os-prober")
 	}
 }
 
 func resolveMountablePartition(target string) string {
 	if strings.HasPrefix(target, "/dev/loop") && !strings.Contains(target, "p") {
-		_ = exec.Command("partx", "-u", target).Run()
+		_, _ = cmdRunner.Run("partx", "-u", target)
 		time.Sleep(100 * time.Millisecond)
 
 		p1 := target + "p1"
@@ -122,7 +122,7 @@ func resolveMountablePartition(target string) string {
 
 func configureLinuxPersistentEnvironment(targetPartition, partUUID string, logFn func(string)) error {
 	targetPartition = resolveMountablePartition(targetPartition)
-	_ = exec.Command("sync").Run()
+	_, _ = cmdRunner.Run("sync")
 
 	stageDir, err := os.MkdirTemp("", "orch-dualboot-*")
 	if err != nil {
@@ -133,17 +133,17 @@ func configureLinuxPersistentEnvironment(targetPartition, partUUID string, logFn
 	fsType := queryFilesystemType(targetPartition)
 	if fsType == "" {
 		logFn(fmt.Sprintf("=> [STORAGE HEAL] Initializing ext4 filesystem on target block %s...", targetPartition))
-		_ = exec.Command("mkfs.ext4", "-F", "-q", "-L", "LINUX_ROOT", targetPartition).Run()
-		_ = exec.Command("sync").Run()
+		_, _ = cmdRunner.Run("mkfs.ext4", "-F", "-q", "-L", "LINUX_ROOT", targetPartition)
+		_, _ = cmdRunner.Run("sync")
 		time.Sleep(200 * time.Millisecond)
 	}
 
 	var mountOut []byte
 	var mountErr error
 
-	mountOut, mountErr = exec.Command("mount", "-t", "ext4", targetPartition, stageDir).CombinedOutput()
+	mountOut, mountErr = cmdRunner.Run("mount", "-t", "ext4", targetPartition, stageDir)
 	if mountErr != nil {
-		mountOut, mountErr = exec.Command("mount", targetPartition, stageDir).CombinedOutput()
+		mountOut, mountErr = cmdRunner.Run("mount", targetPartition, stageDir)
 	}
 
 	if mountErr != nil {
@@ -151,8 +151,8 @@ func configureLinuxPersistentEnvironment(targetPartition, partUUID string, logFn
 	}
 
 	defer func() {
-		_ = exec.Command("umount", "-l", stageDir).Run()
-		_ = exec.Command("sync").Run()
+		_, _ = cmdRunner.Run("umount", "-l", stageDir)
+		_, _ = cmdRunner.Run("sync")
 	}()
 
 	// Ensure systemd init link exists to prevent kernel panic
@@ -204,7 +204,7 @@ exec tail -n +3 $0
 # the 'exec tail' line above.
 `
 	_ = os.WriteFile("/etc/grub.d/40_custom", []byte(default40Custom), 0755)
-	_ = exec.Command("chmod", "+x", "/etc/grub.d/40_custom").Run()
+	_, _ = cmdRunner.Run("chmod", "+x", "/etc/grub.d/40_custom")
 	logFn("=> Cleaned /etc/grub.d/40_custom: relying on os-prober to generate exactly one boot entry.")
 
 	return nil
@@ -254,7 +254,8 @@ menuentry "Windows Boot Manager (UEFI on %s)" --class windows --class os {
 	if err := os.WriteFile("/etc/grub.d/40_custom", []byte(winStanza), 0755); err != nil {
 		return err
 	}
-	return exec.Command("chmod", "+x", "/etc/grub.d/40_custom").Run()
+	_, err := cmdRunner.Run("chmod", "+x", "/etc/grub.d/40_custom")
+	return err
 }
 
 func configureMacOSBootloader(targetPartition, partUUID string, logFn func(string)) error {
@@ -272,7 +273,8 @@ menuentry "macOS (OpenCore Chainloader on %s)" --class macosx --class os {
 	if err := os.WriteFile("/etc/grub.d/40_custom", []byte(macStanza), 0755); err != nil {
 		return err
 	}
-	return exec.Command("chmod", "+x", "/etc/grub.d/40_custom").Run()
+	_, err := cmdRunner.Run("chmod", "+x", "/etc/grub.d/40_custom")
+	return err
 }
 
 func neutralizeLiveBootHooks(rootPath string, logFn func(string)) error {
@@ -290,14 +292,14 @@ func neutralizeLiveBootHooks(rootPath string, logFn func(string)) error {
 
 	for _, b := range binds {
 		_ = os.MkdirAll(b.dest, 0755)
-		if out, err := exec.Command("mount", "--bind", b.host, b.dest).CombinedOutput(); err != nil {
+		if out, err := cmdRunner.Run("mount", "--bind", b.host, b.dest); err != nil {
 			return fmt.Errorf("bind mounting %s: %w (%s)", b.host, err, string(out))
 		}
 	}
 
 	defer func() {
 		for i := len(binds) - 1; i >= 0; i-- {
-			_ = exec.Command("umount", "-l", binds[i].dest).Run()
+			_, _ = cmdRunner.Run("umount", "-l", binds[i].dest)
 		}
 	}()
 
@@ -328,8 +330,7 @@ systemctl enable systemd-logind 2>/dev/null || true
 systemctl set-default graphical.target 2>/dev/null || true
 update-initramfs -u -k all 2>/dev/null || true
 `
-	cmd := exec.Command("chroot", rootPath, "/bin/sh", "-c", purgeScript)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := cmdRunner.Run("chroot", rootPath, "/bin/sh", "-c", purgeScript); err != nil {
 		logFn(fmt.Sprintf("=> [PERSISTENCE] Notice: cleanup warning: %v (%s)", err, string(out)))
 	} else {
 		logFn("=> [PERSISTENCE] Target converted: installer purged, desktop clean, native initramfs generated.")
@@ -387,14 +388,14 @@ func assertBootableKernelAndPackages(rootPath string, logFn func(string)) error 
 
 	for _, b := range binds {
 		_ = os.MkdirAll(b.dest, 0755)
-		if out, err := exec.Command("mount", "--bind", b.host, b.dest).CombinedOutput(); err != nil {
+		if out, err := cmdRunner.Run("mount", "--bind", b.host, b.dest); err != nil {
 			return fmt.Errorf("bind mounting %s: %w (%s)", b.host, err, string(out))
 		}
 	}
 
 	defer func() {
 		for i := len(binds) - 1; i >= 0; i-- {
-			_ = exec.Command("umount", "-l", binds[i].dest).Run()
+			_, _ = cmdRunner.Run("umount", "-l", binds[i].dest)
 		}
 	}()
 
@@ -404,8 +405,7 @@ func assertBootableKernelAndPackages(rootPath string, logFn func(string)) error 
 
 	installScript := "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-image-amd64 systemd-sysv sudo"
 	logFn(fmt.Sprintf("=> [PACKAGE SELF-HEAL] Executing: %s", installScript))
-	cmd := exec.Command("chroot", rootPath, "/bin/sh", "-c", installScript)
-	_, _ = cmd.CombinedOutput()
+	_, _ = cmdRunner.Run("chroot", rootPath, "/bin/sh", "-c", installScript)
 
 	return nil
 }
@@ -427,8 +427,7 @@ fi
 echo "saleem:saleem" | chpasswd 2>/dev/null || true
 usermod -aG sudo saleem 2>/dev/null || true
 `
-	cmd := exec.Command("chroot", rootPath, "/bin/sh", "-c", script)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := cmdRunner.Run("chroot", rootPath, "/bin/sh", "-c", script); err != nil {
 		logFn(fmt.Sprintf("=> [NOTICE] Account configuration warning: %v (%s)", err, string(out)))
 	}
 
@@ -437,7 +436,7 @@ usermod -aG sudo saleem 2>/dev/null || true
 }
 
 func queryFilesystemType(targetPartition string) string {
-	out, err := exec.Command("blkid", "-s", "TYPE", "-o", "value", targetPartition).Output()
+	out, err := cmdRunner.Run("blkid", "-s", "TYPE", "-o", "value", targetPartition)
 	if err != nil {
 		return "ext4"
 	}
@@ -445,7 +444,7 @@ func queryFilesystemType(targetPartition string) string {
 }
 
 func queryPartitionUUID(targetPartition string) string {
-	out, err := exec.Command("blkid", "-s", "UUID", "-o", "value", targetPartition).Output()
+	out, err := cmdRunner.Run("blkid", "-s", "UUID", "-o", "value", targetPartition)
 	if err != nil {
 		return ""
 	}

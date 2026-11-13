@@ -688,6 +688,74 @@ func copyFileDirect(src, dst string) error {
 	return out.Sync()
 }
 
+// autoConfigureDualBootFn, registerMacOSInGRUBFn, and registerWindowsInGRUBFn
+// let tests substitute the three real OS-specific bootloader-configuration
+// entry points with stubs. This is necessary (not just convenient): even
+// with a mocked Runner, those real functions still write directly to fixed
+// system paths such as /etc/grub.d/40_custom and /etc/default/grub.d/*.cfg,
+// which must never happen as a side effect of running `go test`.
+var (
+	autoConfigureDualBootFn = AutoConfigureDualBoot
+	registerMacOSInGRUBFn   = registerMacOSInGRUB
+	registerWindowsInGRUBFn = registerWindowsInGRUB
+)
+
+// configureBootloaderStep runs the OS-specific bootloader configuration for
+// this provisioning run and journals the outcome. On failure it returns
+// (failResult, true); the caller must return failResult immediately without
+// committing the journal step or reporting success.
+//
+// NOTE: this still carries audit bug 2.1 verbatim (fixed in a later commit):
+// the generic (non-macOS, non-Windows) branch below calls journal.Fail on
+// error but does not signal failure to the caller, so execution falls
+// through to an unconditional journal.Commit plus a "dual-boot bootloader
+// synchronized" success update even when AutoConfigureDualBoot just failed.
+// This extraction only makes the existing behavior independently testable;
+// it changes no logic yet.
+func configureBootloaderStep(
+	journal *safety.Journal,
+	isMacOS, isWindows bool,
+	req ProvisionRequest,
+	grubDefaultPath string,
+	streamDestPath string,
+	onUpdate func(StepUpdate),
+	fail func(stepName string, cause error) ProvisionResult,
+) (ProvisionResult, bool) {
+	bootStep, bErr := journal.Begin("bootloader-configure", nil)
+	if bErr != nil {
+		return ProvisionResult{}, false
+	}
+
+	if isMacOS {
+		onUpdate(StepUpdate{StepName: "configuring macOS OpenCore bootloader & updating host GRUB...", Done: false})
+		if err := registerMacOSInGRUBFn(req.TargetPartition, "/boot/efi", grubDefaultPath, func(msg string) {
+			onUpdate(StepUpdate{StepName: msg, Done: false})
+		}); err != nil {
+			journal.Fail(bootStep, err)
+			return fail("bootloader-configure", err), true
+		}
+	} else if isWindows {
+		onUpdate(StepUpdate{StepName: "configuring Windows 11 EFI bootloader & updating host GRUB...", Done: false})
+		if err := registerWindowsInGRUBFn(streamDestPath, req.TargetDiskPath, req.TargetPartition, "/boot/efi", grubDefaultPath, func(msg string) {
+			onUpdate(StepUpdate{StepName: msg, Done: false})
+		}); err != nil {
+			journal.Fail(bootStep, err)
+			return fail("bootloader-configure", err), true
+		}
+	} else {
+		onUpdate(StepUpdate{StepName: "configuring autonomous dual-boot & updating host bootloader...", Done: false})
+		if err := autoConfigureDualBootFn(req.TargetPartition, grubDefaultPath, func(msg string) {
+			onUpdate(StepUpdate{StepName: msg, Done: false})
+		}); err != nil {
+			journal.Fail(bootStep, err)
+		}
+	}
+
+	journal.Commit(bootStep)
+	onUpdate(StepUpdate{StepName: "dual-boot bootloader synchronized", Done: true})
+	return ProvisionResult{}, false
+}
+
 func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath string, onUpdate func(StepUpdate)) ProvisionResult {
 	journal, err := safety.LoadJournal(req.JournalPath)
 	if err != nil {
@@ -1225,34 +1293,8 @@ deployPhase:
 	journal.Commit(deployStep)
 	onUpdate(StepUpdate{StepName: "image-deploy", Done: true})
 
-	bootStep, bErr := journal.Begin("bootloader-configure", nil)
-	if bErr == nil {
-		if isMacOS {
-			onUpdate(StepUpdate{StepName: "configuring macOS OpenCore bootloader & updating host GRUB...", Done: false})
-			if err := registerMacOSInGRUB(req.TargetPartition, "/boot/efi", grubDefaultPath, func(msg string) {
-				onUpdate(StepUpdate{StepName: msg, Done: false})
-			}); err != nil {
-				journal.Fail(bootStep, err)
-				return fail("bootloader-configure", err)
-			}
-		} else if isWindows {
-			onUpdate(StepUpdate{StepName: "configuring Windows 11 EFI bootloader & updating host GRUB...", Done: false})
-			if err := registerWindowsInGRUB(streamResult.DestPath, req.TargetDiskPath, req.TargetPartition, "/boot/efi", grubDefaultPath, func(msg string) {
-				onUpdate(StepUpdate{StepName: msg, Done: false})
-			}); err != nil {
-				journal.Fail(bootStep, err)
-				return fail("bootloader-configure", err)
-			}
-		} else {
-			onUpdate(StepUpdate{StepName: "configuring autonomous dual-boot & updating host bootloader...", Done: false})
-			if err := AutoConfigureDualBoot(req.TargetPartition, grubDefaultPath, func(msg string) {
-				onUpdate(StepUpdate{StepName: msg, Done: false})
-			}); err != nil {
-				journal.Fail(bootStep, err)
-			}
-		}
-		journal.Commit(bootStep)
-		onUpdate(StepUpdate{StepName: "dual-boot bootloader synchronized", Done: true})
+	if res, failed := configureBootloaderStep(journal, isMacOS, isWindows, req, grubDefaultPath, streamResult.DestPath, onUpdate, fail); failed {
+		return res
 	}
 
 	_, revPartNum, revSplitErr := SplitDiskAndPartition(req.TargetPartition)
