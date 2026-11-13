@@ -120,7 +120,7 @@ func makeCleanup(mountPoint string) func() {
 // whole raw disk targets (/dev/sdX) so that dynamic autonomous partitioning into
 // ext4 (ORCH_STORAGE) and FAT32 (ORCH_BOOT) is triggered.
 func DetectBackupTargets() ([]BlockDevice, error) {
-	out, err := exec.Command("lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,MODEL,RM,HOTPLUG,FSTYPE").Output()
+	out, err := exec.Command("lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,MODEL,RM,HOTPLUG,TRAN,FSTYPE").Output()
 	if err != nil {
 		return nil, fmt.Errorf("querying storage topology: %w", err)
 	}
@@ -134,6 +134,7 @@ func DetectBackupTargets() ([]BlockDevice, error) {
 			Model      string `json:"model"`
 			RM         bool   `json:"rm"`
 			Hotplug    bool   `json:"hotplug"`
+			Tran       string `json:"tran"`
 			FSType     string `json:"fstype"`
 			Children   []struct {
 				Name       string `json:"name"`
@@ -143,6 +144,7 @@ func DetectBackupTargets() ([]BlockDevice, error) {
 				Model      string `json:"model"`
 				RM         bool   `json:"rm"`
 				Hotplug    bool   `json:"hotplug"`
+				Tran       string `json:"tran"`
 				FSType     string `json:"fstype"`
 			} `json:"children"`
 		} `json:"blockdevices"`
@@ -165,7 +167,13 @@ func DetectBackupTargets() ([]BlockDevice, error) {
 			continue
 		}
 
-		isRemovableDisk := dev.Type == "disk" && (dev.RM || dev.Hotplug || (strings.HasPrefix(dev.Name, "sd") && dev.Name != pDiskBase))
+		// Audit 1C-followup: this used to also treat ANY non-root disk whose
+		// name merely started with "sd" as removable/safe-to-wipe — on a
+		// machine with more than two SATA/SAS disks, an internal data disk
+		// (sdb, sdc, ...) would be silently offered as a backup-staging
+		// target and then repartitioned. Classify removable only by lsblk's
+		// own TRAN=="usb" or RM signal; fail closed otherwise.
+		isRemovableDisk := dev.Type == "disk" && (dev.RM || strings.ToLower(dev.Tran) == "usb")
 
 		if isRemovableDisk {
 			valid = append(valid, BlockDevice{

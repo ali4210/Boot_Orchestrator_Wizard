@@ -6,6 +6,31 @@ new session before resuming work — it reflects the true state of the tree, not
 
 Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not started.
 
+## Pre-Phase-2 follow-ups (requested mid-Phase-2, before Phase 2 is marked done)
+- [x] F1. Remove positional sdc/sdd/sde USB fallback in usb_manager.go and backup.go;
+      classify removable only via lsblk TRAN=="usb" or RM==1, fail closed — Done (commit
+      TBD). `engine/usb_manager.go`'s `ProbeRemovableTargets` and `ProbeUSBPayloads` both
+      had `|| strings.HasPrefix(dev.Name, "sdc") || ... "sdd" || ... "sde"` in their isUSB
+      checks — removed both. `engine/backup.go`'s `DetectBackupTargets` was actually
+      broader: `strings.HasPrefix(dev.Name, "sd") && dev.Name != pDiskBase` treated ANY
+      non-root "sdX" disk as removable; added `TRAN` to its lsblk query and replaced the
+      condition with `dev.RM || strings.ToLower(dev.Tran) == "usb"` (dropped `Hotplug` too,
+      per the literal "TRAN or RM" instruction). Tests (`engine/usb_manager_test.go`,
+      `engine/backup_test.go`): a fake `lsblk` is placed first on `PATH` (never touches the
+      real system's disks) reporting an internal, non-removable disk coincidentally named
+      `sdc`/`sdb` alongside a genuine USB disk; asserts the internal one is excluded and the
+      genuine USB one is still included, for all three affected functions.
+- [ ] F2. Move PreflightStorageSafetyCheck before the image download; test blkid exit code 2
+      (no filesystem) does not abort — Not started
+- [ ] F3. Headless: refuse non-block-device targets and the live root disk in single-boot
+      mode; resolve autounattend.xml via embed/executable location not cwd; fail loudly if a
+      Windows target has no unattend — Not started
+- [ ] F4. Fill in real commit hashes in PROGRESS.md; verify every commit builds/tests green
+      via a disposable rebase (not rewriting the real branch — see commit message) — Not
+      started
+- [ ] F5. autorun.sh: detect root-owned files in bin/ or the journal and print the exact
+      chown command instead of a raw permission error — Not started
+
 ## Phase 1: Hardening and testability
 
 ### A. Credentials

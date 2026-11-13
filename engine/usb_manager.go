@@ -121,7 +121,13 @@ func ProbeRemovableTargets() ([]USBTargetDevice, error) {
 	var targets []USBTargetDevice
 
 	for _, dev := range data.BlockDevices {
-		isUSB := strings.ToLower(dev.Tran) == "usb" || dev.Removable == "1" || dev.Removable == "true" || strings.HasPrefix(dev.Name, "sdc") || strings.HasPrefix(dev.Name, "sdd") || strings.HasPrefix(dev.Name, "sde")
+		// Audit 1C-followup: classify removable/USB disks only by lsblk's own
+		// TRAN/RM signals — never by a positional device-name guess
+		// (sdc/sdd/sde). On a machine with more than three SATA/SAS disks, an
+		// internal data disk can land at sdc or later, and treating it as
+		// "definitely USB" risked wiping it as a staging target. Fail closed:
+		// if lsblk doesn't say usb/removable, this is not treated as USB.
+		isUSB := strings.ToLower(dev.Tran) == "usb" || dev.Removable == "1" || dev.Removable == "true"
 		if isUSB && dev.Type == "disk" {
 			devPath := "/dev/" + dev.Name
 			byteSize, _ := QueryBlockDeviceBytes(dev.Name)
@@ -718,11 +724,11 @@ func ProbeUSBPayloads() ([]USBPayload, error) {
 		var data usbLsblkResponse
 		if jsonErr := json.Unmarshal(out, &data); jsonErr == nil {
 			for _, disk := range data.BlockDevices {
+				// Same fail-closed TRAN/RM-only classification as
+				// ProbeRemovableTargets above — no positional name guess.
 				isUSBDisk := strings.ToLower(disk.Tran) == "usb" ||
 					disk.Removable == "1" ||
-					strings.HasPrefix(disk.Name, "sdc") ||
-					strings.HasPrefix(disk.Name, "sdd") ||
-					strings.HasPrefix(disk.Name, "sde")
+					disk.Removable == "true"
 
 				if isUSBDisk {
 					for _, part := range disk.Children {
