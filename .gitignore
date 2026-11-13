@@ -5,3 +5,12 @@ bin/
 *.part
 *.log
 *.tar.gz
+
+# runtime/debug state, never ship this
+orchestrator_journal.json
+
+# build artifacts and test fixtures
+*.img
+*.iso
+/boot-orchestrator
+/env-check
