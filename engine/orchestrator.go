@@ -47,6 +47,7 @@ type ProvisionRequest struct {
 	ESPPartNum       string
 	ProvisionMode    string
 	AllocatedBytes   uint64
+	Credentials      Credentials
 }
 
 type StepUpdate struct {
@@ -303,7 +304,7 @@ func deployMacOSPayload(dmgPath, targetPart string, logFn func(string)) error {
 	return nil
 }
 
-func deployWindowsPayload(isoPath, targetPart string, wimIndex int, autounattendSrc string, logFn func(string)) error {
+func deployWindowsPayload(isoPath, targetPart string, wimIndex int, autounattendSrc string, creds Credentials, logFn func(string)) error {
 	if logFn == nil {
 		logFn = func(string) {}
 	}
@@ -379,7 +380,7 @@ func deployWindowsPayload(isoPath, targetPart string, wimIndex int, autounattend
 
 	if autounattendSrc != "" {
 		logFn("=> [WINDOWS DEPLOY] Injecting unattended answer file for silent OOBE...")
-		if err := injectAutounattend(autounattendSrc, targetMount); err != nil {
+		if err := injectAutounattend(autounattendSrc, targetMount, creds); err != nil {
 			return fmt.Errorf("autounattend injection failed: %w", err)
 		}
 	}
@@ -534,7 +535,7 @@ menuentry "macOS Recovery (OpenCore)" {
 	return nil
 }
 
-func extractLiveRootFS(isoPath, targetPart string, logFn func(string)) error {
+func extractLiveRootFS(isoPath, targetPart string, creds Credentials, logFn func(string)) error {
 	if logFn == nil {
 		logFn = func(string) {}
 	}
@@ -639,24 +640,36 @@ func extractLiveRootFS(isoPath, targetPart string, logFn func(string)) error {
 	}
 
 	logFn("=> [CREDENTIALS] Configuring persistent user accounts and purging installer artifacts...")
+	if !ValidUsername(creds.Username) {
+		return fmt.Errorf("refusing to provision account: %q is not a valid username", creds.Username)
+	}
+	passHash, hashErr := creds.ResolvedPasswordHash()
+	if hashErr != nil {
+		return fmt.Errorf("hashing password for %s: %w", creds.Username, hashErr)
+	}
+
 	sudoersDir := filepath.Join(targetMount, "etc", "sudoers.d")
 	_ = os.MkdirAll(sudoersDir, 0750)
-	_ = os.WriteFile(filepath.Join(sudoersDir, "saleem"), []byte("saleem ALL=(ALL:ALL) ALL\n"), 0440)
+	_ = os.WriteFile(filepath.Join(sudoersDir, creds.Username), []byte(creds.Username+" ALL=(ALL:ALL) ALL\n"), 0440)
 
 	_ = exec.Command("mount", "--bind", "/dev", filepath.Join(targetMount, "dev")).Run()
 	_ = exec.Command("mount", "--bind", "/proc", filepath.Join(targetMount, "proc")).Run()
 	_ = exec.Command("mount", "--bind", "/sys", filepath.Join(targetMount, "sys")).Run()
 
-	chrootCleanup := `
-echo 'root:saleem' | chpasswd
-id -u saleem >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo saleem
-echo 'saleem:saleem' | chpasswd
-rm -rf /home/saleem/Desktop/install* /home/saleem/Desktop/calamares* /home/saleem/Desktop/README*
+	rootCmd := "passwd -l root 2>/dev/null || true"
+	if creds.AllowRootLogin {
+		rootCmd = fmt.Sprintf("echo %s | chpasswd -e 2>/dev/null || true", shellSingleQuote("root:"+passHash))
+	}
+	chrootCleanup := fmt.Sprintf(`
+%s
+id -u %[2]s >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo %[2]s
+echo %[3]s | chpasswd -e
+rm -rf /home/%[2]s/Desktop/install* /home/%[2]s/Desktop/calamares* /home/%[2]s/Desktop/README*
 rm -rf /etc/skel/Desktop/install* /etc/skel/Desktop/calamares* /etc/skel/Desktop/README*
 rm -rf /root/Desktop/install* /root/Desktop/calamares* /root/Desktop/README*
 apt-get purge -y calamares calamares-settings-debian calamares-settings-parrot 2>/dev/null || true
 systemctl disable calamares.service 2>/dev/null || true
-`
+`, rootCmd, creds.Username, shellSingleQuote(creds.Username+":"+passHash))
 	_ = exec.Command("chroot", targetMount, "bash", "-c", chrootCleanup).Run()
 
 	_ = exec.Command("umount", "-l", filepath.Join(targetMount, "dev")).Run()
@@ -743,7 +756,7 @@ func configureBootloaderStep(
 		}
 	} else {
 		onUpdate(StepUpdate{StepName: "configuring autonomous dual-boot & updating host bootloader...", Done: false})
-		if err := autoConfigureDualBootFn(req.TargetPartition, grubDefaultPath, func(msg string) {
+		if err := autoConfigureDualBootFn(req.TargetPartition, grubDefaultPath, req.Credentials, func(msg string) {
 			onUpdate(StepUpdate{StepName: msg, Done: false})
 		}); err != nil {
 			journal.Fail(bootStep, err)
@@ -1011,6 +1024,18 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 				}
 			}
 
+			if !ValidUsername(req.Credentials.Username) {
+				return fail("partition-shrink", fmt.Errorf("refusing to stage autonomous installer: %q is not a valid username", req.Credentials.Username))
+			}
+			passHash, hashErr := req.Credentials.ResolvedPasswordHash()
+			if hashErr != nil {
+				return fail("partition-shrink", fmt.Errorf("hashing password for autonomous installer: %w", hashErr))
+			}
+			workerRootCmd := "passwd -l root 2>/dev/null || true"
+			if req.Credentials.AllowRootLogin {
+				workerRootCmd = `echo "root:$HASH" | chpasswd -e`
+			}
+
 			workerScript := fmt.Sprintf(`#!/usr/bin/env bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -1023,6 +1048,7 @@ HOST_ESP="%[4]s"
 HOST_PART_NUM="%[5]s"
 TARGET_PART_NUM="%[6]s"
 DISTRO_LABEL="%[7]s"
+ORCH_USER="%[8]s"
 
 swapoff -a || true
 e2fsck -fy "$HOST_PART" || true
@@ -1073,24 +1099,32 @@ if [ -n "$UUID" ]; then
     echo "UUID=$UUID / ext4 defaults,noatime,errors=remount-ro 0 1" > /mnt/target/etc/fstab
 fi
 
-mkdir -p /mnt/target/etc/sudoers.d
-echo "saleem ALL=(ALL:ALL) ALL" > /mnt/target/etc/sudoers.d/saleem
-chmod 0440 /mnt/target/etc/sudoers.d/saleem
+mkdir -p /mnt/target/etc/sudoers.d /mnt/target/tmp
+echo "$ORCH_USER ALL=(ALL:ALL) ALL" > "/mnt/target/etc/sudoers.d/$ORCH_USER"
+chmod 0440 "/mnt/target/etc/sudoers.d/$ORCH_USER"
+
+# Written via a quoted heredoc (no expansion at all) so the hash's own "$"
+# characters reach the file byte-for-byte regardless of shell quoting.
+cat > /mnt/target/tmp/.orch_pwhash <<'ORCH_HASH_EOF'
+%[9]s
+ORCH_HASH_EOF
 
 mount --bind /dev /mnt/target/dev
 mount --bind /proc /mnt/target/proc
 mount --bind /sys /mnt/target/sys
 
-chroot /mnt/target bash -c "
-    echo 'root:saleem' | chpasswd
-    id -u saleem >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo saleem
-    echo 'saleem:saleem' | chpasswd
-    rm -rf /home/saleem/Desktop/install* /home/saleem/Desktop/calamares* /home/saleem/Desktop/README*
+chroot /mnt/target bash -c '
+    HASH=$(cat /tmp/.orch_pwhash)
+    rm -f /tmp/.orch_pwhash
+    %[10]s
+    id -u %[8]s >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo %[8]s
+    echo "%[8]s:$HASH" | chpasswd -e
+    rm -rf /home/%[8]s/Desktop/install* /home/%[8]s/Desktop/calamares* /home/%[8]s/Desktop/README*
     rm -rf /etc/skel/Desktop/install* /etc/skel/Desktop/calamares* /etc/skel/Desktop/README*
     rm -rf /root/Desktop/install* /root/Desktop/calamares* /root/Desktop/README*
     apt-get purge -y calamares calamares-settings-debian calamares-settings-parrot 2>/dev/null || true
     systemctl disable calamares.service 2>/dev/null || true
-"
+'
 umount -l /mnt/target/dev /mnt/target/proc /mnt/target/sys 2>/dev/null || true
 
 mkdir -p /mnt/target/boot/efi
@@ -1121,7 +1155,7 @@ umount /mnt/source 2>/dev/null || true
 umount /mnt/target 2>/dev/null || true
 sleep 2
 reboot -f
-`, req.TargetDiskPath, hostPartDev, targetPartDev, hostESP, req.HostPartNum, nextPartNum, distroLabel)
+`, req.TargetDiskPath, hostPartDev, targetPartDev, hostESP, req.HostPartNum, nextPartNum, distroLabel, req.Credentials.Username, passHash, workerRootCmd)
 
 			scriptPath := filepath.Join(usbStorageDir, "transient_resize.sh")
 			f, writeErr := os.OpenFile(scriptPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_SYNC, 0755)
@@ -1275,7 +1309,7 @@ deployPhase:
 		}
 	} else if isWindows {
 		onUpdate(StepUpdate{StepName: "=> [WINDOWS PIPELINE] Decompressing and writing Windows OS payload via wimapply...", Done: false})
-		if winErr := deployWindowsPayload(streamResult.DestPath, req.TargetPartition, req.WimIndex, req.AutounattendPath, func(msg string) {
+		if winErr := deployWindowsPayload(streamResult.DestPath, req.TargetPartition, req.WimIndex, req.AutounattendPath, req.Credentials, func(msg string) {
 			onUpdate(StepUpdate{StepName: msg, Done: false})
 		}); winErr != nil {
 			journal.Fail(deployStep, winErr)
@@ -1283,7 +1317,7 @@ deployPhase:
 		}
 	} else {
 		onUpdate(StepUpdate{StepName: "=> [ROOTFS DEPLOY] Extracting live root filesystem tree into target partition...", Done: false})
-		if extErr := extractLiveRootFS(streamResult.DestPath, req.TargetPartition, func(msg string) {
+		if extErr := extractLiveRootFS(streamResult.DestPath, req.TargetPartition, req.Credentials, func(msg string) {
 			onUpdate(StepUpdate{StepName: msg, Done: false})
 		}); extErr != nil {
 			journal.Fail(deployStep, extErr)

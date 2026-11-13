@@ -168,6 +168,7 @@ type DeployPlan struct {
 	TargetPartition string
 	Steps           []string
 	RequiresTools   []string
+	Credentials     Credentials
 }
 
 func PlanDeploy(imagePath, targetPartition string) (*DeployPlan, error) {
@@ -262,7 +263,7 @@ func ApplyDeploy(plan *DeployPlan, stepFn ...func(StepUpdate)) (rollbackData []b
 			}
 		}
 	case FormatWinISO:
-		if err := deployWindowsFromISO(plan.ImagePath, plan.TargetPartition, notify); err != nil {
+		if err := deployWindowsFromISO(plan.ImagePath, plan.TargetPartition, plan.Credentials, notify); err != nil {
 			return rollbackData, fmt.Errorf("Windows deployment failed: %w", err)
 		}
 	case FormatMacOSImg, FormatRawImg:
@@ -508,7 +509,7 @@ func regenerateInitramfs(targetMount string) error {
 }
 
 // deployWindowsFromISO formats NTFS, extracts install.wim via wimapply, and injects unattended setup.
-func deployWindowsFromISO(isoPath, targetPartition string, notify func(StepUpdate)) error {
+func deployWindowsFromISO(isoPath, targetPartition string, creds Credentials, notify func(StepUpdate)) error {
 	AssertHostTooling(nil)
 
 	notify(StepUpdate{StepName: fmt.Sprintf("formatting %s as NTFS...", targetPartition), Done: false})
@@ -557,7 +558,15 @@ func deployWindowsFromISO(isoPath, targetPartition string, notify func(StepUpdat
 
 		pantherDir := filepath.Join(targetMount, "Windows", "Panther")
 		_ = os.MkdirAll(pantherDir, 0755)
-		unattendXML := `<?xml version="1.0" encoding="utf-8"?>
+		// Windows's unattend answer file has no hashed-password option for
+		// AdministratorPassword/AutoLogon, so the plaintext must be
+		// embedded here verbatim — that is inherent to the mechanism, not a
+		// choice made by this tool (see Credentials' doc comment). What is
+		// a choice is not hardcoding a fixed account (audit 2.3): this now
+		// uses whatever username/password the caller actually configured.
+		adminPass := xmlEscape(creds.Password)
+		logonUser := xmlEscape(creds.Username)
+		unattendXML := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
     <settings pass="oobeSystem">
         <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
@@ -569,19 +578,19 @@ func deployWindowsFromISO(isoPath, targetPartition string, notify func(StepUpdat
             </OOBE>
             <UserAccounts>
                 <AdministratorPassword>
-                    <Value>saleem</Value>
+                    <Value>%[1]s</Value>
                     <PlainText>true</PlainText>
                 </AdministratorPassword>
             </UserAccounts>
             <AutoLogon>
-                <Password><Value>saleem</Value><PlainText>true</PlainText></Password>
+                <Password><Value>%[1]s</Value><PlainText>true</PlainText></Password>
                 <Enabled>true</Enabled>
                 <LogonCount>1</LogonCount>
-                <Username>Administrator</Username>
+                <Username>%[2]s</Username>
             </AutoLogon>
         </component>
     </settings>
-</unattend>`
+</unattend>`, adminPass, logonUser)
 		_ = os.WriteFile(filepath.Join(pantherDir, "unattend.xml"), []byte(unattendXML), 0644)
 	}
 

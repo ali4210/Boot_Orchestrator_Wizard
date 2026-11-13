@@ -82,6 +82,8 @@ func (m Model) View() string {
 		body = m.viewRestoreConfirm()
 	case ScreenConfirm:
 		body = m.viewConfirm()
+	case ScreenCredentials:
+		body = m.viewCredentials()
 	case ScreenRevertConfirm:
 		body = m.viewRevertConfirm()
 	case ScreenRevertModeSelect:
@@ -155,6 +157,8 @@ func (m Model) footerHint() string {
 		} else {
 			hint = "Y/ENTER: Commit Dual-Boot Transaction  |  N/ESC: Back  |  ESC: Quit"
 		}
+	case ScreenCredentials:
+		hint = "TAB/UP/DOWN: Cycle Fields  |  SPACE: Toggle Root Login  |  ENTER: Submit & Provision  |  ESC: Back"
 	case ScreenRevertConfirm:
 		if m.isScanning {
 			hint = "Scanning storage drives...  |  ESC: Return to Hub"
@@ -375,6 +379,48 @@ func (m Model) viewSeederDashboard() string {
 	fmt.Fprintf(&b, "   %s", StyleMuted.Render("The server continues running in background when returning to menu."))
 
 	return StylePanel.Render(b.String())
+}
+
+func (m Model) viewCredentials() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n\n", StyleTitle.Render("ACCOUNT SETUP: CREATE YOUR LOGIN FOR THE NEW SYSTEM"))
+	fmt.Fprintf(&b, "This account is created fresh for you on the new install — there is no default login.\n\n")
+
+	c0, c1, c2, c3, c4 := "  ", "  ", "  ", "  ", "  "
+	s3 := StyleNormalItem
+
+	switch m.credFocusCursor {
+	case 0:
+		c0 = "=>"
+	case 1:
+		c1 = "=>"
+	case 2:
+		c2 = "=>"
+	case 3:
+		c3 = "=>"
+		s3 = StyleSelectedItem
+	case 4:
+		c4 = "=>"
+	}
+
+	fmt.Fprintf(&b, " %s Username:           %s\n", c0, m.credUsernameInput.View())
+	fmt.Fprintf(&b, " %s Password:           %s\n", c1, m.credPasswordInput.View())
+	fmt.Fprintf(&b, " %s Confirm Password:   %s\n\n", c2, m.credPasswordConfirmInput.View())
+
+	rootBox := "[ ]"
+	if m.credAllowRootLogin {
+		rootBox = "[x]"
+	}
+	fmt.Fprintf(&b, " %s %s\n", c3, s3.Render(fmt.Sprintf("%s Allow root login (uses the same password) — SPACE to toggle", rootBox)))
+	fmt.Fprintf(&b, " %s %s\n\n", c4, StyleSelectedItem.Render("[ Submit & Begin Provisioning ]"))
+
+	if m.credError != "" {
+		fmt.Fprintf(&b, "  %s %s\n\n", BadgeDanger.Render(" ERROR "), StyleDanger.Render(m.credError))
+	}
+
+	fmt.Fprintf(&b, "=> %s\n", StyleSubTitle.Render("TAB/UP/DOWN: Cycle fields | SPACE: Toggle root login | ENTER: Submit | ESC: Back"))
+
+	return StylePanelFocused.Render(b.String())
 }
 
 func (m Model) viewSCPPush() string {
@@ -1342,14 +1388,15 @@ func (m Model) viewDone() string {
 		}
 	}
 
-	fmt.Fprintf(&b, "%s\n", StyleTitle.Render("PRESET SYSTEM CREDENTIALS (AUTONOMOUS INJECTION):"))
-	fmt.Fprintf(&b, "  => Root Admin:     Username: %s     | Password: %s\n",
-		StyleSubTitle.Render("root"),
-		StyleDanger.Render("saleem"),
-	)
+	rootStatus := "locked (no password set)"
+	if m.credAllowRootLogin {
+		rootStatus = "enabled (same password as your account)"
+	}
+	fmt.Fprintf(&b, "%s\n", StyleTitle.Render("SYSTEM ACCOUNT (AS CONFIGURED):"))
+	fmt.Fprintf(&b, "  => Root Admin:     %s\n", StyleSubTitle.Render(rootStatus))
 	fmt.Fprintf(&b, "  => Standard User:  Username: %s   | Password: %s   (Sudo Enabled)\n\n",
-		StyleSubTitle.Render("saleem"),
-		StyleDanger.Render("saleem"),
+		StyleSubTitle.Render(m.credentialsUsername),
+		StyleSubTitle.Render("(the password you entered during setup)"),
 	)
 
 	fmt.Fprintf(&b, "%s\n", StyleTitle.Render("REMOVABLE MEDIA (USB) MANAGEMENT:"))

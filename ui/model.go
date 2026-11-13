@@ -51,6 +51,7 @@ const (
 	ScreenDisasterRecovery
 	ScreenRestoreConfirm
 	ScreenConfirm
+	ScreenCredentials
 	ScreenRevertConfirm
 	ScreenRevertModeSelect
 	ScreenProgress
@@ -459,6 +460,20 @@ type Model struct {
 	scpStartTime     time.Time
 	scpChan          chan scpProgressMsg
 
+	// Account credentials for the OS being provisioned (audit 2.3: there is
+	// no hardcoded default account anywhere — the user always enters one).
+	credUsernameInput        textinput.Model
+	credPasswordInput        textinput.Model
+	credPasswordConfirmInput textinput.Model
+	credFocusCursor          int
+	credAllowRootLogin       bool
+	credError                string
+	credPendingResume        bool // true if we routed here from ScreenResumeAlert
+
+	credentialsUsername     string // set only after successful validation+hashing
+	credentialsPasswordHash string // SHA-512 crypt hash, used for the Linux account
+	credentialsPassword     string // plaintext, kept only for a Windows target's unattend answer file (see Credentials doc comment); never displayed or logged
+
 	backupTargets   []engine.BlockDevice
 	backupCursor    int
 	backupStatusMsg string
@@ -573,6 +588,23 @@ func NewModel() Model {
 	storageTi.CharLimit = 6
 	storageTi.Width = 24
 
+	credUser := textinput.New()
+	credUser.Placeholder = "Username for the new OS (e.g. alex)"
+	credUser.CharLimit = 32
+	credUser.Width = 32
+
+	credPass := textinput.New()
+	credPass.Placeholder = "Password"
+	credPass.EchoMode = textinput.EchoPassword
+	credPass.EchoCharacter = '•'
+	credPass.Width = 32
+
+	credPassConfirm := textinput.New()
+	credPassConfirm.Placeholder = "Confirm password"
+	credPassConfirm.EchoMode = textinput.EchoPassword
+	credPassConfirm.EchoCharacter = '•'
+	credPassConfirm.Width = 32
+
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = BadgeInfo
@@ -603,52 +635,55 @@ func NewModel() Model {
 	isVM := hv.Kind != hypervisor.KindBareMetal
 
 	return Model{
-		screen:               ScreenModeSelect,
-		isAdvancedMode:       false,
-		modeCursor:           0,
-		roleCursor:           0,
-		hubCursor:            0,
-		clientCursor:         0,
-		serverCursor:         0,
-		usbCursor:            0,
-		usbTargetCursor:      0,
-		peerCursor:           0,
-		customBootCursor:     0,
-		targetDiskCursor:     0,
-		storageCursor:        1,
-		storageCustomInput:   storageTi,
-		chosenAllocBytes:     uint64(30 * 1024 * 1024 * 1024),
-		isVMEnvironment:      isVM,
-		vmHypervisorName:     hv.Kind.String(),
-		seederMenuCursor:     0,
-		scpFocusCursor:       0,
-		focusManualPeerInput: false,
-		provisionMode:        "dual-boot",
-		revertCursor:         0,
-		revertModeCursor:     0,
-		pickerCurrentDir:     startDir,
-		pickerCursor:         0,
-		pickerShowAll:        false,
-		hasStagedPayload:     hasStaged,
-		stagedPayloadSize:    stagedSz,
-		stagedPayloadPath:    stagedP,
-		catalog:              cat,
-		folderList:           fList,
-		osList:               oList,
-		searchInput:          ti,
-		eraseConfirmInput:    eraseTi,
-		peerIPInput:          peerTi,
-		seederFileInput:      seedTi,
-		seederFilePath:       defaultISO,
-		scpTargetIPInput:     scpIP,
-		scpUserInput:         scpUser,
-		scpPasswordInput:     scpPass,
-		scpPayloadInput:      scpFile,
-		scanSpinner:          sp,
-		progressBar:          pb,
-		unfinishedState:      unfin,
-		journal:              jrn,
-		fatalErr:             err,
+		screen:                   ScreenModeSelect,
+		isAdvancedMode:           false,
+		modeCursor:               0,
+		roleCursor:               0,
+		hubCursor:                0,
+		clientCursor:             0,
+		serverCursor:             0,
+		usbCursor:                0,
+		usbTargetCursor:          0,
+		peerCursor:               0,
+		customBootCursor:         0,
+		targetDiskCursor:         0,
+		storageCursor:            1,
+		storageCustomInput:       storageTi,
+		chosenAllocBytes:         uint64(30 * 1024 * 1024 * 1024),
+		isVMEnvironment:          isVM,
+		vmHypervisorName:         hv.Kind.String(),
+		seederMenuCursor:         0,
+		scpFocusCursor:           0,
+		focusManualPeerInput:     false,
+		provisionMode:            "dual-boot",
+		revertCursor:             0,
+		revertModeCursor:         0,
+		pickerCurrentDir:         startDir,
+		pickerCursor:             0,
+		pickerShowAll:            false,
+		hasStagedPayload:         hasStaged,
+		stagedPayloadSize:        stagedSz,
+		stagedPayloadPath:        stagedP,
+		catalog:                  cat,
+		folderList:               fList,
+		osList:                   oList,
+		searchInput:              ti,
+		eraseConfirmInput:        eraseTi,
+		peerIPInput:              peerTi,
+		seederFileInput:          seedTi,
+		seederFilePath:           defaultISO,
+		scpTargetIPInput:         scpIP,
+		scpUserInput:             scpUser,
+		scpPasswordInput:         scpPass,
+		scpPayloadInput:          scpFile,
+		credUsernameInput:        credUser,
+		credPasswordInput:        credPass,
+		credPasswordConfirmInput: credPassConfirm,
+		scanSpinner:              sp,
+		progressBar:              pb,
+		unfinishedState:          unfin,
+		journal:                  jrn,
+		fatalErr:                 err,
 	}
 }
 
@@ -1142,9 +1177,11 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch keyStr {
 		case "y", "enter":
 			if m.unfinishedState != nil {
-				m.screen = ScreenProgress
 				m.speed = NewSpeedTracker(uint64(m.unfinishedState.TotalBytes))
-				return m, m.startProvisioning(true)
+				m.credPendingResume = true
+				m.screen = ScreenCredentials
+				m.resetCredentialsFocus()
+				return m, nil
 			}
 			m.screen = ScreenHub
 			return m, nil
@@ -2214,9 +2251,11 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case "enter":
 				val := strings.ToUpper(strings.TrimSpace(m.eraseConfirmInput.Value()))
 				if val == "ERASE" {
-					m.screen = ScreenProgress
 					m.speed = NewSpeedTracker(m.selectedOS.ApproxSizeBytes)
-					return m, m.startProvisioning(false)
+					m.credPendingResume = false
+					m.screen = ScreenCredentials
+					m.resetCredentialsFocus()
+					return m, nil
 				}
 				m.eraseConfirmInput.SetValue("")
 				m.eraseConfirmInput.Placeholder = "MUST TYPE 'ERASE' TO PROCEED"
@@ -2229,20 +2268,107 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			switch keyStr {
 			case "y", "enter":
-				m.screen = ScreenProgress
 				totalExpected := uint64(8 * 1024 * 1024 * 1024)
 				if m.selectedOS != nil && m.selectedOS.ApproxSizeBytes > 0 {
 					totalExpected = m.selectedOS.ApproxSizeBytes
 				}
 				m.speed = NewSpeedTracker(totalExpected)
 				m.speed.Sample(0)
-				return m, m.startProvisioning(false)
+				m.credPendingResume = false
+				m.screen = ScreenCredentials
+				m.resetCredentialsFocus()
+				return m, nil
 			case "n", "esc":
 				m.screen = ScreenStorageAllocationSelect
 				return m, nil
 			case "q":
 				return m, tea.Quit
 			}
+		}
+
+	case ScreenCredentials:
+		switch keyStr {
+		case "esc":
+			if m.credPendingResume {
+				m.screen = ScreenResumeAlert
+			} else {
+				m.screen = ScreenConfirm
+			}
+			return m, nil
+		case "tab", "down":
+			m.credFocusCursor = (m.credFocusCursor + 1) % 5
+			m.updateCredentialsFocus()
+			return m, nil
+		case "shift+tab", "up":
+			m.credFocusCursor = (m.credFocusCursor + 4) % 5
+			m.updateCredentialsFocus()
+			return m, nil
+		case " ":
+			if m.credFocusCursor == 3 {
+				m.credAllowRootLogin = !m.credAllowRootLogin
+				return m, nil
+			}
+			fallthrough
+		case "enter":
+			if m.credFocusCursor == 3 {
+				m.credAllowRootLogin = !m.credAllowRootLogin
+				return m, nil
+			}
+			if keyStr == "enter" {
+				username := strings.TrimSpace(m.credUsernameInput.Value())
+				password := m.credPasswordInput.Value()
+				confirm := m.credPasswordConfirmInput.Value()
+
+				if !engine.ValidUsername(username) {
+					m.credError = "username must start with a letter or '_' and contain only lowercase letters, digits, '_' or '-'"
+					return m, nil
+				}
+				if len(password) < 4 {
+					m.credError = "password must be at least 4 characters"
+					return m, nil
+				}
+				if password != confirm {
+					m.credError = "password and confirmation do not match"
+					return m, nil
+				}
+
+				hash, hashErr := (engine.Credentials{Password: password}).HashPassword()
+				// Clear the on-screen fields now; they are never shown or
+				// logged again. The plaintext itself is kept in
+				// m.credentialsPassword (not displayed, never logged) only
+				// because a Windows target's unattend answer file has no
+				// hashed-password option and needs it verbatim — see
+				// Credentials' doc comment. The Linux path below never
+				// reads it, only the hash.
+				m.credPasswordInput.SetValue("")
+				m.credPasswordConfirmInput.SetValue("")
+				if hashErr != nil {
+					m.credError = "failed to hash password: " + hashErr.Error()
+					return m, nil
+				}
+
+				m.credentialsUsername = username
+				m.credentialsPasswordHash = hash
+				m.credentialsPassword = password
+				m.credError = ""
+				m.screen = ScreenProgress
+				if m.credPendingResume {
+					return m, m.startProvisioning(true)
+				}
+				return m, m.startProvisioning(false)
+			}
+			fallthrough
+		default:
+			var cmd tea.Cmd
+			switch m.credFocusCursor {
+			case 0:
+				m.credUsernameInput, cmd = m.credUsernameInput.Update(msg)
+			case 1:
+				m.credPasswordInput, cmd = m.credPasswordInput.Update(msg)
+			case 2:
+				m.credPasswordConfirmInput, cmd = m.credPasswordConfirmInput.Update(msg)
+			}
+			return m, cmd
 		}
 
 	case ScreenRevertConfirm:
@@ -2488,6 +2614,32 @@ func (m *Model) updateSCPFocus() {
 	}
 }
 
+// resetCredentialsFocus clears any previously entered values (the fields
+// are re-entered fresh each time this screen is shown; never pre-filled
+// from a prior run) and focuses the username field.
+func (m *Model) resetCredentialsFocus() {
+	m.credFocusCursor = 0
+	m.credError = ""
+	m.credUsernameInput.SetValue("")
+	m.credPasswordInput.SetValue("")
+	m.credPasswordConfirmInput.SetValue("")
+	m.updateCredentialsFocus()
+}
+
+func (m *Model) updateCredentialsFocus() {
+	m.credUsernameInput.Blur()
+	m.credPasswordInput.Blur()
+	m.credPasswordConfirmInput.Blur()
+	switch m.credFocusCursor {
+	case 0:
+		m.credUsernameInput.Focus()
+	case 1:
+		m.credPasswordInput.Focus()
+	case 2:
+		m.credPasswordConfirmInput.Focus()
+	}
+}
+
 func (m *Model) startProvisioning(isResume bool) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelProvision = cancel
@@ -2572,7 +2724,15 @@ func (m *Model) startProvisioning(isResume bool) tea.Cmd {
 		SelectedEntry:    selectedEntry,
 		ProvisionMode:    m.provisionMode,
 		AllocatedBytes:   m.chosenAllocBytes,
+		Credentials: engine.Credentials{
+			Username:       m.credentialsUsername,
+			AllowRootLogin: m.credAllowRootLogin,
+		},
 	}
+	// The plaintext password was already hashed and discarded when the
+	// credentials screen was submitted; only the hash travels from here on.
+	req.Credentials.PasswordHash = m.credentialsPasswordHash
+	req.Credentials.Password = m.credentialsPassword
 
 	if m.journal == nil {
 		m.journal, _ = safety.NewJournal(req.JournalPath, fmt.Sprintf("txn-%d", time.Now().UnixNano()))

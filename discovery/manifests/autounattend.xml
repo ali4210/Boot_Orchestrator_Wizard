@@ -64,15 +64,20 @@
                 <ProtectYourPC>3</ProtectYourPC>
             </OOBE>
 
-            <!-- Local admin account, no Microsoft account prompt -->
+            <!-- Local admin account, no Microsoft account prompt.
+                 __ORCH_USERNAME__/__ORCH_PASSWORD__ are substituted by
+                 injectAutounattend() (engine/wim_deployer.go) with the
+                 account the user actually entered in the TUI — this file
+                 is a template, never applied with these literal tokens
+                 (audit 2.3: there is no hardcoded default account). -->
             <UserAccounts>
                 <LocalAccounts>
                     <LocalAccount wcm:action="add">
-                        <Name>saleem</Name>
-                        <DisplayName>saleem</DisplayName>
+                        <Name>__ORCH_USERNAME__</Name>
+                        <DisplayName>__ORCH_USERNAME__</DisplayName>
                         <Group>Administrators</Group>
                         <Password>
-                            <Value>saleem</Value>
+                            <Value>__ORCH_PASSWORD__</Value>
                             <PlainText>true</PlainText>
                         </Password>
                     </LocalAccount>
@@ -83,9 +88,9 @@
             <AutoLogon>
                 <Enabled>true</Enabled>
                 <LogonCount>1</LogonCount>
-                <Username>saleem</Username>
+                <Username>__ORCH_USERNAME__</Username>
                 <Password>
-                    <Value>saleem</Value>
+                    <Value>__ORCH_PASSWORD__</Value>
                     <PlainText>true</PlainText>
                 </Password>
             </AutoLogon>

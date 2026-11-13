@@ -20,7 +20,7 @@ func TestConfigureBootloaderStep_LinuxBranchFailurePropagates(t *testing.T) {
 	t.Cleanup(func() { autoConfigureDualBootFn = origFn })
 
 	wantErr := errors.New("update-grub: exit status 1")
-	autoConfigureDualBootFn = func(targetPartition, grubDefaultPath string, logFn func(string)) error {
+	autoConfigureDualBootFn = func(targetPartition, grubDefaultPath string, creds Credentials, logFn func(string)) error {
 		return wantErr
 	}
 

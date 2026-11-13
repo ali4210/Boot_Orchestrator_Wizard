@@ -105,6 +105,7 @@ type ApplyWimPlan struct {
 	TargetPartition string
 	MountPoint      string
 	AutounattendSrc string
+	Credentials     Credentials
 }
 
 // ApplyWim autonomously prepares NTFS, mounts target, unpacks WIM/ESD, and injects answer file.
@@ -176,7 +177,7 @@ func ApplyWim(plan *ApplyWimPlan) error {
 
 	// 5. Inject Unattended Answer File if configured
 	if plan.AutounattendSrc != "" && plan.MountPoint != "" {
-		if err := injectAutounattend(plan.AutounattendSrc, plan.MountPoint); err != nil {
+		if err := injectAutounattend(plan.AutounattendSrc, plan.MountPoint, plan.Credentials); err != nil {
 			return fmt.Errorf("autounattend injection failed: %w", err)
 		}
 	}
@@ -184,11 +185,23 @@ func ApplyWim(plan *ApplyWimPlan) error {
 	return nil
 }
 
-func injectAutounattend(srcPath, targetRoot string) error {
+// injectAutounattend copies the answer file at srcPath onto the target,
+// substituting the __ORCH_USERNAME__/__ORCH_PASSWORD__ placeholders (see
+// discovery/manifests/autounattend.xml) with creds' actual values.
+// Windows's unattend mechanism has no hashed-password option for local
+// account creation, so creds.Password reaches this file as plaintext — that
+// is inherent to the format (see Credentials' doc comment), not a choice
+// made here; what audit 2.3 fixes is that the account is no longer a
+// hardcoded "saleem" regardless of who runs the tool.
+func injectAutounattend(srcPath, targetRoot string, creds Credentials) error {
 	data, err := os.ReadFile(srcPath)
 	if err != nil {
 		return fmt.Errorf("reading answer file %s: %w", srcPath, err)
 	}
+	content := string(data)
+	content = strings.ReplaceAll(content, "__ORCH_USERNAME__", xmlEscape(creds.Username))
+	content = strings.ReplaceAll(content, "__ORCH_PASSWORD__", xmlEscape(creds.Password))
+	data = []byte(content)
 	if err := xml.Unmarshal(data, new(struct{ XMLName xml.Name })); err != nil {
 		return fmt.Errorf("malformed XML answer file %s: %w", srcPath, err)
 	}

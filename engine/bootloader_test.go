@@ -1,6 +1,11 @@
 package engine
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 // These tests prove that queryFilesystemType/queryPartitionUUID parse
 // blkid's output via RunStdout (stdout only), not Run (combined
@@ -43,5 +48,52 @@ func TestQueryFilesystemType_UsesStdoutOnly(t *testing.T) {
 	const want = "ntfs"
 	if got := queryFilesystemType("/dev/sdz1"); got != want {
 		t.Fatalf("queryFilesystemType: got %q, want %q (must use RunStdout, not Run)", got, want)
+	}
+}
+
+// TestAssertDefaultCredentials_NoHardcodedSaleem is the regression test for
+// audit 2.3: the account-provisioning script generated for the chroot must
+// reflect whatever username the user actually entered, and must never
+// contain the old hardcoded "saleem" account under any circumstance.
+func TestAssertDefaultCredentials_NoHardcodedSaleem(t *testing.T) {
+	origRunner := cmdRunner
+	t.Cleanup(func() { cmdRunner = origRunner })
+
+	var capturedScript string
+	mock := &mockRunner{
+		Handler: func(name string, args []string) ([]byte, error) {
+			if name == "chroot" {
+				// cmdRunner.Run("chroot", rootPath, "/bin/sh", "-c", script)
+				for i, a := range args {
+					if a == "-c" && i+1 < len(args) {
+						capturedScript = args[i+1]
+					}
+				}
+			}
+			return []byte(""), nil
+		},
+	}
+	cmdRunner = mock
+
+	rootPath := t.TempDir()
+	creds := Credentials{Username: "janedoe", Password: "a-fine-password", AllowRootLogin: true}
+
+	if err := assertDefaultCredentials(rootPath, creds, nil); err != nil {
+		t.Fatalf("assertDefaultCredentials: %v", err)
+	}
+
+	if capturedScript == "" {
+		t.Fatalf("expected a chroot script to have been captured, calls=%v", mock.Calls)
+	}
+	if strings.Contains(capturedScript, "saleem") {
+		t.Fatalf("generated provisioning script still contains the hardcoded account:\n%s", capturedScript)
+	}
+	if !strings.Contains(capturedScript, "janedoe") {
+		t.Fatalf("generated provisioning script does not reference the configured username %q:\n%s", creds.Username, capturedScript)
+	}
+
+	sudoersPath := filepath.Join(rootPath, "etc", "sudoers.d", "janedoe")
+	if _, statErr := os.Stat(sudoersPath); statErr != nil {
+		t.Fatalf("expected a sudoers.d entry for %q, stat err: %v", creds.Username, statErr)
 	}
 }

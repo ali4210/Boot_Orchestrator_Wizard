@@ -16,7 +16,7 @@ import (
 
 // AutoConfigureDualBoot orchestrates filesystem mapping, live-hook neutralization,
 // native initramfs compilation, multi-OS boot stanzas, and GRUB updates.
-func AutoConfigureDualBoot(targetPartition, grubDefaultPath string, logFn func(string)) error {
+func AutoConfigureDualBoot(targetPartition, grubDefaultPath string, creds Credentials, logFn func(string)) error {
 	if logFn == nil {
 		logFn = func(string) {}
 	}
@@ -67,7 +67,7 @@ GRUB_DISABLE_OS_PROBER=false
 
 	default: // Linux (ext4, btrfs, xfs - Debian, Parrot, Kali, RHEL, CentOS, Rocky, Fedora, Ubuntu)
 		logFn("=> [LINUX ENGINE] Running autonomous persistent configuration & Secure Boot initramfs synthesis...")
-		if err := configureLinuxPersistentEnvironment(resolvedTarget, partUUID, logFn); err != nil {
+		if err := configureLinuxPersistentEnvironment(resolvedTarget, partUUID, creds, logFn); err != nil {
 			return fmt.Errorf("configuring Linux persistent environment: %w", err)
 		}
 	}
@@ -120,7 +120,7 @@ func resolveMountablePartition(target string) string {
 	return target
 }
 
-func configureLinuxPersistentEnvironment(targetPartition, partUUID string, logFn func(string)) error {
+func configureLinuxPersistentEnvironment(targetPartition, partUUID string, creds Credentials, logFn func(string)) error {
 	targetPartition = resolveMountablePartition(targetPartition)
 	_, _ = cmdRunner.Run("sync")
 
@@ -180,7 +180,7 @@ func configureLinuxPersistentEnvironment(targetPartition, partUUID string, logFn
 		logFn(fmt.Sprintf("=> [WARNING] Package self-healing issue: %v", err))
 	}
 
-	if err := assertDefaultCredentials(stageDir, logFn); err != nil {
+	if err := assertDefaultCredentials(stageDir, creds, logFn); err != nil {
 		logFn(fmt.Sprintf("=> [WARNING] Credential configuration issue: %v", err))
 	}
 
@@ -410,28 +410,55 @@ func assertBootableKernelAndPackages(rootPath string, logFn func(string)) error 
 	return nil
 }
 
-func assertDefaultCredentials(rootPath string, logFn func(string)) error {
-	logFn("=> [ACCOUNTS] Provisioning verified user credentials (saleem / saleem)...")
+// assertDefaultCredentials creates creds.Username (sudo-enabled) in the
+// chroot at rootPath, and either locks root (the default) or gives it the
+// same password as creds.Username if creds.AllowRootLogin is set. Audit
+// 2.3: this used to hardcode a "saleem"/"saleem" account and root password
+// on every install regardless of who ran the tool; there is no hardcoded
+// account or password anywhere in this path anymore.
+func assertDefaultCredentials(rootPath string, creds Credentials, logFn func(string)) error {
+	if logFn == nil {
+		logFn = func(string) {}
+	}
+	if !ValidUsername(creds.Username) {
+		return fmt.Errorf("refusing to provision account: %q is not a valid username", creds.Username)
+	}
+	logFn(fmt.Sprintf("=> [ACCOUNTS] Provisioning user account %q...", creds.Username))
+
+	hash, err := creds.ResolvedPasswordHash()
+	if err != nil {
+		return fmt.Errorf("hashing password for %s: %w", creds.Username, err)
+	}
 
 	sudoersDir := filepath.Join(rootPath, "etc", "sudoers.d")
 	_ = os.MkdirAll(sudoersDir, 0750)
-	_ = os.WriteFile(filepath.Join(sudoersDir, "saleem"), []byte("saleem ALL=(ALL:ALL) ALL\n"), 0440)
+	_ = os.WriteFile(filepath.Join(sudoersDir, creds.Username), []byte(creds.Username+" ALL=(ALL:ALL) ALL\n"), 0440)
 
-	script := `
+	rootCmd := "passwd -l root 2>/dev/null || true"
+	if creds.AllowRootLogin {
+		rootCmd = fmt.Sprintf("echo %s | chpasswd -e 2>/dev/null || true", shellSingleQuote("root:"+hash))
+	}
+
+	script := fmt.Sprintf(`
 set -e
-echo "root:saleem" | chpasswd 2>/dev/null || true
+%s
 
-if ! id -u saleem >/dev/null 2>&1; then
-    useradd -m -s /bin/bash -G sudo saleem 2>/dev/null || true
+if ! id -u %[2]s >/dev/null 2>&1; then
+    useradd -m -s /bin/bash -G sudo %[2]s 2>/dev/null || true
 fi
-echo "saleem:saleem" | chpasswd 2>/dev/null || true
-usermod -aG sudo saleem 2>/dev/null || true
-`
+echo %[3]s | chpasswd -e 2>/dev/null || true
+usermod -aG sudo %[2]s 2>/dev/null || true
+`, rootCmd, creds.Username, shellSingleQuote(creds.Username+":"+hash))
+
 	if out, err := cmdRunner.Run("chroot", rootPath, "/bin/sh", "-c", script); err != nil {
 		logFn(fmt.Sprintf("=> [NOTICE] Account configuration warning: %v (%s)", err, string(out)))
 	}
 
-	logFn("=> [ACCOUNTS] Verified: root:saleem and saleem:saleem configured with full sudo privileges.")
+	rootState := "locked"
+	if creds.AllowRootLogin {
+		rootState = "enabled"
+	}
+	logFn(fmt.Sprintf("=> [ACCOUNTS] Verified: %s configured with full sudo privileges; root login %s.", creds.Username, rootState))
 	return nil
 }
 
