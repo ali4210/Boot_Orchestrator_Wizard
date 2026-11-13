@@ -707,7 +707,9 @@ and proves the resolved path is the looked-up one, not the guessed one; falls ba
 the two `ListDirectoryContents` tests above and an `IsSupportedPayload` extension-matching
 table test.
 
-**CHECKPOINT 2:** not reached
+**CHECKPOINT 2:** Reached. All 4 bugs (E/F/G/H) fixed with reproducing tests. See chat
+summary delivered at this checkpoint for the full per-bug breakdown. 41 commits total on
+`fix/audit-phase-0-1` as of this checkpoint; nothing pushed.
 
 ## Phase 3: OS verification matrix (branch test/os-matrix)
 - [ ] Tier 1 catalog validation — Not started
