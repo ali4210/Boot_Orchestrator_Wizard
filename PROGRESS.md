@@ -619,7 +619,7 @@ refuses) and the `--yes` gate.
   injectable, so the ESP-file-removal and NVRAM-boot-entry-removal code paths have **no**
   automated test coverage at all (only exercised by passing empty values that skip them
   entirely). This is a real, acknowledged gap, not a passed test.
-### G. transient_resize.sh is not being created — Done (commit TBD)
+### G. transient_resize.sh is not being created — Done (`a3ee951`)
 - [x] 17. transient_resize.sh not created — reproduction + fix — Done, see below.
 
 **Root cause (`engine/orchestrator.go`, the bare-metal USB-staging block, around where
