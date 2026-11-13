@@ -534,7 +534,7 @@ summary delivered at this checkpoint for the full per-commit breakdown.
 - **Item 14:** `cmd/download-verify` + `.github/workflows/download-verify.yml` — downloads every catalog entry with this tool's own downloader (`engine.StreamDownloadWithFailover`), verifies against the manifest checksum when present, **computes and reports one when absent** (so the workflow's own output can be used to responsibly backfill item 13's gap after human review of provenance), skips entries larger than the runner's free space as `SKIPPED-SIZE`, deletes each download immediately after checking so disk usage never exceeds one entry at a time, and uploads a JSON report artifact. Triggers: `workflow_dispatch` and a monthly cron — **never on push/PR**.
 
 **Tests:** `engine/streamer_test.go` (12 tests, all passing, httptest-based — stall mid-body, stall during format-sniff, stall-then-recovers-on-retry, truncated-with-declared-Content-Length, no-Content-Length-early-close, HTML-error-page-as-200, redirect chain, mirror 403 failover, server-ignores-Range clean restart, chunked encoding, free-disk-space sanity, non-blocking progress); `discovery/audit_test.go` (6 tests, synthetic + a real-catalog report test that logs but doesn't fail the suite over the data gap); `cmd/download-verify/main_test.go` (6 tests, all against `httptest` servers with tiny payloads, never real downloads).
-### F. Revert (dual boot back to single boot) does not work — Done (commit TBD)
+### F. Revert (dual boot back to single boot) does not work — Done (`00615e9`)
 - [x] 15. Revert reproduction (loop-image fixture) — Done, see below.
 - [x] 16. Fix revert (partition/fstab/grub/ESP restore) — Done, see below.
 
