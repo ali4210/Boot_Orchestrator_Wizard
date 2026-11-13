@@ -68,7 +68,14 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       rule stated at the start of this work: "Never rewrite git history." The disposable-
       branch form proves the same thing — every commit, checked out in order, builds and
       tests green — without moving `fix/audit-phase-0-1`'s own ref or changing any of its
-      commit hashes. See the chat response for the exec log / pass-fail per commit.
+      commit hashes. **Result:** every commit builds and tests green except one, by
+      design: `d756fec` ("test: add regression tests for audit 2.1 and 2.2 (2.1 currently
+      failing)") fails `TestConfigureBootloaderStep_LinuxBranchFailurePropagates` — the
+      deliberate reproduce-the-bug-with-a-failing-test commit from the original Step 2
+      instructions, fixed by the very next commit (`f7ddc19`). No other commit, before or
+      after it, failed. The rebase replayed onto unchanged `main` and produced
+      byte-identical commit hashes (confirming the branch was already cleanly based on
+      `main`); the temporary branch was deleted afterward.
 - [x] F5. autorun.sh: detect root-owned files in bin/ or the journal and print the exact
       chown command instead of a raw permission error — Done (`3ce022d`). Added
       `check_root_owned_files` right before the build section: scans `bin/` with
