@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"boot-orchestrator/safety"
 )
 
 const appTitle = " UNIVERSAL OS, STORAGE & HYPERVISOR ORCHESTRATOR :: [ENTERPRISE PRO] "
@@ -943,7 +945,7 @@ func (m Model) viewResumeAlert() string {
 	} else {
 		fmt.Fprintf(&b, "%s\n\n", BadgeSuccess.Render(" SYSTEM JOURNAL CLEAN "))
 		fmt.Fprintf(&b, "No interrupted or paused installation sessions were detected on this machine.\n\n")
-		fmt.Fprintf(&b, "  => Journal Path:    %s\n", StyleMuted.Render("orchestrator_journal.json"))
+		fmt.Fprintf(&b, "  => Journal Path:    %s\n", StyleMuted.Render(safety.DefaultJournalPath()))
 		fmt.Fprintf(&b, "  => Status:          %s\n", StyleSubTitle.Render("Idle (Zero In-Flight Operations)"))
 		fmt.Fprintf(&b, "  => Partitions:      %s\n\n", StyleMuted.Render("No locks or half-written allocations active"))
 		fmt.Fprintf(&b, "%s", StyleSubTitle.Render("=> Press ENTER or ESC to return to the Main Menu."))

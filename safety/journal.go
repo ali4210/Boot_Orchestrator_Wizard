@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -70,7 +71,60 @@ type Journal struct {
 // RollbackFunc undoes one step given its stored rollback data.
 type RollbackFunc func(data json.RawMessage) error
 
+// DefaultJournalPath returns the path the journal should be created/loaded
+// at by default: a dedicated, non-world-writable state directory outside
+// the git repository, so an unprivileged user — including the very user
+// who invoked `sudo` to run this tool — cannot tamper with journal
+// contents between runs and steer what a LATER elevated run does to real
+// disks (follow-up F12; see the "Security tradeoff" note in PROGRESS.md).
+// Each candidate directory is created mode 0700, so whichever process
+// first creates it (normally the root-elevated engine) is the only one
+// that can read or write inside it afterward. Falls through to the next
+// candidate if a directory can't be created (e.g. not running as root, or
+// a read-only /var), and as an absolute last resort returns a
+// repo-relative path matching this tool's original behavior.
+//
+// Windows caveat: os.MkdirAll's mode parameter does not translate into a
+// meaningful Windows ACL (Go only maps it to the read-only attribute bit),
+// so on Windows this function picks a conventional per-machine location
+// (%ProgramData%) but does NOT actually achieve the same non-admin-writable
+// guarantee it does on Unix — see the "Security tradeoff" note in
+// PROGRESS.md.
+func DefaultJournalPath() string {
+	var candidates []string
+	if runtime.GOOS == "windows" {
+		if pd := os.Getenv("ProgramData"); pd != "" {
+			candidates = append(candidates, filepath.Join(pd, "BootOrchestrator"))
+		}
+	} else {
+		candidates = []string{"/var/lib/boot-orchestrator", "/var/tmp/boot-orchestrator"}
+	}
+	for _, dir := range candidates {
+		if err := os.MkdirAll(dir, 0700); err == nil {
+			return filepath.Join(dir, "journal.json")
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		dir := filepath.Join(home, ".local", "state", "boot-orchestrator")
+		if err := os.MkdirAll(dir, 0700); err == nil {
+			return filepath.Join(dir, "journal.json")
+		}
+	}
+	return "orchestrator_journal.json"
+}
+
 // NewJournal creates a fresh journal file at path, auto-healing 0-byte crashed stubs.
+//
+// Follow-up F12: this used to chown the newly created file back to
+// SUDO_UID/SUDO_GID so it wouldn't be left root-owned in the invoking
+// user's repo checkout. That chown is now removed rather than kept: this
+// engine's journal records exactly the state (target disk/partition,
+// rollback data) a LATER elevated run trusts to decide what to do to real
+// hardware, so handing an unprivileged user write access to it was the
+// opposite of what a security boundary should do. DefaultJournalPath
+// instead keeps the journal in a directory the invoking user can't write
+// to at all, which is the actual fix autorun.sh's root-owned-file warning
+// was only ever a band-aid for.
 func NewJournal(path, txnID string) (*Journal, error) {
 	if fi, err := os.Stat(path); err == nil {
 		if fi.Size() == 0 {
@@ -89,49 +143,72 @@ func NewJournal(path, txnID string) (*Journal, error) {
 	if err := j.flush(); err != nil {
 		return nil, err
 	}
-	// Follow-up F6: this engine typically runs elevated (via sudo) so it
-	// can perform partition/bootloader operations, but the journal file it
-	// just created would then be left root-owned in the invoking user's
-	// own repo checkout — autorun.sh used to hard-block on exactly that on
-	// the next run. Hand ownership back to the invoking user immediately,
-	// best-effort (not fatal if it fails, e.g. not actually running under
-	// sudo).
-	chownToSudoUser(path)
 	return j, nil
 }
 
-// resolveSudoOwner parses SUDO_UID/SUDO_GID from getenv, returning
-// ok=false if either is unset or not a valid integer (e.g. this process
-// isn't running under sudo at all). Kept separate from chownToSudoUser so
-// the parsing logic is testable without needing root or a real file.
-func resolveSudoOwner(getenv func(string) string) (uid, gid int, ok bool) {
-	uidStr := getenv("SUDO_UID")
-	gidStr := getenv("SUDO_GID")
-	if uidStr == "" || gidStr == "" {
-		return 0, 0, false
-	}
-	u, err := strconv.Atoi(uidStr)
-	if err != nil {
-		return 0, 0, false
-	}
-	g, err := strconv.Atoi(gidStr)
-	if err != nil {
-		return 0, 0, false
-	}
-	return u, g, true
+// allowedStepNames is every step name this engine's own code ever creates
+// via Journal.Begin, plus every name its RollbackAll handler maps key
+// against. Follow-up F12 defense-in-depth: a journal loaded from disk is
+// state an earlier (possibly different-privilege, possibly tampered)
+// process produced. Restricting step names to this fixed set on load means
+// a corrupted or hand-edited journal can't make RollbackAll invoke a
+// handler for a step name this version of the engine never actually
+// creates, or otherwise smuggle unexpected behavior through Step.Name.
+var allowedStepNames = map[string]bool{
+	"image-download":       true,
+	"partition-shrink":     true,
+	"image-deploy":         true,
+	"bootloader-configure": true,
+	"revert-engine":        true,
+	"docker-isolation":     true,
+	"uefi-set-boot-next":   true,
+	"uefi-set-boot-order":  true,
+	"bcd-mutation":         true,
+	"bcd-add-entry":        true,
+	"grub-set-default":     true,
 }
 
-// chownToSudoUser hands ownership of path to SUDO_UID/SUDO_GID if this
-// process is running under sudo. Best-effort: a failed chown doesn't
-// affect journal correctness, only the convenience of not leaving a
-// root-owned file behind.
-func chownToSudoUser(path string) {
-	if uid, gid, ok := resolveSudoOwner(os.Getenv); ok {
-		_ = os.Chown(path, uid, gid)
+// looksLikeDevicePath reports whether s is a plausible Linux block device
+// path with no path-traversal segment — structural validation, not an
+// existence check (see the "Security tradeoff" note in PROGRESS.md for why
+// this stops short of verifying the device exists/matches: device paths
+// legitimately get renumbered between boots, which is exactly why
+// SessionState separately carries PARTUUID fields for resume to re-resolve
+// against, rather than trusting the raw path). Empty is allowed, since not
+// every session has every field populated.
+func looksLikeDevicePath(s string) bool {
+	if s == "" {
+		return true
 	}
+	if strings.Contains(s, "..") {
+		return false
+	}
+	return strings.HasPrefix(s, "/dev/") && filepath.Clean(s) == s
 }
 
-// LoadJournal reads an existing journal.json and rejects empty/invalid files cleanly.
+// validateLoadedJournal rejects a journal whose contents could not have
+// been produced by this engine's own code paths (follow-up F12 defense in
+// depth, checked on every LoadJournal regardless of where the journal file
+// lives).
+func validateLoadedJournal(j *Journal) error {
+	for _, field := range []string{j.Session.TargetDisk, j.Session.TargetPartition, j.Session.ShrunkPartition} {
+		if !looksLikeDevicePath(field) {
+			return fmt.Errorf("journal contains a malformed or suspicious device path %q", field)
+		}
+	}
+	for _, s := range j.Steps {
+		if s == nil {
+			continue
+		}
+		if !allowedStepNames[s.Name] {
+			return fmt.Errorf("journal contains an unrecognized step name %q", s.Name)
+		}
+	}
+	return nil
+}
+
+// LoadJournal reads an existing journal.json, rejects empty/invalid files
+// cleanly, and validates its contents (follow-up F12) before returning it.
 func LoadJournal(path string) (*Journal, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -149,6 +226,9 @@ func LoadJournal(path string) (*Journal, error) {
 	var j Journal
 	if err := json.Unmarshal(raw, &j); err != nil {
 		return nil, fmt.Errorf("journal at %s is corrupt: %w", path, err)
+	}
+	if err := validateLoadedJournal(&j); err != nil {
+		return nil, fmt.Errorf("journal at %s failed validation: %w", path, err)
 	}
 	j.Path = path
 	return &j, nil

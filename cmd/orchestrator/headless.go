@@ -275,7 +275,7 @@ func buildHeadlessRequest(cfg headlessConfig, catalog *discovery.Catalog, hvKind
 	}
 
 	return engine.ProvisionRequest{
-		JournalPath:      "orchestrator_journal.json",
+		JournalPath:      safety.DefaultJournalPath(),
 		ImageURL:         primaryURL,
 		ImageSHA256:      sha,
 		DownloadDestPath: "/var/tmp/os_image.payload",

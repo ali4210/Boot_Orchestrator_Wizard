@@ -70,7 +70,7 @@ func shellQuote(s string) string {
 }
 
 // TestCheckRootOwnedFiles_NoOffenders is the baseline: an ordinary scratch
-// directory with user-owned bin/ and journal produces no warning or block.
+// directory with a user-owned bin/ produces no warning or block.
 func TestCheckRootOwnedFiles_NoOffenders(t *testing.T) {
 	scriptDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(scriptDir, "bin"), 0755); err != nil {
@@ -78,9 +78,6 @@ func TestCheckRootOwnedFiles_NoOffenders(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(scriptDir, "bin", "boot-orchestrator"), []byte("fake"), 0755); err != nil {
 		t.Fatalf("writing fixture binary: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(scriptDir, "orchestrator_journal.json"), []byte("{}"), 0644); err != nil {
-		t.Fatalf("writing fixture journal: %v", err)
 	}
 
 	out, err := sourceAutorunAndRun(t, scriptDir, "check_root_owned_files")
@@ -130,40 +127,6 @@ func TestCheckRootOwnedFiles_BinOwnedByRootBlocks(t *testing.T) {
 }
 
 // TestCheckRootOwnedFiles_JournalOwnedByRootOnlyWarns is the regression
-// test for follow-up F6's second half: a root-owned journal must produce
-// only a warning (exit zero, output mentions WARNING), never a hard block
-// — the engine now fixes journal ownership itself after creating it, so
-// this script no longer needs to treat a stale root-owned journal as fatal.
-func TestCheckRootOwnedFiles_JournalOwnedByRootOnlyWarns(t *testing.T) {
-	if !hasPasswordlessSudo(t) {
-		t.Skip("passwordless sudo not available in this environment; skipping the real-root-ownership case")
-	}
-
-	scriptDir := t.TempDir()
-	journalPath := filepath.Join(scriptDir, "orchestrator_journal.json")
-	if err := os.WriteFile(journalPath, []byte("{}"), 0644); err != nil {
-		t.Fatalf("writing fixture journal: %v", err)
-	}
-
-	if err := exec.Command("sudo", "-n", "chown", "root:root", journalPath).Run(); err != nil {
-		t.Fatalf("chowning fixture to root: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = exec.Command("sudo", "-n", "chown", os.Getenv("USER")+":"+os.Getenv("USER"), journalPath).Run()
-	})
-
-	out, err := sourceAutorunAndRun(t, scriptDir, "check_root_owned_files")
-	if err != nil {
-		t.Fatalf("expected check_root_owned_files to exit zero for a root-owned journal (warning only), got err=%v output:\n%s", err, out)
-	}
-	if !strings.Contains(out, "WARNING") {
-		t.Fatalf("expected a [WARNING] message about the journal, got:\n%s", out)
-	}
-	if strings.Contains(out, "BLOCKED") {
-		t.Fatalf("expected no hard block for a root-owned journal alone, got:\n%s", out)
-	}
-}
-
 // TestAmbientSCRIPT_DIR_DoesNotRedirectScript is the regression test for
 // follow-up F10: autorun.sh must never honor a plain "SCRIPT_DIR" that
 // merely happens to be set in the environment — otherwise an accidental
@@ -244,38 +207,9 @@ func TestCheckRootOwnedFiles_RuntimeDirOwnedByRootBlocks(t *testing.T) {
 	}
 }
 
-// TestCheckRootOwnedFiles_InstalledOSRecordOwnedByRootOnlyWarns proves
-// orchestrator_installed_os.json (the other plain state file the root-run
-// binary writes next to the journal) is treated the same way as the
-// journal: a warning, never a hard block, since unlinking a plain file
-// only requires write permission on its parent directory, not ownership
-// of the file.
-func TestCheckRootOwnedFiles_InstalledOSRecordOwnedByRootOnlyWarns(t *testing.T) {
-	if !hasPasswordlessSudo(t) {
-		t.Skip("passwordless sudo not available in this environment; skipping the real-root-ownership case")
-	}
-
-	scriptDir := t.TempDir()
-	recordPath := filepath.Join(scriptDir, "orchestrator_installed_os.json")
-	if err := os.WriteFile(recordPath, []byte("{}"), 0644); err != nil {
-		t.Fatalf("writing fixture record: %v", err)
-	}
-
-	if err := exec.Command("sudo", "-n", "chown", "root:root", recordPath).Run(); err != nil {
-		t.Fatalf("chowning fixture to root: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = exec.Command("sudo", "-n", "chown", os.Getenv("USER")+":"+os.Getenv("USER"), recordPath).Run()
-	})
-
-	out, err := sourceAutorunAndRun(t, scriptDir, "check_root_owned_files")
-	if err != nil {
-		t.Fatalf("expected check_root_owned_files to exit zero for a root-owned installed-os record (warning only), got err=%v output:\n%s", err, out)
-	}
-	if !strings.Contains(out, "WARNING") {
-		t.Fatalf("expected a [WARNING] message about the installed-os record, got:\n%s", out)
-	}
-	if strings.Contains(out, "BLOCKED") {
-		t.Fatalf("expected no hard block for a root-owned installed-os record alone, got:\n%s", out)
-	}
-}
+// Follow-up F12 removed the journal/installed-os-record ownership checks
+// from check_root_owned_files entirely (both now live outside the repo by
+// default, in a directory the invoking user can't write to at all), so the
+// tests that used to cover "root-owned journal/record only warns" were
+// removed along with that code — the behavior they tested no longer
+// exists. See PROGRESS.md's F12 entry for the full rationale.

@@ -32,8 +32,18 @@ func DiscoverSecondaryOSes() ([]DetectedGuestOS, error) {
 	activeDisk, activeHostPart, hostNum, _, _ := DetectActiveRootDisk()
 	seenDevices := make(map[string]bool)
 
-	// 1. Dynamic Journal Inspection
-	journalPaths := []string{"orchestrator_installed_os.json", "orchestrator_journal.json"}
+	// 1. Dynamic Journal Inspection. Checks both the current default
+	// location (follow-up F12: a dedicated, non-world-writable state
+	// directory outside the repo) and the legacy repo-relative paths, so a
+	// record written by a version of this tool from before that change is
+	// still found.
+	defaultDir := filepath.Dir(safety.DefaultJournalPath())
+	journalPaths := []string{
+		"orchestrator_installed_os.json",
+		"orchestrator_journal.json",
+		filepath.Join(defaultDir, "orchestrator_installed_os.json"),
+		safety.DefaultJournalPath(),
+	}
 	var j *safety.Journal
 	for _, jp := range journalPaths {
 		if loaded, err := safety.LoadJournal(jp); err == nil && loaded != nil {
@@ -419,10 +429,13 @@ exec tail -n +3 $0
 	logFn("=> Refreshing host GRUB configuration...")
 	_ = exec.Command("update-grub").Run()
 
-	// 7. Purge Journal State Files
+	// 7. Purge Journal State Files — both the current default location
+	// (follow-up F12) and the legacy repo-relative paths.
 	_ = os.Remove("orchestrator_journal.json")
 	_ = os.Remove("orchestrator_installed_os.json")
 	_ = os.Remove("/var/tmp/orchestrator_journal.json")
+	_ = os.Remove(safety.DefaultJournalPath())
+	_ = os.Remove(filepath.Join(filepath.Dir(safety.DefaultJournalPath()), "orchestrator_installed_os.json"))
 
 	progressFn("=> [REVERT COMPLETE 100%] Decommissioning completed successfully.", 1.0)
 	logFn("=> [SUCCESS] Decommissioning transaction completed cleanly.")

@@ -159,24 +159,25 @@ purge_cache() {
 
 BIN_PATH="${SCRIPT_DIR:?}/bin/boot-orchestrator"
 LOCAL_TMP="${SCRIPT_DIR:?}/.build_tmp"
-JOURNAL_PATH="${SCRIPT_DIR:?}/orchestrator_journal.json"
 
-# check_root_owned_files (follow-ups F5/F6/F11). Since the build runs as
-# the invoking user, root-owned content left by a run from before item
+# check_root_owned_files (follow-ups F5/F6/F11/F12). Since the build runs
+# as the invoking user, root-owned content left by a run from before item
 # 1D.9's fix — or by someone directly invoking `sudo ./autorun.sh` by hand
 # — would otherwise fail with a bare, confusing "permission denied".
 #
 # Directories the root-run binary (or an old root-run build) can leave
 # root-owned (bin/, .runtime/) are hard-blocked: removing or writing inside
 # a root-owned directory genuinely fails for a non-root user, and --hard's
-# purge_cache does exactly that (`rm -rf`) to both. Plain files
-# (orchestrator_journal.json, orchestrator_installed_os.json) are only
-# warned about, never blocked on: unlinking a file only requires write
-# permission on its parent directory, not ownership of the file itself, so
-# `rm -f` on a root-owned file in a user-writable directory always
-# succeeds regardless — and the engine now chowns the journal back to the
-# invoking user right after creating it anyway, so a root-owned journal is
-# at most a sign of an old run from before that fix.
+# purge_cache does exactly that (`rm -rf`) to both.
+#
+# Follow-up F12: this script no longer checks the journal
+# (orchestrator_journal.json) or the installed-OS record at all. Both now
+# live outside the repository by default, in a dedicated state directory
+# (see safety.DefaultJournalPath in the Go source) that an unprivileged
+# user cannot write to in the first place — the journal records exactly
+# the state a LATER elevated run trusts to decide what to do to real
+# hardware, so it must never be something this script hands back to the
+# invoking user, the way bin/ legitimately is.
 check_root_owned_files() {
     if [ "$EUID" -eq 0 ]; then
         return 0
@@ -204,23 +205,6 @@ check_root_owned_files() {
         echo "======================================================================" >&2
         exit 1
     fi
-
-    local warn_files=("$JOURNAL_PATH" "${SCRIPT_DIR:?}/orchestrator_installed_os.json")
-    for f in "${warn_files[@]}"; do
-        if [ -e "$f" ]; then
-            local owner
-            owner=$(stat -c '%U' "$f" 2>/dev/null || stat -f '%Su' "$f" 2>/dev/null || echo "")
-            if [ "$owner" = "root" ]; then
-                echo "======================================================================" >&2
-                echo " [WARNING] $f is owned by root (left over from an older" >&2
-                echo " run, before this tool started fixing its own ownership). This does" >&2
-                echo " not block anything, but if you see stale or unexpected state, run:" >&2
-                echo "" >&2
-                echo "   sudo chown \"$(id -un):$(id -gn)\" \"$f\"" >&2
-                echo "======================================================================" >&2
-            fi
-        fi
-    done
 }
 
 main() {

@@ -30,8 +30,16 @@ func DiscoverSecondaryOSes() ([]DetectedGuestOS, error) {
 	var results []DetectedGuestOS
 	seenParts := make(map[string]bool)
 
-	// 1. Journal Inspection: Inspect orchestrator records first
-	journalPaths := []string{"orchestrator_installed_os.json", "orchestrator_journal.json"}
+	// 1. Journal Inspection: Inspect orchestrator records first. Checks
+	// both the current default location (follow-up F12) and the legacy
+	// repo-relative paths.
+	defaultDir := filepath.Dir(safety.DefaultJournalPath())
+	journalPaths := []string{
+		"orchestrator_installed_os.json",
+		"orchestrator_journal.json",
+		filepath.Join(defaultDir, "orchestrator_installed_os.json"),
+		safety.DefaultJournalPath(),
+	}
 	for _, jp := range journalPaths {
 		if j, err := safety.LoadJournal(jp); err == nil && j != nil {
 			sess := j.Session
@@ -256,10 +264,13 @@ if ($esp) {
 		_ = exec.Command("powershell.exe", "-NoProfile", "-Command", mountESP).Run()
 	}
 
-	// Purge journal files so state resets completely
+	// Purge journal files so state resets completely — both the current
+	// default location (follow-up F12) and the legacy repo-relative paths.
 	_ = os.Remove("orchestrator_journal.json")
 	_ = os.Remove("orchestrator_installed_os.json")
 	_ = os.Remove(filepath.Join(os.TempDir(), "orchestrator_journal.json"))
+	_ = os.Remove(safety.DefaultJournalPath())
+	_ = os.Remove(filepath.Join(filepath.Dir(safety.DefaultJournalPath()), "orchestrator_installed_os.json"))
 
 	progressFn("=> [REVERT 100%] Windows host revert completed.", 1.0)
 	logFn("=> [WINDOWS ROLLBACK] Completed cleanly.")

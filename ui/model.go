@@ -617,7 +617,7 @@ func NewModel() Model {
 	var unfin *safety.SessionState
 	var jrn *safety.Journal
 
-	if j, jErr := safety.LoadJournal("orchestrator_journal.json"); jErr == nil {
+	if j, jErr := safety.LoadJournal(safety.DefaultJournalPath()); jErr == nil {
 		jrn = j
 		if st, ok := j.GetUnfinishedSession(); ok {
 			unfin = st
@@ -1902,7 +1902,7 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(scanGuestOSesCmd(), m.scanSpinner.Tick)
 		case "4":
 			if m.journal == nil {
-				m.journal, _ = safety.LoadJournal("orchestrator_journal.json")
+				m.journal, _ = safety.LoadJournal(safety.DefaultJournalPath())
 			}
 			if m.journal != nil {
 				if st, ok := m.journal.GetUnfinishedSession(); ok {
@@ -1939,7 +1939,7 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(scanGuestOSesCmd(), m.scanSpinner.Tick)
 			case 3:
 				if m.journal == nil {
-					m.journal, _ = safety.LoadJournal("orchestrator_journal.json")
+					m.journal, _ = safety.LoadJournal(safety.DefaultJournalPath())
 				}
 				if m.journal != nil {
 					if st, ok := m.journal.GetUnfinishedSession(); ok {
@@ -2708,7 +2708,7 @@ func (m *Model) startProvisioning(isResume bool) tea.Cmd {
 	}
 
 	req := engine.ProvisionRequest{
-		JournalPath:      "orchestrator_journal.json",
+		JournalPath:      safety.DefaultJournalPath(),
 		ImageURL:         primaryURL,
 		ImageSHA256:      sha,
 		DownloadDestPath: "/var/tmp/os_image.payload",

@@ -115,6 +115,15 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       test, plus an end-to-end `NewJournal` test that sets `SUDO_UID`/`SUDO_GID` to the test
       process's own uid/gid (a self-chown needs no elevated privilege) to exercise the real
       `os.Chown` call path, not just the parsing logic.
+      **Superseded by F12 below:** the `SUDO_UID`/`SUDO_GID` chown this item added was
+      removed in F12 (along with `safety/journal_chown_test.go`) — on reflection, handing
+      the journal's ownership to the unprivileged invoking user was the wrong direction
+      entirely, since the journal is state a later elevated run trusts for real disk
+      operations. F12 fixes the actual root-owned-journal problem this item was patching
+      around by moving the journal outside the repo into a directory the user can't write
+      to, rather than chowning a sensitive file to them. The restructuring this item made to
+      `autorun.sh` (sourceable, `main()`-guarded) and `check_root_owned_files`'s `bin/`
+      hard-block remain and are unaffected.
 - [x] F7. PreflightStorageSafetyCheck: skip ONLY blkid exit code 2; any other blkid/lsblk
       error aborts (fail closed); use `blkid -p`; tests for exit 4, missing binary, exit 2
       — Done (`567c706`). Root cause (`engine/preflight_safety.go`
@@ -199,7 +208,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       resolution of its own.
 - [x] F11. Move `check_root_owned_files` before flag processing and `purge_cache`; extend
       it to cover `.runtime/` and other root-run-written directories; test by sourcing the
-      real script — Done (commit TBD). Root cause: `check_root_owned_files` ran AFTER flag
+      real script — Done (`1f04cef`). Root cause: `check_root_owned_files` ran AFTER flag
       processing, so `--hard`'s `purge_cache "hard"` (which does `rm -rf
       "${SCRIPT_DIR:?}/bin"` and `rm -rf "${SCRIPT_DIR:?}/.runtime"` unconditionally)
       executed first — a root-owned `bin/` or `.runtime/` would make those `rm -rf` calls
@@ -221,6 +230,82 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       pasted copy): `.runtime/` root-owned blocks (**confirmed failing before the fix** via
       `git stash` on `autorun.sh` and re-running, then restored) and
       `orchestrator_installed_os.json` root-owned only warns.
+      **Superseded by F12 below:** F12 removes the journal/installed-os-record warning
+      logic this item added, because both files no longer live in the repo by default at
+      all — see F12's entry for why, and for the `.runtime`/`bin` directory-blocking half of
+      this item, which is unaffected and still stands.
+
+- [x] F12. The journal must not be user-writable — Done (commit TBD).
+      **What changed:** `safety.DefaultJournalPath()` (new) resolves the journal to a
+      dedicated state directory outside the git repository — `/var/lib/boot-orchestrator`
+      first, falling back to `/var/tmp/boot-orchestrator`, then
+      `~/.local/state/boot-orchestrator`, each created mode `0700` — instead of the
+      repo-relative `orchestrator_journal.json` every call site used to hardcode
+      (`ui/model.go` x4, `cmd/orchestrator/headless.go`, `ui/view.go`'s display string).
+      `engine/orchestrator.go`'s `installedRecordPath` (`orchestrator_installed_os.json`)
+      is derived from `filepath.Dir(req.JournalPath)`, so it moves automatically with no
+      separate change needed. `engine/revert_linux.go` and `engine/revert_windows.go`'s
+      `DiscoverSecondaryOSes`/cleanup logic now check and purge **both** the new default
+      location and the legacy repo-relative paths, so an install recorded by a version of
+      this tool from before this change is still found and a clean revert still purges
+      everything. Removed the `SUDO_UID`/`SUDO_GID` chown added in F6 entirely (along with
+      its now-pointless tests, `safety/journal_chown_test.go`) — chowning the journal to an
+      unprivileged user was the opposite of the fix; `DefaultJournalPath`'s `0700` directory
+      is the actual mechanism now. `autorun.sh`'s `check_root_owned_files` no longer checks
+      journal/installed-os-record ownership at all (per the explicit instruction) — both
+      files are gone from the repo directory by default, so there is nothing there to check.
+      Added defense-in-depth validation on every `LoadJournal`: `allowedStepNames` rejects
+      any `Step.Name` this engine's own code doesn't actually create via `journal.Begin`
+      (closing off a tampered journal making `RollbackAll` invoke an unexpected handler),
+      and `looksLikeDevicePath` rejects any `TargetDisk`/`TargetPartition`/`ShrunkPartition`
+      containing `..` or not shaped like `/dev/...` (no path traversal).
+
+      **Security tradeoff — read before relying on this:**
+      - *Windows has no real guarantee here.* Go's `os.MkdirAll` mode parameter does not
+        translate into a meaningful Windows ACL (it only maps to the read-only attribute
+        bit), so on Windows `DefaultJournalPath` picks a conventional location
+        (`%ProgramData%\BootOrchestrator`) but does **not** actually prevent an unprivileged
+        user from reading or writing it. The directory-permission defense in this change is
+        real only on Linux/macOS, which is also where this tool's actual disk-provisioning
+        logic lives; Windows support here is BCD/WIM-deployment-only.
+      - *No device-existence or serial-number check.* The task that prompted this asked for
+        "device exists, sizes and serial match" validation too. This was deliberately **not**
+        implemented: `SessionState` has no serial-number field at all (adding one is a schema
+        change, not done here), and a raw existence/path check would produce false failures
+        on legitimate resumes — device paths (`/dev/sdX`) legitimately get renumbered across
+        reboots, which is exactly why `SessionState` separately carries `TargetPartUUID`/
+        `ShrunkPartUUID` fields for the revert/resume path to re-resolve against rather than
+        trusting the raw path. Validation here is therefore structural (shape + allowlist),
+        not semantic (existence + identity) — it stops injection/tampering attempts, not a
+        sophisticated attacker who can place a well-formed-looking but false `/dev/sdX`
+        value.
+      - *The `/var/tmp` and `~/.local/state` fallbacks are weaker than `/var/lib`.* They're
+        only reached when `/var/lib/boot-orchestrator` can't be created (e.g. this binary is
+        run without root at all, such as for local testing). In that case the directory is
+        owned by whatever user created it — there is no root/non-root privilege boundary to
+        protect yet, since no elevated run has happened. The **first** real elevated run
+        will successfully create `/var/lib/boot-orchestrator` and all later runs use that
+        from then on; this is a one-time bootstrap gap, not a standing weakness once the
+        tool has been run as root at least once.
+      - *Field validation runs on every `LoadJournal` unconditionally,* including loads done
+        by the TUI's own "resume?" prompt and `DiscoverSecondaryOSes`'s multi-path scan — a
+        corrupted-but-not-malicious journal (e.g. from a crash mid-write, though the
+        rename-based `flushLocked` is designed to prevent partial writes) would also now be
+        rejected outright rather than partially trusted. This is intentional (fail closed)
+        but means a real crash-corrupted journal is unrecoverable rather than best-effort
+        salvageable.
+
+      **Tests:** `safety/journal_security_test.go` — `DefaultJournalPath` resolves outside
+      the current directory and to a `0700` directory (verified for real: running this test
+      suite creates a real `/var/tmp/boot-orchestrator` directory on the host, mode `0700`,
+      owned by the invoking user — confirmed by `stat`); `validateLoadedJournal` accepts a
+      well-formed session, rejects `..` traversal, rejects a non-device-shaped path, rejects
+      an unrecognized step name, allows empty fields; `LoadJournal` end-to-end rejects a
+      hand-tampered on-disk journal with an unrecognized step name and with a path-traversal
+      device path; a real `NewJournal` → `Begin` → `LoadJournal` round trip still loads
+      cleanly (proving validation doesn't false-positive against the engine's own real
+      output). `autorun_test.go`'s now-obsolete journal/installed-os-record warning tests
+      were removed along with the code they tested.
 
 ## Phase 1: Hardening and testability
 
