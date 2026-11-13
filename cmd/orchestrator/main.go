@@ -66,12 +66,22 @@ func main() {
 	targetDiskFlag := flag.String("target-disk", "", "Headless: target disk device, e.g. /dev/sda")
 	usernameFlag := flag.String("username", "", "Headless: account to create on the provisioned OS")
 	passwordFileFlag := flag.String("password-file", "", "Headless: path to a file containing the account password (plaintext passwords are never accepted as a command-line argument)")
-	yesFlag := flag.Bool("yes", false, "Headless: confirm you want to proceed; required for --headless to do anything")
+	yesFlag := flag.Bool("yes", false, "Headless/--revert: confirm you want to proceed; required for either to do anything")
+	revertFlag := flag.Bool("revert", false, "Run the dual-boot-to-single-boot revert non-interactively instead of launching the TUI; requires --yes")
+	keepSliceFlag := flag.Bool("keep-slice", false, "--revert: reformat the added partition as a clean staging slice instead of deleting it and growing the host partition back")
 	flag.Parse()
 
 	if refuse, message := checkDryRun(*dryRunFlag); refuse {
 		fmt.Fprint(os.Stderr, message)
 		os.Exit(1)
+	}
+
+	if *revertFlag {
+		if err := runHeadlessRevert(*yesFlag, *keepSliceFlag); err != nil {
+			fmt.Fprintf(os.Stderr, "headless revert failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	if *headlessFlag {

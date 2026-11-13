@@ -534,8 +534,91 @@ summary delivered at this checkpoint for the full per-commit breakdown.
 - **Item 14:** `cmd/download-verify` + `.github/workflows/download-verify.yml` — downloads every catalog entry with this tool's own downloader (`engine.StreamDownloadWithFailover`), verifies against the manifest checksum when present, **computes and reports one when absent** (so the workflow's own output can be used to responsibly backfill item 13's gap after human review of provenance), skips entries larger than the runner's free space as `SKIPPED-SIZE`, deletes each download immediately after checking so disk usage never exceeds one entry at a time, and uploads a JSON report artifact. Triggers: `workflow_dispatch` and a monthly cron — **never on push/PR**.
 
 **Tests:** `engine/streamer_test.go` (12 tests, all passing, httptest-based — stall mid-body, stall during format-sniff, stall-then-recovers-on-retry, truncated-with-declared-Content-Length, no-Content-Length-early-close, HTML-error-page-as-200, redirect chain, mirror 403 failover, server-ignores-Range clean restart, chunked encoding, free-disk-space sanity, non-blocking progress); `discovery/audit_test.go` (6 tests, synthetic + a real-catalog report test that logs but doesn't fail the suite over the data gap); `cmd/download-verify/main_test.go` (6 tests, all against `httptest` servers with tiny payloads, never real downloads).
-- [ ] 15. Revert reproduction (loop-image fixture) — Not started
-- [ ] 16. Fix revert (partition/fstab/grub/ESP restore) — Not started
+### F. Revert (dual boot back to single boot) does not work — Done (commit TBD)
+- [x] 15. Revert reproduction (loop-image fixture) — Done, see below.
+- [x] 16. Fix revert (partition/fstab/grub/ESP restore) — Done, see below.
+
+**Investigation:** `engine/revert_linux.go`'s `ExecuteDecommissionWithOptions` (the function
+behind the TUI's revert menu, via `ui/model.go`'s `triggerTargetedRevertCmd`) had **no
+testability isolation at all** — every real-system side effect (`/etc/grub.d/40_custom`,
+`/etc/default/grub.d/*.cfg`, `update-grub`, `findActiveESPMount`'s hardcoded `/boot/efi`
+probe, `efibootmgr`) was a literal hardcoded path, making it unsafe to exercise end-to-end
+in an automated test without first adding injection points for the ones that could be made
+injectable. Two real, confirmed bugs found:
+1. **No swap/fstab awareness at all** (confirmed by `grep swap\|fstab
+   engine/revert_linux.go` — zero matches). If install-time partitioning converted a
+   trailing swap slice into the new OS's partition, revert never recreates swap, and never
+   fixes `/etc/fstab` if it referenced that slice — a dangling fstab entry after revert
+   (delays boot while systemd waits on it, or a swap entry that fails silently).
+2. **`TargetPartUUID`/`ShrunkPartUUID`/`ExpectedFSType`/`ExpectedSizeBytes` were completely
+   unused on Linux** — despite being specifically documented ("used to re-resolve the live
+   device at revert time instead of trusting DiskDevice/PartitionNum directly, disk
+   letters/numbers can shift between creation and revert") and actually implemented on
+   **macOS** (`revert_darwin.go`'s `resolveDeviceByPartitionUUID` +
+   `verifyDarwinTargetBeforeDestruction`). The Linux path — the tool's primary platform —
+   blindly trusted a possibly-stale `DiskDevice`/`PartitionNum`, with **no verification at
+   all** before deleting a partition. If disk naming shifted between install and revert
+   (different USB port, another drive attached, NVMe enumeration change), this could
+   delete/resize the wrong partition on the wrong disk.
+
+**Reproduction:** `engine/revert_linux_loopimage_test.go` builds a real GPT disk image
+(ESP + a shrunk host ext4 root with test files + a second "new OS" ext4 partition, the
+literal end state of a completed dual-boot install), loop-mounts it, and calls the real
+`ExecuteDecommissionWithOptions` against it. Made safe via three injectable vars added to
+`revert_linux.go` (`grubCustomPath`, `grubDropinPaths`, `updateGrubFunc`, `fstabPath` —
+redirected to a scratch directory for the test) plus passing an empty
+`EFIDirNameToPurge`/`EFIBootEntryNum` (the only way to neutralize `findActiveESPMount`/
+`efibootmgr`, which remain hardcoded — a residual testability gap, noted below). Requires
+the test *process itself* to run as root (`ExecuteDecommissionWithOptions` checks
+`os.Geteuid() != 0`), so it skips cleanly under a normal `go test ./...` and was run for
+real via `sudo -E go test ./engine/... -run TestExecuteDecommission` to prove both the
+reproduction and the fix.
+
+**Fixes:**
+- `cleanDanglingFstabEntries`/`fstabDeviceExists`: after the partition delete/grow/resize,
+  scans `/etc/fstab` and comments out any entry (`UUID=`, `PARTUUID=`, `LABEL=`, or a raw
+  `/dev/...` path) that no longer resolves to a real device — catching both the deleted
+  partition and any swap slice consumed at install time, without needing to have tracked
+  which UUID belonged to which beforehand. **Does not recreate a lost swap partition** —
+  this tool doesn't currently record the original slice's size/UUID anywhere, and
+  synthesizing one from scratch at revert time was judged out of scope for this session;
+  documented as a known limitation rather than silently left undone.
+- `resolveDeviceByPartUUID` + `verifyLinuxTargetBeforeDestruction` (mirroring the existing
+  macOS pattern): re-resolves the live device by `TargetPartUUID` before touching anything,
+  and aborts with a clear "safety abort" error if the device's actual filesystem type or
+  size doesn't match what was recorded at install time — **proven** by
+  `TestExecuteDecommission_AbortsOnFilesystemMismatch`, confirmed failing before the fix
+  (temporarily disabled the check, re-ran under root, the wrong-type partition got deleted
+  anyway) and passing after.
+- Moved `resolveBootEntryByEFIDir` from a private copy in `ui/model.go` to exported
+  `engine.ResolveBootEntryByEFIDir` (a cross-platform file, not linux-only — `efibootmgr`
+  simply fails to start on other OSes and the function already handles that gracefully) so
+  both the TUI and the new headless `--revert` share one implementation.
+- Fixed a stale reference found during this investigation: `ui/model.go`'s
+  `triggerTargetedRevertCmd` only removed the legacy repo-relative
+  `orchestrator_installed_os.json` after a revert — follow-up F12 moved that file's default
+  location outside the repo, so this now also removes it from
+  `filepath.Dir(safety.DefaultJournalPath())`.
+- Added `--revert`/`--keep-slice` to headless mode (`cmd/orchestrator/revert.go`): discovers
+  secondary OSes via the identical `engine.DiscoverSecondaryOSes()` the TUI uses, requires
+  **exactly one** unambiguous candidate (refuses and lists all candidates rather than
+  guessing which to revert — this is destructive), and calls the identical
+  `engine.ExecuteDecommissionWithOptions`. Requires `--yes`.
+
+**Tests:** `engine/revert_linux_loopimage_test.go` (2 tests, root-gated, run for real this
+session): core restore (partition removed, host grown + resized, **file checksums
+byte-for-byte identical before/after**, GRUB regen invoked against scratch paths, dangling
+fstab entry cleaned up, live fstab entry preserved) and the filesystem-mismatch safety
+abort. `cmd/orchestrator/revert_test.go` (4 tests): guest selection (none/one/multiple-
+refuses) and the `--yes` gate.
+
+**Not done (explicitly out of scope, documented here rather than silently skipped):**
+- Swap partition recreation (see above — needs a schema change to record the original
+  slice's size/UUID at install time, not done in this session).
+- `findActiveESPMount`/`efibootmgr` remain hardcoded to real system paths — not made
+  injectable, so the ESP-file-removal and NVRAM-boot-entry-removal code paths have **no**
+  automated test coverage at all (only exercised by passing empty values that skip them
+  entirely). This is a real, acknowledged gap, not a passed test.
 - [ ] 17. transient_resize.sh not created — reproduction + fix — Not started
 - [ ] 18. Deploy payload ISO picker — reproduction — Not started
 - [ ] 19. Fix ISO/image picker — Not started

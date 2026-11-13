@@ -287,6 +287,23 @@ func ExecuteRealReversionWithProgress(p RealRevertParams, logFn func(string), pr
 	return ExecuteDecommissionWithOptions(p, false, logFn, progressFn)
 }
 
+// grubCustomPath, grubDropinPaths, updateGrubFunc, and fstabPath are
+// injectable (vars, not consts/inline calls) so a test can redirect
+// ExecuteDecommissionWithOptions's GRUB-regeneration and fstab-cleanup
+// steps to a scratch directory instead of the real /etc/grub.d,
+// /etc/default/grub.d, and /etc/fstab. Bug F's investigation found this
+// function had NO testability isolation at all — every real-system side
+// effect (these, plus findActiveESPMount and efibootmgr, which remain
+// hardcoded) was a literal system path, making it unsafe to exercise
+// end-to-end in an automated test without this.
+var grubCustomPath = "/etc/grub.d/40_custom"
+var grubDropinPaths = []string{
+	"/etc/default/grub.d/50-dualboot-menu.cfg",
+	"/etc/default/grub.d/99-orchestrator-prober.cfg",
+}
+var updateGrubFunc = func() error { return exec.Command("update-grub").Run() }
+var fstabPath = "/etc/fstab"
+
 func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn func(string), progressFn func(step string, percent float64)) error {
 	if logFn == nil {
 		logFn = func(string) {}
@@ -302,6 +319,34 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 	}
 
 	targetDev := JoinDiskAndPartition(p.DiskDevice, p.PartitionNum)
+
+	// Re-resolve the live device by its stable PARTUUID when available,
+	// since device letters/numbers can shift between install and revert
+	// time (a USB plugged in a different order, an NVMe enumeration
+	// change, ...). Bug F's investigation found this was never done on
+	// Linux (unlike revert_darwin.go's equivalent path), so a shifted
+	// device naming would have made this function blindly trust a stale
+	// DiskDevice/PartitionNum and risk deleting/resizing the wrong
+	// partition on the wrong disk.
+	if p.TargetPartUUID != "" {
+		if liveDev, resolveErr := resolveDeviceByPartUUID(p.TargetPartUUID); resolveErr == nil {
+			targetDev = liveDev
+			if disk, num, splitErr := SplitDiskAndPartition(liveDev); splitErr == nil {
+				p.DiskDevice = disk
+				p.PartitionNum = num
+			}
+			logFn(fmt.Sprintf("=> Resolved target by PARTUUID -> %s", targetDev))
+		} else {
+			logFn(fmt.Sprintf("=> PARTUUID resolve note: %s (falling back to stored device path)", resolveErr.Error()))
+		}
+	}
+
+	// Last safety gate right before anything destructive: confirm the
+	// device about to be deleted/resized still matches what was recorded
+	// at install time.
+	if verifyErr := verifyLinuxTargetBeforeDestruction(targetDev, p.ExpectedFSType, p.ExpectedSizeBytes); verifyErr != nil {
+		return verifyErr
+	}
 
 	// 1. Force unmount target filesystem
 	logFn(fmt.Sprintf("=> Force unmounting target filesystem on %s...", targetDev))
@@ -414,8 +459,9 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 
 	// 6. Clean Custom GRUB Stanzas & Regenerate GRUB
 	progressFn("=> [REVERT 85%] Synchronizing bootloader and refreshing host GRUB...", 0.85)
-	_ = os.Remove("/etc/default/grub.d/50-dualboot-menu.cfg")
-	_ = os.Remove("/etc/default/grub.d/99-orchestrator-prober.cfg")
+	for _, dropin := range grubDropinPaths {
+		_ = os.Remove(dropin)
+	}
 
 	defaultCustomGrub := `#!/bin/sh
 exec tail -n +3 $0
@@ -423,11 +469,32 @@ exec tail -n +3 $0
 # menu entries you want to add after this comment. Be careful not to change
 # the 'exec tail' line above.
 `
-	_ = os.WriteFile("/etc/grub.d/40_custom", []byte(defaultCustomGrub), 0755)
-	_ = exec.Command("chmod", "+x", "/etc/grub.d/40_custom").Run()
+	_ = os.WriteFile(grubCustomPath, []byte(defaultCustomGrub), 0755)
+	_ = exec.Command("chmod", "+x", grubCustomPath).Run()
 
 	logFn("=> Refreshing host GRUB configuration...")
-	_ = exec.Command("update-grub").Run()
+	if err := updateGrubFunc(); err != nil {
+		logFn(fmt.Sprintf("=> [WARNING] update-grub note: %v", err))
+	}
+
+	// 6b. fstab cleanup (audit bug F): if the deleted partition — or any
+	// swap slice converted into it during install — is still referenced in
+	// /etc/fstab by UUID or device path, that entry now points at nothing.
+	// A dangling fstab entry for a filesystem can delay boot (systemd waits
+	// on it) and a dangling swap entry fails silently; a missing root entry
+	// is more serious. This does not attempt to recreate a swap slice that
+	// install-time conversion may have consumed (this tool does not
+	// currently record enough about the original layout — size, UUID — to
+	// safely rebuild one; see PROGRESS.md's bug F entry), but it does stop
+	// the host's own fstab from referencing a partition that no longer
+	// exists after this revert.
+	if !keepSlice {
+		if changed, removed, err := cleanDanglingFstabEntries(fstabPath); err != nil {
+			logFn(fmt.Sprintf("=> [WARNING] fstab cleanup note: %v", err))
+		} else if changed {
+			logFn(fmt.Sprintf("=> Commented out %d dangling /etc/fstab entr(ies) referencing the removed partition: %s", len(removed), strings.Join(removed, ", ")))
+		}
+	}
 
 	// 7. Purge Journal State Files — both the current default location
 	// (follow-up F12) and the legacy repo-relative paths.
@@ -453,6 +520,122 @@ func partitionExists(diskDevice, partNum string) bool {
 	partName := filepath.Base(partPath)
 	_, err := os.Stat(filepath.Join("/sys/class/block", partName))
 	return err == nil
+}
+
+// cleanDanglingFstabEntries comments out any non-comment, non-blank
+// /etc/fstab line whose device specification (UUID=, PARTUUID=, LABEL=, or
+// a raw /dev/... path) no longer resolves to a real block device. This
+// catches both the just-deleted partition itself and any swap slice that
+// install-time partition conversion consumed, without needing to have
+// tracked which UUID belonged to which beforehand — the check is a
+// generic "does this still exist", run after the deletion/grow/resize
+// steps above have already happened.
+func cleanDanglingFstabEntries(path string) (changed bool, removedSpecs []string, err error) {
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return false, nil, nil
+		}
+		return false, nil, readErr
+	}
+
+	lines := strings.Split(string(data), "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			out = append(out, line)
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		spec := fields[0]
+		if fstabDeviceExists(spec) {
+			out = append(out, line)
+			continue
+		}
+		changed = true
+		removedSpecs = append(removedSpecs, spec)
+		out = append(out, "# removed by boot-orchestrator revert (device no longer exists): "+line)
+	}
+
+	if !changed {
+		return false, nil, nil
+	}
+	return true, removedSpecs, os.WriteFile(path, []byte(strings.Join(out, "\n")), 0644)
+}
+
+// fstabDeviceExists reports whether spec (an /etc/fstab first-field device
+// specification) still resolves to a real block device. Non-block-device
+// specs (tmpfs, swap files, network mounts, "none", cgroup2, ...) are not
+// this function's concern and are always reported as "existing" so they're
+// never touched.
+func fstabDeviceExists(spec string) bool {
+	switch {
+	case strings.HasPrefix(spec, "UUID="):
+		out, err := exec.Command("blkid", "-U", strings.TrimPrefix(spec, "UUID=")).Output()
+		return err == nil && strings.TrimSpace(string(out)) != ""
+	case strings.HasPrefix(spec, "PARTUUID="):
+		out, err := exec.Command("blkid", "-t", "PARTUUID="+strings.TrimPrefix(spec, "PARTUUID="), "-o", "device").Output()
+		return err == nil && strings.TrimSpace(string(out)) != ""
+	case strings.HasPrefix(spec, "LABEL="):
+		out, err := exec.Command("blkid", "-L", strings.TrimPrefix(spec, "LABEL=")).Output()
+		return err == nil && strings.TrimSpace(string(out)) != ""
+	case strings.HasPrefix(spec, "/dev/"):
+		_, statErr := os.Stat(spec)
+		return statErr == nil
+	default:
+		return true
+	}
+}
+
+// resolveDeviceByPartUUID re-resolves the live /dev path for a partition
+// by its stable PARTUUID. Mirrors revert_darwin.go's
+// resolveDeviceByPartitionUUID.
+func resolveDeviceByPartUUID(partUUID string) (string, error) {
+	if partUUID == "" {
+		return "", fmt.Errorf("no partition UUID recorded — cannot safely resolve device")
+	}
+	out, err := exec.Command("blkid", "-t", "PARTUUID="+partUUID, "-o", "device").Output()
+	if err != nil || strings.TrimSpace(string(out)) == "" {
+		return "", fmt.Errorf("no live partition currently has PARTUUID %s (drive may be unplugged, or already reverted)", partUUID)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// verifyLinuxTargetBeforeDestruction mirrors revert_darwin.go's
+// verifyDarwinTargetBeforeDestruction: a last safety gate right before any
+// destructive operation, confirming devicePath still matches what the
+// install-time record recorded (filesystem type, and size within a
+// generous margin for sector/alignment rounding) before anything is
+// deleted or resized. A failed query (can't read blkid/size) does not
+// block — it can't verify, so it doesn't invent a reason to abort — but an
+// actual mismatch does.
+func verifyLinuxTargetBeforeDestruction(devicePath, expectedFSType string, expectedSizeBytes int64) error {
+	if expectedFSType == "" && expectedSizeBytes == 0 {
+		return nil
+	}
+	if expectedFSType != "" {
+		out, err := exec.Command("blkid", "-s", "TYPE", "-o", "value", devicePath).Output()
+		if err == nil {
+			actual := strings.ToLower(strings.TrimSpace(string(out)))
+			if actual != "" && actual != strings.ToLower(expectedFSType) {
+				return fmt.Errorf("safety abort: %s has filesystem %q but the install record recorded %q — refusing to delete", devicePath, actual, expectedFSType)
+			}
+		}
+	}
+	if expectedSizeBytes > 0 {
+		if actualSize, err := blockDeviceSizeBytes(devicePath); err == nil && actualSize > 0 {
+			diff := actualSize - expectedSizeBytes
+			if diff < 0 {
+				diff = -diff
+			}
+			const marginBytes = 64 * 1024 * 1024 // 64MiB: sector/alignment rounding tolerance
+			if diff > marginBytes {
+				return fmt.Errorf("safety abort: %s is %d bytes but the install record recorded %d bytes (diff %d exceeds the %d byte margin) — refusing to delete", devicePath, actualSize, expectedSizeBytes, diff, marginBytes)
+			}
+		}
+	}
+	return nil
 }
 
 func isUEFIMode() bool {

@@ -314,30 +314,9 @@ func listenForSCPProgress(ch chan scpProgressMsg) tea.Cmd {
 	}
 }
 
-func resolveBootEntryByEFIDir(efiDir string) string {
-	if efiDir == "" {
-		return ""
-	}
-	out, err := exec.Command("efibootmgr").Output()
-	if err != nil {
-		return ""
-	}
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
-		if strings.Contains(strings.ToLower(line), strings.ToLower(efiDir)) && strings.HasPrefix(line, "Boot") {
-			parts := strings.Fields(line)
-			if len(parts) > 0 {
-				raw := strings.TrimPrefix(parts[0], "Boot")
-				return strings.TrimSuffix(raw, "*")
-			}
-		}
-	}
-	return ""
-}
-
 func triggerTargetedRevertCmd(guest engine.DetectedGuestOS, keepSlice bool, ch chan provisionStepMsg) tea.Cmd {
 	return func() tea.Msg {
-		nvramEntry := resolveBootEntryByEFIDir(guest.EFIDirName)
+		nvramEntry := engine.ResolveBootEntryByEFIDir(guest.EFIDirName)
 
 		params := engine.RealRevertParams{
 			DiskDevice:        guest.DiskPath,
@@ -359,7 +338,12 @@ func triggerTargetedRevertCmd(guest engine.DetectedGuestOS, keepSlice bool, ch c
 			}
 		})
 
+		// Follow-up F12 moved the installed-OS record out of the repo
+		// directory by default; purge both the current default location
+		// and the legacy repo-relative path so a completed revert doesn't
+		// leave either behind.
 		_ = os.Remove("orchestrator_installed_os.json")
+		_ = os.Remove(filepath.Join(filepath.Dir(safety.DefaultJournalPath()), "orchestrator_installed_os.json"))
 
 		time.Sleep(500 * time.Millisecond)
 		return revertDoneMsg{err: revertErr}
