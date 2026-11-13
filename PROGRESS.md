@@ -661,8 +661,51 @@ and retry, instead of silently writing to the wrong filesystem and reporting suc
 rejected; the positive case uses a **real** tmpfs mount (RAM-backed, never touches any real
 disk, created/torn down via passwordless `sudo` and skipped cleanly if unavailable) to prove
 this isn't just "always returns an error" — a genuinely mounted filesystem is accepted.
-- [ ] 18. Deploy payload ISO picker — reproduction — Not started
-- [ ] 19. Fix ISO/image picker — Not started
+### H. "Deploy payload" ISO picker browses /root under sudo — Done (commit TBD)
+- [x] 18. Deploy payload ISO picker — reproduction — Done, see below.
+- [x] 19. Fix ISO/image picker — Done, see below.
+
+**Root cause (`engine/file_dialog.go` `GetRealUserHome`), confirmed by code reading (the
+literal question asked — "does it browse /root instead of the invoking user's home" — was
+already answered "no, not /root specifically" since the function explicitly excludes
+`/root`; the REAL bug is one step more subtle):** the function **guessed** the invoking
+user's home as `filepath.Join("/home", sudoUser)` instead of looking it up authoritatively.
+That guess is right for the common default layout, but wrong for any account whose home
+isn't literally at `/home/<username>` (a custom `useradd -d`, an NSS/LDAP-provided home
+elsewhere). When the guess missed, the function fell through to `os.UserHomeDir()` — which,
+running under `sudo`, resolves to **root's own home** (correctly excluded) — and then to a
+hardcoded `"/home/kali"` fallback that was clearly a leftover from this project's own
+development/testing environment, not something meaningful for any other user, and finally
+to `"/"` (the filesystem root) if even that didn't exist either: a surprising, unhelpful
+place for an ISO/image picker to land for any invoking user whose setup doesn't happen to
+match the exact default.
+
+**Fix:** resolves via `os/user.Lookup` (through an injectable `userLookupFunc` var, so a
+test can simulate a custom-home account without creating/deleting a real system user) —
+the real passwd/NSS database entry for `SUDO_USER`, authoritative rather than a guessed
+path pattern. Removed the hardcoded `"/home/kali"` fallback entirely.
+
+**Both selection modes, per the task's explicit request:**
+- **Interactive directory browsing** (`ListDirectoryContents` with an empty path — what the
+  TUI's picker screen starts at): now resolves through the fixed `GetRealUserHome`.
+  `TestListDirectoryContents_UsesRealUserHomeNotRoot` proves no listed entry is rooted
+  under `/root` when `SUDO_USER` is set.
+- **Direct ISO/image path selection** (the `--iso`/`--iso-path` CLI flow, or a manually
+  entered path): confirmed by code inspection and
+  `TestListDirectoryContents_DirectISOSelectionBypassesHomeResolution` to never consult
+  `GetRealUserHome`/`SUDO_USER` at all — `ListDirectoryContents` only substitutes the real
+  home for an empty or literal `"/root"` path, so an explicit path is always used exactly
+  as given, independent of this bug.
+
+**Tests (`engine/file_dialog_test.go`):** `GetRealUserHome` resolves to the real current
+user's actual passwd-database home (not a guess) when used as `SUDO_USER`; never returns
+`/root` when `SUDO_USER` is set; **the precise regression** —
+`TestGetRealUserHome_UsesLookupHomeNotGuessedPath` — simulates (via the injectable lookup,
+no real `useradd`) an account whose real home is deliberately *not* under `/home/<name>`
+and proves the resolved path is the looked-up one, not the guessed one; falls back safely
+(no fabricated path) for a `SUDO_USER` naming an account that doesn't exist at all; plus
+the two `ListDirectoryContents` tests above and an `IsSupportedPayload` extension-matching
+table test.
 
 **CHECKPOINT 2:** not reached
 
