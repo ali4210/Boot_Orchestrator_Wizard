@@ -335,6 +335,81 @@ func TestIsLikelyLiveRootDisk(t *testing.T) {
 	}
 }
 
+// TestIsLikelyLiveRootDisk_DoesNotMatchOnTextualPrefixAlone is the
+// regression test for follow-up F8: the previous implementation matched
+// any rootSrc with diskDevice as a string prefix, so diskDevice="/dev/sda"
+// would wrongly match a root mounted on the entirely different disk
+// "/dev/sdaa" (and diskDevice="/dev/sda1" would wrongly match the
+// different partition "/dev/sda12"). Matching must now be exact, or via a
+// genuine parent-disk relationship.
+func TestIsLikelyLiveRootDisk_DoesNotMatchOnTextualPrefixAlone(t *testing.T) {
+	fakeMounts := filepath.Join(t.TempDir(), "mounts")
+	content := "/dev/sdaa1 / ext4 rw,relatime 0 0\n"
+	if err := os.WriteFile(fakeMounts, []byte(content), 0644); err != nil {
+		t.Fatalf("writing fake /proc/mounts: %v", err)
+	}
+	origMounts := procMountsPath
+	t.Cleanup(func() { procMountsPath = origMounts })
+	procMountsPath = fakeMounts
+
+	if isLikelyLiveRootDisk("/dev/sda") {
+		t.Fatalf("expected /dev/sda to NOT match a root mounted on the unrelated disk /dev/sdaa (sdaa1's parent disk is sdaa, not sda)")
+	}
+
+	// Sanity: the same fixture genuinely does match its real parent disk.
+	if !isLikelyLiveRootDisk("/dev/sdaa") {
+		t.Fatalf("expected /dev/sdaa to match its own partition /dev/sdaa1")
+	}
+}
+
+// TestIsBlockDevice_RegularFileNamedLikeADiskIsRejected is the regression
+// test for follow-up F8: a plain regular file (not a device node at all),
+// even if named exactly like a disk ("sda"), must never be treated as a
+// block device.
+func TestIsBlockDevice_RegularFileNamedLikeADiskIsRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sda")
+	if err := os.WriteFile(path, []byte("not a disk"), 0644); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+	if isBlockDevice(path) {
+		t.Fatalf("expected a regular file named 'sda' to be rejected")
+	}
+}
+
+// TestIsBlockDevice_ByIDSymlinkToRealBlockDeviceIsAccepted proves
+// isBlockDevice resolves symlinks (as /dev/disk/by-id/... entries are)
+// before checking the device-type bits, using /dev/loop0 — a real block
+// device already present on any Linux system with the loop module loaded
+// (this project's own prescribed safe-testing mechanism) — as the
+// resolution target. Read-only: never opens, mounts, or writes to it.
+func TestIsBlockDevice_ByIDSymlinkToRealBlockDeviceIsAccepted(t *testing.T) {
+	const realBlockDevice = "/dev/loop0"
+	if fi, err := os.Stat(realBlockDevice); err != nil || fi.Mode()&os.ModeDevice == 0 {
+		t.Skipf("%s not available as a block device on this machine, skipping", realBlockDevice)
+	}
+
+	byIDSymlink := filepath.Join(t.TempDir(), "by-id-fake-disk")
+	if err := os.Symlink(realBlockDevice, byIDSymlink); err != nil {
+		t.Fatalf("creating fake by-id symlink: %v", err)
+	}
+
+	if !isBlockDevice(byIDSymlink) {
+		t.Fatalf("expected a symlink resolving to a real block device (%s) to be accepted", realBlockDevice)
+	}
+}
+
+// TestIsBlockDevice_CharDeviceIsRejected proves the ModeCharDevice
+// exclusion works: /dev/null is a real device node (ModeDevice is set)
+// but a character device, not a block device, and must be rejected.
+func TestIsBlockDevice_CharDeviceIsRejected(t *testing.T) {
+	if fi, err := os.Stat("/dev/null"); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		t.Skip("/dev/null is not available as a character device on this machine, skipping")
+	}
+	if isBlockDevice("/dev/null") {
+		t.Fatalf("expected /dev/null (a character device) to be rejected")
+	}
+}
+
 // TestFindAutounattendNear_PrefersAlongsideThenParent proves the lookup
 // checks next to the executable first, then the executable's parent
 // directory — matching this project's own bin/ + discovery/ layout — and

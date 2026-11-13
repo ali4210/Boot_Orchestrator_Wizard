@@ -80,16 +80,33 @@ func resolveHeadlessTarget(targetDisk, activeRootDisk, activeHostNum, activeTarg
 }
 
 // isBlockDevice reports whether path names a real block device (disk or
-// partition), via the same /sys/class/block source of truth
-// engine/revert_linux.go's partitionExists uses. A var (not a plain func)
-// so tests can simulate "is/is not a block device" without a real one on
-// the test machine.
+// partition). Follow-up F8: this used to check for a same-named entry
+// under /sys/class/block by basename alone, which neither resolves
+// symlinks (a /dev/disk/by-id/... path's basename is never a kernel block
+// device name, so it always failed closed there — safe, but useless for
+// the common case of a by-id/by-path alias) nor actually inspects the
+// target path itself (a regular file that happened to be named e.g. "sda"
+// right next to a real disk would have been indistinguishable by basename
+// alone in a differently-laid-out directory). Now resolves symlinks first,
+// then stats the resolved path directly and requires the kernel's own
+// device-type bits: os.ModeDevice set (a device node of some kind) AND
+// os.ModeCharDevice NOT set (device nodes are either block or character;
+// this must be block). A var (not a plain func) so tests can simulate
+// "is/is not a block device" without a real one on the test machine.
 var isBlockDevice = func(path string) bool {
 	if path == "" {
 		return false
 	}
-	_, err := os.Stat(filepath.Join("/sys/class/block", filepath.Base(path)))
-	return err == nil
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	fi, err := os.Stat(resolved)
+	if err != nil {
+		return false
+	}
+	mode := fi.Mode()
+	return mode&os.ModeDevice != 0 && mode&os.ModeCharDevice == 0
 }
 
 // procMountsPath is /proc/mounts, overridable in tests.
@@ -103,6 +120,15 @@ var procMountsPath = "/proc/mounts"
 // returning "" instead of erroring), resolveHeadlessTarget would wrongly
 // resolve the live root disk as "single-boot" — wiping the system this
 // tool is currently running on. This catches that case independently.
+//
+// Follow-up F8: this used to accept any rootSrc with diskDevice as a
+// string prefix, which wrongly matched e.g. diskDevice="/dev/sda1" against
+// rootSrc="/dev/sda12" (a different partition) purely because
+// "/dev/sda1" is a textual prefix of "/dev/sda12". Matching is now exact
+// (rootSrc == diskDevice) or via engine.SplitDiskAndPartition's structural
+// parse of rootSrc's own parent disk — so "sda" matches "sda1" or
+// "nvme0n1p2"'s parent, but never "sdaa" (whose parent disk parses as
+// "sdaa", not "sda").
 func isLikelyLiveRootDisk(diskDevice string) bool {
 	if diskDevice == "" {
 		return false
@@ -120,7 +146,10 @@ func isLikelyLiveRootDisk(diskDevice string) bool {
 		if resolved, evalErr := filepath.EvalSymlinks(rootSrc); evalErr == nil {
 			rootSrc = resolved
 		}
-		if rootSrc == diskDevice || strings.HasPrefix(rootSrc, diskDevice) {
+		if rootSrc == diskDevice {
+			return true
+		}
+		if parentDisk, _, splitErr := engine.SplitDiskAndPartition(rootSrc); splitErr == nil && parentDisk == diskDevice {
 			return true
 		}
 	}

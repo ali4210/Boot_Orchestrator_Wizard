@@ -117,7 +117,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       `os.Chown` call path, not just the parsing logic.
 - [x] F7. PreflightStorageSafetyCheck: skip ONLY blkid exit code 2; any other blkid/lsblk
       error aborts (fail closed); use `blkid -p`; tests for exit 4, missing binary, exit 2
-      — Done (commit TBD). Root cause (`engine/preflight_safety.go`
+      — Done (`567c706`). Root cause (`engine/preflight_safety.go`
       `detectDangerousStorage`): `if err != nil { continue }` treated ANY blkid error —
       wrong exit code, a permission error, an I/O error, or the binary being completely
       missing — as "couldn't classify, assume not dangerous, keep going": fail-open, the
@@ -134,6 +134,25 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       re-verified against the new fail-closed logic), new exit code 4 aborts, new missing
       binary (`exec.ErrNotFound`) aborts — both asserting a non-nil error, the exit-4 case
       also asserting the error names the exit code.
+- [x] F8. headless `isBlockDevice`: EvalSymlinks first, then os.Stat + require ModeDevice
+      without ModeCharDevice; tighten `isLikelyLiveRootDisk` to exact device or
+      device+partition-suffix only — Done (commit TBD). `cmd/orchestrator/headless.go`:
+      `isBlockDevice` no longer infers from a `/sys/class/block/<basename>` lookup (which
+      never resolved symlinks like `/dev/disk/by-id/...`, and wasn't checking the target
+      path's own type at all); now `filepath.EvalSymlinks` then `os.Stat`s the resolved
+      path and requires `fi.Mode()&os.ModeDevice != 0 && fi.Mode()&os.ModeCharDevice == 0`
+      — a genuine block device node, not a char device, not a regular file. Root cause for
+      the `isLikelyLiveRootDisk` half: `rootSrc == diskDevice || strings.HasPrefix(rootSrc,
+      diskDevice)` — the `HasPrefix` let `diskDevice="/dev/sda"` match a root mounted on
+      the textually-similar but unrelated `/dev/sdaa`, and `diskDevice="/dev/sda1"` match
+      the different partition `/dev/sda12`. Rewrote to match exactly, or via
+      `engine.SplitDiskAndPartition(rootSrc)`'s structural parse of `rootSrc`'s real parent
+      disk — `sda` now matches `sda1`/`nvme0n1p2`'s true parent disk, never `sdaa`. Tests
+      (`cmd/orchestrator/headless_test.go`): a regular file literally named `sda` is
+      rejected; a symlink resolving to the real block device `/dev/loop0` (this project's
+      own prescribed safe-testing device, read-only — never opened/mounted/written) is
+      accepted; `/dev/null` (a real char device) is rejected; `sda` vs `sdaa` no longer
+      false-matches (with a sanity check that `sdaa` still matches its own partition).
 
 ## Phase 1: Hardening and testability
 
