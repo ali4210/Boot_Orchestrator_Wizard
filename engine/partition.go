@@ -6,6 +6,7 @@ package engine
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -84,8 +85,30 @@ func ensureMtabSymlink() error {
 // via findmnt. Mirrors the existing convention elsewhere in this file of
 // treating a findmnt error as "not mounted" rather than a hard failure.
 func isPartitionMounted(devPath string) bool {
-	out, _ := cmdRunner.Run("findmnt", "-n", "-o", "TARGET", devPath)
+	out, _ := cmdRunner.RunStdout("findmnt", "-n", "-o", "TARGET", devPath)
 	return strings.TrimSpace(string(out)) != ""
+}
+
+// exitCodeOf extracts a command's process exit code from the error returned
+// by Runner.Run. execRunner's real implementation returns exec.Command's
+// error unwrapped, which is a *exec.ExitError on any non-zero exit, so this
+// works for production errors with no extra plumbing; tests can produce a
+// genuine *exec.ExitError at a chosen exit code via a real `sh -c "exit N"`
+// subprocess (see fakeExitError in the test files) rather than needing a
+// custom error type.
+//
+// Returns 0 if err is nil, or -1 if err is non-nil but not an *exec.ExitError
+// (e.g. the binary could not even be started) — i.e. "couldn't determine the
+// exit code," which callers should treat as a failure.
+func exitCodeOf(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
 }
 
 func CheckUnallocatedHeadroom(diskDevice string) (uint64, error) {
@@ -309,6 +332,10 @@ func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint6
 		part1Dev := JoinDiskAndPartition(diskPath, "1")
 		logFn(fmt.Sprintf("=> [SHRINK ENGINE] Disk %s is fully allocated. Safely shrinking %s...", diskPath, part1Dev))
 
+		// All non-destructive preflight checks run before anything that
+		// mutates the disk (the `parted rm 2` below), so a failed check
+		// aborts cleanly with partition 2 (and everything else) untouched.
+
 		if err := ensureMtabSymlink(); err != nil {
 			return nil, fmt.Errorf("ensuring /etc/mtab for resize2fs mount detection: %w", err)
 		}
@@ -317,12 +344,14 @@ func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint6
 			return nil, fmt.Errorf("refusing to shrink %s: it is still mounted (boot from a live environment to shrink the active root partition)", part1Dev)
 		}
 
-		_, _ = cmdRunner.Run("parted", "-s", diskPath, "rm", "2")
-		_, _ = cmdRunner.Run("udevadm", "settle", "--timeout=5")
-
 		logFn(fmt.Sprintf("=> [SHRINK ENGINE] Running e2fsck on %s...", part1Dev))
-		if out, err := cmdRunner.Run("e2fsck", "-fy", part1Dev); err != nil {
-			return nil, fmt.Errorf("pre-resize e2fsck failed on %s, aborting shrink: %w\n%s", part1Dev, err, out)
+		out, err := cmdRunner.Run("e2fsck", "-fy", part1Dev)
+		// e2fsck exit codes: 0 = no errors, 1 = errors were found and
+		// corrected (safe to continue). 2+ (or a code we couldn't even
+		// determine, e.g. the binary failed to start) means it found
+		// problems it could not fix, or something worse — abort.
+		if code := exitCodeOf(err); code == -1 || code >= 2 {
+			return nil, fmt.Errorf("pre-resize e2fsck failed on %s (exit code %d), aborting shrink: %w\n%s", part1Dev, code, err, out)
 		}
 
 		totalPartSectors := partitions[0].end - partitions[0].start
@@ -333,12 +362,17 @@ func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint6
 		newPart1Sectors := totalPartSectors - targetSectors
 		newPart1GiB := (newPart1Sectors * 512) / (1024 * 1024 * 1024)
 
-		if minBytes, _, minErr := MinimumExt4Size(part1Dev); minErr == nil {
-			newSizeBytes := newPart1GiB * 1024 * 1024 * 1024
-			if newSizeBytes < minBytes {
-				return nil, fmt.Errorf("target size %dGiB is smaller than %s's minimum shrinkable filesystem size (%d bytes); aborting shrink", newPart1GiB, part1Dev, minBytes)
-			}
+		minBytes, _, minErr := MinimumExt4Size(part1Dev)
+		if minErr != nil {
+			return nil, fmt.Errorf("determining minimum shrinkable size for %s, aborting shrink: %w", part1Dev, minErr)
 		}
+		newSizeBytes := newPart1GiB * 1024 * 1024 * 1024
+		if newSizeBytes < minBytes {
+			return nil, fmt.Errorf("target size %dGiB is smaller than %s's minimum shrinkable filesystem size (%d bytes); aborting shrink", newPart1GiB, part1Dev, minBytes)
+		}
+
+		_, _ = cmdRunner.Run("parted", "-s", diskPath, "rm", "2")
+		_, _ = cmdRunner.Run("udevadm", "settle", "--timeout=5")
 
 		logFn(fmt.Sprintf("=> [SHRINK ENGINE] Resizing filesystem on %s to %d GiB...", part1Dev, newPart1GiB))
 		if outResize, errResize := cmdRunner.Run("resize2fs", part1Dev, fmt.Sprintf("%dG", newPart1GiB)); errResize != nil {
@@ -449,15 +483,16 @@ func PlanShrink(partitionPath string, safetyMarginBytes uint64) (*ShrinkPlan, er
 func ApplyShrink(plan *ShrinkPlan) error {
 	path := plan.Filesystem.PartitionPath
 
-	mountCheck, _ := cmdRunner.Run("findmnt", "-n", "-o", "TARGET", path)
+	mountCheck, _ := cmdRunner.RunStdout("findmnt", "-n", "-o", "TARGET", path)
 	isMounted := strings.TrimSpace(string(mountCheck)) != ""
 
 	if isMounted {
 		return fmt.Errorf("active filesystem %s is mounted at %s (kernel blocks online ext4 shrink/fsck). Boot via Live USB to shrink active root partition", path, strings.TrimSpace(string(mountCheck)))
 	}
 
-	if out, err := cmdRunner.Run("e2fsck", "-f", "-y", path); err != nil {
-		return fmt.Errorf("pre-resize e2fsck failed on %s: %w\n%s", path, err, out)
+	preOut, preErr := cmdRunner.Run("e2fsck", "-f", "-y", path)
+	if code := exitCodeOf(preErr); code == -1 || code >= 2 {
+		return fmt.Errorf("pre-resize e2fsck failed on %s (exit code %d): %w\n%s", path, code, preErr, preOut)
 	}
 
 	sizeArg := fmt.Sprintf("%dK", plan.TargetNewSizeBytes/1024)
@@ -465,8 +500,9 @@ func ApplyShrink(plan *ShrinkPlan) error {
 		return fmt.Errorf("resize2fs %s %s failed: %w\n%s", path, sizeArg, err, out)
 	}
 
-	if out, err := cmdRunner.Run("e2fsck", "-f", "-y", path); err != nil {
-		return fmt.Errorf("post-resize e2fsck verification failed on %s: %w\n%s", path, err, out)
+	postOut, postErr := cmdRunner.Run("e2fsck", "-f", "-y", path)
+	if code := exitCodeOf(postErr); code == -1 || code >= 2 {
+		return fmt.Errorf("post-resize e2fsck verification failed on %s (exit code %d): %w\n%s", path, code, postErr, postOut)
 	}
 
 	return nil
@@ -632,7 +668,7 @@ func blockDeviceSizeBytes(diskPath string) (int64, error) {
 }
 
 func readDiskRegion(diskPath string, offset, length int64) ([]byte, error) {
-	out, err := cmdRunner.Run("dd",
+	out, err := cmdRunner.RunStdout("dd",
 		fmt.Sprintf("if=%s", diskPath),
 		"bs=512",
 		fmt.Sprintf("skip=%d", offset/512),
@@ -669,7 +705,7 @@ func writeDiskRegion(diskPath string, offset int64, data []byte) error {
 // type GUID and the parted "esp"/"boot" flag.
 func FindESPPartition(diskPath string) (string, error) {
 	const espTypeGUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
-	out, err := cmdRunner.Run("lsblk", "-n", "-r", "-o", "NAME,PARTTYPE", diskPath)
+	out, err := cmdRunner.RunStdout("lsblk", "-n", "-r", "-o", "NAME,PARTTYPE", diskPath)
 	if err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			fields := strings.Fields(line)
@@ -693,7 +729,7 @@ func FindESPPartition(diskPath string) (string, error) {
 
 	for i := 1; i <= 4; i++ {
 		candidate := JoinDiskAndPartition(diskPath, fmt.Sprintf("%d", i))
-		fsOut, fsErr := cmdRunner.Run("blkid", "-s", "TYPE", "-o", "value", candidate)
+		fsOut, fsErr := cmdRunner.RunStdout("blkid", "-s", "TYPE", "-o", "value", candidate)
 		if fsErr == nil && strings.TrimSpace(string(fsOut)) == "vfat" {
 			probeDir, _ := os.MkdirTemp("", "orch-esp-probe-*")
 			if _, mountErr := cmdRunner.Run("mount", "-o", "ro", candidate, probeDir); mountErr == nil {

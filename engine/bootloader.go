@@ -436,7 +436,7 @@ usermod -aG sudo saleem 2>/dev/null || true
 }
 
 func queryFilesystemType(targetPartition string) string {
-	out, err := cmdRunner.Run("blkid", "-s", "TYPE", "-o", "value", targetPartition)
+	out, err := cmdRunner.RunStdout("blkid", "-s", "TYPE", "-o", "value", targetPartition)
 	if err != nil {
 		return "ext4"
 	}
@@ -444,7 +444,7 @@ func queryFilesystemType(targetPartition string) string {
 }
 
 func queryPartitionUUID(targetPartition string) string {
-	out, err := cmdRunner.Run("blkid", "-s", "UUID", "-o", "value", targetPartition)
+	out, err := cmdRunner.RunStdout("blkid", "-s", "UUID", "-o", "value", targetPartition)
 	if err != nil {
 		return ""
 	}

@@ -11,8 +11,17 @@ import "os/exec"
 // minimal.
 type Runner interface {
 	// Run executes name with args and returns its combined stdout+stderr
-	// output, mirroring exec.Command(...).CombinedOutput().
+	// output, mirroring exec.Command(...).CombinedOutput(). Use this when
+	// the command's own error text is part of what callers want to log or
+	// report (most shrink/format/mount commands).
 	Run(name string, args ...string) ([]byte, error)
+
+	// RunStdout executes name with args and returns only stdout, mirroring
+	// exec.Command(...).Output(). Use this whenever the caller parses the
+	// output as an exact value (a UUID, a filesystem type, a byte count, a
+	// mount target, raw `dd` bytes) rather than displaying it — appending
+	// stderr to that would silently corrupt the parse instead of erroring.
+	RunStdout(name string, args ...string) ([]byte, error)
 }
 
 // execRunner is the real, production Runner backed by exec.Command.
@@ -20,6 +29,10 @@ type execRunner struct{}
 
 func (execRunner) Run(name string, args ...string) ([]byte, error) {
 	return exec.Command(name, args...).CombinedOutput()
+}
+
+func (execRunner) RunStdout(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).Output()
 }
 
 // DefaultRunner is the real command runner used outside of tests.

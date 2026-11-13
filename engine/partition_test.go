@@ -3,12 +3,34 @@ package engine
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"boot-orchestrator/safety"
 )
+
+// fakeExitError returns a genuine *exec.ExitError reporting exit code code,
+// produced by actually running `sh -c "exit N"` — a real, safe, no-op
+// subprocess. Used so mocks can simulate exact exit codes for exitCodeOf
+// without needing a hand-rolled error type. Returns nil for code 0.
+func fakeExitError(code int) error {
+	return exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
+}
+
+// calledPartedRemove reports whether any call in calls was a `parted ... rm
+// ...` invocation (the destructive step that must never run before all
+// preflight checks pass).
+func calledPartedRemove(calls []string) bool {
+	for _, c := range calls {
+		fields := strings.Fields(c)
+		if len(fields) > 0 && fields[0] == "parted" && containsAll(fields, "rm") {
+			return true
+		}
+	}
+	return false
+}
 
 // partedFreeNoHeadroom simulates `parted ... print free` reporting no
 // unallocated space, forcing CarveHardwarePartitionAtBoundary past the
@@ -43,9 +65,9 @@ func withScratchMtab(t *testing.T) string {
 // shrinkMockConfig controls a mockRunner that simulates every command
 // CarveHardwarePartitionAtBoundary's shrink-partition-1 path invokes.
 type shrinkMockConfig struct {
-	mounted       bool // findmnt reports a mountpoint
-	e2fsckFail    bool
-	resize2fsFail bool
+	mounted        bool // findmnt reports a mountpoint
+	e2fsckExitCode int  // 0 = success; e2fsck's real "0=clean,1=corrected,2+=failed" scale
+	resize2fsFail  bool
 }
 
 func newShrinkPathMock(cfg shrinkMockConfig) *mockRunner {
@@ -68,8 +90,8 @@ func newShrinkPathMock(cfg shrinkMockConfig) *mockRunner {
 			}
 			return []byte(""), fmt.Errorf("findmnt: no mount found")
 		case "e2fsck":
-			if cfg.e2fsckFail {
-				return []byte("mock: e2fsck found uncorrectable errors"), fmt.Errorf("e2fsck failed on /dev/sdz1: exit status 4")
+			if cfg.e2fsckExitCode != 0 {
+				return []byte(fmt.Sprintf("mock: e2fsck exited %d", cfg.e2fsckExitCode)), fakeExitError(cfg.e2fsckExitCode)
 			}
 			return []byte(""), nil
 		case "resize2fs":
@@ -200,29 +222,64 @@ func TestCarveHardwarePartitionAtBoundary_PartitionMountedAborts(t *testing.T) {
 			t.Fatalf("expected shrink to abort before running %q, but it ran", c)
 		}
 	}
+	if calledPartedRemove(mock.Calls) {
+		t.Fatalf("expected no destructive `parted ... rm` call when the mounted check fails, calls=%v", mock.Calls)
+	}
 }
 
-// TestCarveHardwarePartitionAtBoundary_E2fsckFailureAborts covers audit
-// 2.2's "e2fsck failure" case: a failing pre-resize e2fsck must abort the
-// shrink instead of being silently ignored.
-func TestCarveHardwarePartitionAtBoundary_E2fsckFailureAborts(t *testing.T) {
+// TestCarveHardwarePartitionAtBoundary_E2fsckExitCode4Aborts covers audit
+// 2.2's "e2fsck failure" case: e2fsck exiting >=2 (here 4: "errors not
+// corrected") must abort the shrink before any destructive step runs,
+// instead of being silently ignored.
+func TestCarveHardwarePartitionAtBoundary_E2fsckExitCode4Aborts(t *testing.T) {
 	withScratchMtab(t)
 	origRunner := cmdRunner
 	t.Cleanup(func() { cmdRunner = origRunner })
-	mock := newShrinkPathMock(shrinkMockConfig{e2fsckFail: true})
+	mock := newShrinkPathMock(shrinkMockConfig{e2fsckExitCode: 4})
 	cmdRunner = mock
 
 	_, err := CarveHardwarePartitionAtBoundary("/dev/sdz", "ext4", 50*1024*1024*1024, nil)
 	if err == nil {
-		t.Fatalf("expected an error when pre-resize e2fsck fails, got nil")
+		t.Fatalf("expected an error when pre-resize e2fsck exits 4, got nil")
 	}
-	if !strings.Contains(err.Error(), "e2fsck") {
-		t.Fatalf("expected an e2fsck failure error, got: %v", err)
+	if !strings.Contains(err.Error(), "e2fsck") || !strings.Contains(err.Error(), "exit code 4") {
+		t.Fatalf("expected an e2fsck exit-code-4 failure error, got: %v", err)
 	}
 	for _, c := range mock.Calls {
 		if strings.HasPrefix(c, "resize2fs ") {
 			t.Fatalf("expected shrink to abort before running resize2fs, but it ran: %q", c)
 		}
+	}
+	if calledPartedRemove(mock.Calls) {
+		t.Fatalf("expected no destructive `parted ... rm` call when e2fsck fails, calls=%v", mock.Calls)
+	}
+}
+
+// TestCarveHardwarePartitionAtBoundary_E2fsckExitCode1Continues covers the
+// other half of audit 2.2's e2fsck handling: exit code 1 ("errors were
+// found and corrected") must be treated as success, not an abort.
+func TestCarveHardwarePartitionAtBoundary_E2fsckExitCode1Continues(t *testing.T) {
+	withScratchMtab(t)
+	origRunner := cmdRunner
+	t.Cleanup(func() { cmdRunner = origRunner })
+	mock := newShrinkPathMock(shrinkMockConfig{e2fsckExitCode: 1})
+	cmdRunner = mock
+
+	// See TestCarveHardwarePartitionAtBoundary_ShrinkSucceeds for why the
+	// downstream "node missing in /dev" error is tolerated here.
+	_, err := CarveHardwarePartitionAtBoundary("/dev/sdz", "ext4", 50*1024*1024*1024, nil)
+	if err != nil && !strings.Contains(err.Error(), "node missing in /dev") {
+		t.Fatalf("expected e2fsck exit code 1 to be treated as success, got unrelated error: %v", err)
+	}
+
+	sawResize := false
+	for _, c := range mock.Calls {
+		if strings.HasPrefix(c, "resize2fs ") && !strings.Contains(c, "-P") {
+			sawResize = true
+		}
+	}
+	if !sawResize {
+		t.Fatalf("expected resize2fs to have been invoked after e2fsck exit code 1, calls=%v", mock.Calls)
 	}
 }
 
@@ -264,5 +321,134 @@ func TestCarveHardwarePartitionAtBoundary_ShrinkSucceeds(t *testing.T) {
 	}
 	if !sawResize {
 		t.Fatalf("expected resize2fs to have been invoked on the success path, calls=%v", mock.Calls)
+	}
+}
+
+// applyShrinkMockConfig controls a mockRunner simulating ApplyShrink's
+// commands. e2fsck is called twice (pre- and post-resize); preExitCode and
+// postExitCode let tests drive each call independently.
+type applyShrinkMockConfig struct {
+	mounted       bool
+	preExitCode   int
+	postExitCode  int
+	resize2fsFail bool
+}
+
+func newApplyShrinkMock(cfg applyShrinkMockConfig) *mockRunner {
+	e2fsckCalls := 0
+	m := &mockRunner{}
+	m.Handler = func(name string, args []string) ([]byte, error) {
+		switch name {
+		case "findmnt":
+			if cfg.mounted {
+				return []byte("/mnt/fake-target\n"), nil
+			}
+			return []byte(""), fmt.Errorf("findmnt: no mount found")
+		case "e2fsck":
+			e2fsckCalls++
+			exitCode := cfg.preExitCode
+			if e2fsckCalls > 1 {
+				exitCode = cfg.postExitCode
+			}
+			if exitCode != 0 {
+				return []byte(fmt.Sprintf("mock: e2fsck exited %d", exitCode)), fakeExitError(exitCode)
+			}
+			return []byte(""), nil
+		case "resize2fs":
+			if cfg.resize2fsFail {
+				return []byte("mock: resize2fs failed"), fmt.Errorf("resize2fs failed: mock simulated failure")
+			}
+			return []byte(""), nil
+		}
+		return []byte(""), nil
+	}
+	return m
+}
+
+func newTestShrinkPlan() *ShrinkPlan {
+	return &ShrinkPlan{
+		Filesystem: FilesystemInfo{
+			PartitionPath: "/dev/sdz1",
+			TotalBytes:    100 * 1024 * 1024 * 1024,
+		},
+		TargetNewSizeBytes: 50 * 1024 * 1024 * 1024,
+	}
+}
+
+// TestApplyShrink_PreResizeE2fsckExitCode1Continues covers audit 2.2's e2fsck
+// handling in ApplyShrink: exit code 1 on the pre-resize check must be
+// treated as success.
+func TestApplyShrink_PreResizeE2fsckExitCode1Continues(t *testing.T) {
+	origRunner := cmdRunner
+	t.Cleanup(func() { cmdRunner = origRunner })
+	cmdRunner = newApplyShrinkMock(applyShrinkMockConfig{preExitCode: 1})
+
+	if err := ApplyShrink(newTestShrinkPlan()); err != nil {
+		t.Fatalf("expected e2fsck exit code 1 to be treated as success, got: %v", err)
+	}
+}
+
+// TestApplyShrink_PreResizeE2fsckExitCode4Aborts covers the other half: exit
+// code 4 on the pre-resize check must abort before resize2fs ever runs.
+func TestApplyShrink_PreResizeE2fsckExitCode4Aborts(t *testing.T) {
+	origRunner := cmdRunner
+	t.Cleanup(func() { cmdRunner = origRunner })
+	mock := newApplyShrinkMock(applyShrinkMockConfig{preExitCode: 4})
+	cmdRunner = mock
+
+	err := ApplyShrink(newTestShrinkPlan())
+	if err == nil {
+		t.Fatalf("expected an error when pre-resize e2fsck exits 4, got nil")
+	}
+	if !strings.Contains(err.Error(), "pre-resize e2fsck failed") || !strings.Contains(err.Error(), "exit code 4") {
+		t.Fatalf("expected a pre-resize e2fsck exit-code-4 failure error, got: %v", err)
+	}
+	for _, c := range mock.Calls {
+		if strings.HasPrefix(c, "resize2fs ") {
+			t.Fatalf("expected ApplyShrink to abort before running resize2fs, but it ran: %q", c)
+		}
+	}
+}
+
+// TestApplyShrink_PostResizeE2fsckExitCode4Aborts covers the post-resize
+// verification e2fsck: exit code 4 there must also surface as a failure.
+func TestApplyShrink_PostResizeE2fsckExitCode4Aborts(t *testing.T) {
+	origRunner := cmdRunner
+	t.Cleanup(func() { cmdRunner = origRunner })
+	cmdRunner = newApplyShrinkMock(applyShrinkMockConfig{postExitCode: 4})
+
+	err := ApplyShrink(newTestShrinkPlan())
+	if err == nil {
+		t.Fatalf("expected an error when post-resize e2fsck exits 4, got nil")
+	}
+	if !strings.Contains(err.Error(), "post-resize e2fsck verification failed") || !strings.Contains(err.Error(), "exit code 4") {
+		t.Fatalf("expected a post-resize e2fsck exit-code-4 failure error, got: %v", err)
+	}
+}
+
+// TestReadDiskRegion_UsesStdoutOnly proves readDiskRegion (which backs up
+// raw GPT bytes for rollback) parses `dd`'s output via RunStdout, not Run:
+// appending stderr noise to raw binary partition-table bytes read via Run
+// would silently corrupt the backup instead of erroring.
+func TestReadDiskRegion_UsesStdoutOnly(t *testing.T) {
+	origRunner := cmdRunner
+	t.Cleanup(func() { cmdRunner = origRunner })
+	cleanBytes := []byte{0x45, 0x46, 0x49, 0x20, 0x50, 0x41, 0x52, 0x54} // "EFI PART"
+	cmdRunner = &mockRunner{
+		Handler: func(name string, args []string) ([]byte, error) {
+			noisy := append(append([]byte{}, cleanBytes...), []byte("\ndd: a stray stderr notice\n")...)
+			return noisy, nil
+		},
+		StdoutHandler: func(name string, args []string) ([]byte, error) {
+			return cleanBytes, nil
+		},
+	}
+
+	got, err := readDiskRegion("/dev/sdz", 0, int64(len(cleanBytes)))
+	if err != nil {
+		t.Fatalf("readDiskRegion: %v", err)
+	}
+	if string(got) != string(cleanBytes) {
+		t.Fatalf("readDiskRegion: got %q, want %q (must use RunStdout, not Run)", got, cleanBytes)
 	}
 }
