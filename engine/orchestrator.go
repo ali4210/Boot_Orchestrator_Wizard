@@ -1015,6 +1015,24 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 				_ = exec.Command("mount", "-L", "ORCH_STORAGE", usbStorageDir).Run()
 			}
 
+			// Bug G: neither mount attempt above was ever checked for
+			// success. If both failed (USB unplugged, filesystem not yet
+			// probed, a permission issue, ...), usbStorageDir stayed an
+			// ordinary empty directory on the root filesystem, but nothing
+			// downstream knew that — the OS payload copy and
+			// transient_resize.sh write below would "succeed" by writing to
+			// local disk instead of the USB stick, and the later
+			// os.Stat(scriptPath) "strict verification" check would still
+			// pass (a file really was written, just to the wrong
+			// filesystem). On reboot, the USB environment's own fresh mount
+			// of ORCH_STORAGE would then find no transient_resize.sh at
+			// all — this is almost certainly the literal "transient_resize.sh
+			// is not being created" symptom. Fail loudly here instead.
+			if err := ensureUSBStorageMounted(usbStorageDir); err != nil {
+				journal.Fail(step, err)
+				return fail("partition-shrink", fmt.Errorf("%w; connect/reconnect the ORCH_STORAGE USB drive and retry", err))
+			}
+
 			hostESP, espErr := FindESPPartition(req.TargetDiskPath)
 			if espErr != nil {
 				journal.Fail(step, espErr)

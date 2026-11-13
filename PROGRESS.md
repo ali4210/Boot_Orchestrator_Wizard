@@ -619,7 +619,48 @@ refuses) and the `--yes` gate.
   injectable, so the ESP-file-removal and NVRAM-boot-entry-removal code paths have **no**
   automated test coverage at all (only exercised by passing empty values that skip them
   entirely). This is a real, acknowledged gap, not a passed test.
-- [ ] 17. transient_resize.sh not created — reproduction + fix — Not started
+### G. transient_resize.sh is not being created — Done (commit TBD)
+- [x] 17. transient_resize.sh not created — reproduction + fix — Done, see below.
+
+**Root cause (`engine/orchestrator.go`, the bare-metal USB-staging block, around where
+`usbStorageDir := "/mnt/orch_usb_storage"` is set up): neither of the two fallback mount
+attempts was ever checked for success.**
+```go
+if err := exec.Command("mountpoint", "-q", usbStorageDir).Run(); err != nil {
+    _ = exec.Command("mount", storageDev, usbStorageDir).Run()
+}
+if err := exec.Command("mountpoint", "-q", usbStorageDir).Run(); err != nil {
+    _ = exec.Command("mount", "-L", "ORCH_STORAGE", usbStorageDir).Run()
+}
+// execution just continues here regardless of whether either mount worked
+```
+If **both** mount attempts failed (USB not plugged in yet, its filesystem not yet probed by
+the kernel, a permission issue, a race with udev, ...), `usbStorageDir` stayed exactly what
+`os.MkdirAll` made it: an ordinary, empty **local** directory on the root filesystem.
+Nothing downstream knew that. `writeScriptSecurely(filepath.Join(usbStorageDir,
+"transient_resize.sh"), ...)` "succeeded" by writing the script into that local directory
+instead of the actual USB stick — and the existing `os.Stat(scriptPath)` "strict hardware
+physical verification" check right after it **also kept passing**, because a file really
+was written, just to the wrong filesystem entirely. The same blind spot affected the OS
+payload copy (`copyFileDirect` to `isoSrcPath`) just above it. On the next boot, when the
+system actually boots from the USB stick and its own live environment freshly mounts the
+real `ORCH_STORAGE` partition, it finds **no** `transient_resize.sh` there at all — this is
+almost certainly the literal reported symptom, and the orchestrator itself never saw an
+error, since every signal it checked (the file existing, its size being nonzero) was
+satisfied by the misplaced local copy.
+
+**Fix:** added `ensureUSBStorageMounted` (`engine/autonomous_installer_script.go`) — an
+explicit `mountpoint -q` check immediately after both fallback mount attempts — and wired
+it in right before the payload-staging and script-write steps: if `usbStorageDir` still
+isn't a real mountpoint at that point, the step now fails loudly (`journal.Fail` +
+`fail("partition-shrink", ...)`) with a message telling the user to reconnect the USB drive
+and retry, instead of silently writing to the wrong filesystem and reporting success.
+
+**Tests (`engine/usb_storage_mount_test.go`):** the negative case (an ordinary, unmounted
+`t.TempDir()` — exactly what `usbStorageDir` becomes when both mount attempts fail) is
+rejected; the positive case uses a **real** tmpfs mount (RAM-backed, never touches any real
+disk, created/torn down via passwordless `sudo` and skipped cleanly if unavailable) to prove
+this isn't just "always returns an error" — a genuinely mounted filesystem is accepted.
 - [ ] 18. Deploy payload ISO picker — reproduction — Not started
 - [ ] 19. Fix ISO/image picker — Not started
 

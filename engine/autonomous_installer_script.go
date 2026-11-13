@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"os"
+	"os/exec"
 )
 
 // autonomousInstallerScriptParams holds everything renderAutonomousInstallerScript
@@ -192,4 +193,21 @@ func writeScriptSecurely(path, content string) error {
 		return err
 	}
 	return f.Close()
+}
+
+// ensureUSBStorageMounted verifies dir is a real mountpoint (audit bug
+// G). Before this check existed, neither of the orchestrator's own two
+// fallback `mount` attempts for the USB storage partition was ever checked
+// for success — if both failed silently, writeScriptSecurely and the OS
+// payload copy would both "succeed" by writing into dir as an ordinary,
+// empty local directory on the root filesystem rather than the actual USB
+// stick, and the later os.Stat-based "strict verification" would still
+// pass (a file really was written, just to the wrong filesystem). On
+// reboot, the USB environment's own fresh mount of ORCH_STORAGE would then
+// find no transient_resize.sh at all.
+func ensureUSBStorageMounted(dir string) error {
+	if err := exec.Command("mountpoint", "-q", dir).Run(); err != nil {
+		return fmt.Errorf("%s is not a mounted filesystem", dir)
+	}
+	return nil
 }
