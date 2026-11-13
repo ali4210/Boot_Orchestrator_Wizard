@@ -9,7 +9,7 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
 ## Phase 1: Hardening and testability
 
 ### A. Credentials
-- [x] 1. `json:"-"` on Password/PasswordHash + serialization audit — Done (commit TBD).
+- [x] 1. `json:"-"` on Password/PasswordHash + serialization audit — Done (`f09a2a9`).
       Root cause: `Credentials` had no json tags, so `json.Marshal` used default field
       names and serialized both the plaintext password and the hash verbatim. Reproduced
       in `engine/serialization_test.go` (failed pre-fix, now passes). Fixed by adding
@@ -24,7 +24,22 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       protection if that ever changes. No logging call anywhere prints Password/PasswordHash
       (grepped); only `Username` appears in two `logFn` calls in `engine/bootloader.go`
       (non-secret).
-- [ ] 2. transient_resize.sh mode 0700, cleanup on all paths — Not started
+- [x] 2. transient_resize.sh mode 0700, cleanup on all paths — Done (commit TBD).
+      Root cause (engine/orchestrator.go, autonomous-installer block): the script was
+      written with `os.OpenFile(..., 0755)` and then re-chmod'd to `0755` explicitly —
+      world-readable — and it embeds the plaintext-derived password HASH directly in its
+      own text via a heredoc. A failure inside the script before the chroot block (which
+      is the only place that removed `/tmp/.orch_pwhash`, and only on the success path)
+      left that hash file on the target disk. Refactored the script template out into
+      `engine/autonomous_installer_script.go` (`renderAutonomousInstallerScript`,
+      `writeScriptSecurely`) so both are unit-testable. Fixed: write mode is now
+      `transientScriptMode = 0700`, with an explicit `os.Chmod` after write (open(2)'s
+      mode argument does not retroactively narrow an already-existing file's
+      permissions — proved by `TestWriteScriptSecurely_DoesNotNarrowModeOnExistingFile`).
+      Added a `trap cleanup EXIT` near the top of the script (before any command that can
+      fail under `set -e`) that removes both `/mnt/target/tmp/.orch_pwhash` and the
+      script's own on-disk path on every exit path, not just success. Proved by
+      `engine/autonomous_installer_script_test.go`.
 - [ ] 3. Detect admin group (sudo/wheel) in chroot, verify useradd — Not started
 - [ ] 4. Min password length 8, reserved username rejection — Not started
 
