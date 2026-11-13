@@ -34,9 +34,29 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       `*exec.ExitError` with empty stdout (real blkid's behavior on an unformatted
       partition — a normal, common case, not a sign of LVM/LUKS/mdraid/BitLocker) and
       confirms the check passes cleanly rather than aborting.
-- [ ] F3. Headless: refuse non-block-device targets and the live root disk in single-boot
+- [x] F3. Headless: refuse non-block-device targets and the live root disk in single-boot
       mode; resolve autounattend.xml via embed/executable location not cwd; fail loudly if a
-      Windows target has no unattend — Not started
+      Windows target has no unattend — Done (commit TBD). `cmd/orchestrator/headless.go`:
+      added `isBlockDevice` (checks `/sys/class/block/<name>`, same source of truth as
+      `engine/revert_linux.go`'s `partitionExists`; a swappable var for testing) — `
+      --target-disk` is now rejected if it isn't a real block device. Added
+      `isLikelyLiveRootDisk` (reads `/proc/mounts` directly, independent of
+      `engine.DetectActiveRootDisk`'s own heuristics) as defense-in-depth: if mode resolves
+      to `single-boot` but `/proc/mounts` shows the target disk actually holds the live `/`
+      filesystem, refuse — this specifically protects against `DetectActiveRootDisk` silently
+      failing to detect the live disk (returning `""`) while the real mount table still shows
+      it. `autounattendPath` resolution switched from `filepath.Abs("discovery/manifests/...")`
+      (cwd-relative) to `resolveAutounattendPath`/`findAutounattendNear`, which resolve
+      relative to `os.Executable()`'s own location — checking both alongside the binary and
+      its parent directory (matching this project's own `bin/` + `discovery/` layout from
+      `autorun.sh`). A Windows target with no resolvable unattend file now returns a hard
+      error instead of silently proceeding with `AutounattendPath: ""`. Tests
+      (`cmd/orchestrator/headless_test.go`): non-block-device rejection, live-root-disk
+      single-boot refusal (via a faked `/proc/mounts` with `engine.DetectActiveRootDisk`'s
+      own detection simulated as having failed), `isLikelyLiveRootDisk` directly (positive/
+      negative/empty), `findAutounattendNear` (alongside/parent/not-found), and the
+      Windows-no-unattend failure. Existing `buildHeadlessRequest` tests updated to stub
+      `isBlockDevice` where needed so they keep exercising what they originally tested.
 - [ ] F4. Fill in real commit hashes in PROGRESS.md; verify every commit builds/tests green
       via a disposable rebase (not rewriting the real branch — see commit message) — Not
       started

@@ -79,6 +79,88 @@ func resolveHeadlessTarget(targetDisk, activeRootDisk, activeHostNum, activeTarg
 	return "single-boot", "", ""
 }
 
+// isBlockDevice reports whether path names a real block device (disk or
+// partition), via the same /sys/class/block source of truth
+// engine/revert_linux.go's partitionExists uses. A var (not a plain func)
+// so tests can simulate "is/is not a block device" without a real one on
+// the test machine.
+var isBlockDevice = func(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join("/sys/class/block", filepath.Base(path)))
+	return err == nil
+}
+
+// procMountsPath is /proc/mounts, overridable in tests.
+var procMountsPath = "/proc/mounts"
+
+// isLikelyLiveRootDisk double-checks, independently of
+// engine.DetectActiveRootDisk's own heuristics, whether diskDevice is (or
+// contains the partition behind) the filesystem currently mounted at "/",
+// by reading /proc/mounts directly. Defense in depth for follow-up F3: if
+// DetectActiveRootDisk's own detection were ever to fail silently (e.g.
+// returning "" instead of erroring), resolveHeadlessTarget would wrongly
+// resolve the live root disk as "single-boot" — wiping the system this
+// tool is currently running on. This catches that case independently.
+func isLikelyLiveRootDisk(diskDevice string) bool {
+	if diskDevice == "" {
+		return false
+	}
+	data, err := os.ReadFile(procMountsPath)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[1] != "/" {
+			continue
+		}
+		rootSrc := fields[0]
+		if resolved, evalErr := filepath.EvalSymlinks(rootSrc); evalErr == nil {
+			rootSrc = resolved
+		}
+		if rootSrc == diskDevice || strings.HasPrefix(rootSrc, diskDevice) {
+			return true
+		}
+	}
+	return false
+}
+
+// findAutounattendNear looks for discovery/manifests/autounattend.xml
+// relative to exePath — first alongside the executable itself, then in the
+// executable's parent directory, which matches how this project's own
+// autorun.sh/autorun.ps1 lay things out (the compiled binary lands in
+// bin/, with discovery/ one level up at the repo root). Pure function (no
+// os.Executable() call) so it is directly testable with fake directories.
+func findAutounattendNear(exePath string) (string, error) {
+	exeDir := filepath.Dir(exePath)
+	candidates := []string{
+		filepath.Join(exeDir, "discovery", "manifests", "autounattend.xml"),
+		filepath.Join(filepath.Dir(exeDir), "discovery", "manifests", "autounattend.xml"),
+	}
+	for _, c := range candidates {
+		if _, statErr := os.Stat(c); statErr == nil {
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("autounattend.xml not found near the orchestrator binary (checked %s)", strings.Join(candidates, ", "))
+}
+
+// resolveAutounattendPath is findAutounattendNear wired to the real running
+// executable's path (not the process's current working directory, which
+// can be anything depending on how the binary was launched).
+func resolveAutounattendPath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolving executable path to locate autounattend.xml: %w", err)
+	}
+	if resolved, evalErr := filepath.EvalSymlinks(exe); evalErr == nil {
+		exe = resolved
+	}
+	return findAutounattendNear(exe)
+}
+
 // resolveHeadlessImage resolves cfg's OS selection to the mirrors/sha/
 // distro-name/entry quadruple RunProvision needs, exactly mirroring what
 // the TUI's startProvisioning does with m.selectedOS (ui/model.go). Returns
@@ -135,20 +217,27 @@ func buildHeadlessRequest(cfg headlessConfig, catalog *discovery.Catalog, hvKind
 		return engine.ProvisionRequest{}, fmt.Errorf("password in %s must be at least %d characters", cfg.PasswordFile, engine.MinPasswordLength)
 	}
 
+	if !isBlockDevice(cfg.TargetDisk) {
+		return engine.ProvisionRequest{}, fmt.Errorf("--target-disk %q is not a recognized block device (no /sys/class/block entry); refusing to provision a non-disk target", cfg.TargetDisk)
+	}
+
 	primaryURL, sha, distroName, entry, isWindows, err := resolveHeadlessImage(cfg, catalog)
 	if err != nil {
 		return engine.ProvisionRequest{}, err
 	}
 
 	mode, hostNum, targetPart := resolveHeadlessTarget(cfg.TargetDisk, activeRootDisk, activeHostNum, activeTargetPart)
+	if mode == "single-boot" && isLikelyLiveRootDisk(cfg.TargetDisk) {
+		return engine.ProvisionRequest{}, fmt.Errorf("refusing: --target-disk %q contains this machine's live root filesystem (per /proc/mounts) but was resolved as single-boot, which would wipe it; this likely means root-disk auto-detection disagreed with the live mount table — investigate before proceeding", cfg.TargetDisk)
+	}
 
 	autounattendPath := ""
 	if isWindows {
-		if abs, absErr := filepath.Abs("discovery/manifests/autounattend.xml"); absErr == nil {
-			if _, statErr := os.Stat(abs); statErr == nil {
-				autounattendPath = abs
-			}
+		resolved, aErr := resolveAutounattendPath()
+		if aErr != nil {
+			return engine.ProvisionRequest{}, fmt.Errorf("Windows target %q selected but no autounattend answer file is available: %w", distroName, aErr)
 		}
+		autounattendPath = resolved
 	}
 
 	hash, err := (engine.Credentials{Password: password}).HashPassword()

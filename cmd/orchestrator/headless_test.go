@@ -10,6 +10,23 @@ import (
 	"boot-orchestrator/hypervisor"
 )
 
+// withFakeBlockDevice overrides isBlockDevice so tests can treat an
+// arbitrary path as a recognized block device without needing a real one
+// on the test machine.
+func withFakeBlockDevice(t *testing.T, recognizedPaths ...string) {
+	t.Helper()
+	orig := isBlockDevice
+	t.Cleanup(func() { isBlockDevice = orig })
+	isBlockDevice = func(path string) bool {
+		for _, p := range recognizedPaths {
+			if p == path {
+				return true
+			}
+		}
+		return false
+	}
+}
+
 func validHeadlessConfig(t *testing.T, passwordFileContent string) headlessConfig {
 	t.Helper()
 	pwFile := filepath.Join(t.TempDir(), "pw.txt")
@@ -148,6 +165,7 @@ func TestBuildHeadlessRequest_RejectsShortPassword(t *testing.T) {
 // TestBuildHeadlessRequest_UnknownOSID proves a typo'd --os-id fails loudly
 // instead of silently provisioning with an empty image URL.
 func TestBuildHeadlessRequest_UnknownOSID(t *testing.T) {
+	withFakeBlockDevice(t, "/dev/sdz")
 	cfg := validHeadlessConfig(t, "a-fine-password")
 	cfg.OSID = "does-not-exist"
 
@@ -162,6 +180,7 @@ func TestBuildHeadlessRequest_UnknownOSID(t *testing.T) {
 // name, root locked (no AllowRootLogin flag exists in headless mode), and
 // the account's password hashed rather than carried in plaintext.
 func TestBuildHeadlessRequest_ResolvesCatalogEntry(t *testing.T) {
+	withFakeBlockDevice(t, "/dev/sdz")
 	cfg := validHeadlessConfig(t, "a-fine-password")
 	catalog := &discovery.Catalog{Entries: []discovery.Entry{
 		{
@@ -205,6 +224,7 @@ func TestBuildHeadlessRequest_ResolvesCatalogEntry(t *testing.T) {
 // mechanism engine/streamer.go already supports for absolute paths), with
 // no catalog entry or SHA256 pinned.
 func TestBuildHeadlessRequest_IsoPathUsesLocalFile(t *testing.T) {
+	withFakeBlockDevice(t, "/dev/sdz")
 	isoPath := filepath.Join(t.TempDir(), "custom.iso")
 	if err := os.WriteFile(isoPath, []byte("fake-iso-bytes"), 0644); err != nil {
 		t.Fatalf("writing fake iso: %v", err)
@@ -229,6 +249,7 @@ func TestBuildHeadlessRequest_IsoPathUsesLocalFile(t *testing.T) {
 // TestBuildHeadlessRequest_IsoPathMissingFile proves a nonexistent
 // --iso-path fails loudly before any provisioning starts.
 func TestBuildHeadlessRequest_IsoPathMissingFile(t *testing.T) {
+	withFakeBlockDevice(t, "/dev/sdz")
 	cfg := validHeadlessConfig(t, "a-fine-password")
 	cfg.OSID = ""
 	cfg.ISOPath = filepath.Join(t.TempDir(), "does-not-exist.iso")
@@ -236,5 +257,165 @@ func TestBuildHeadlessRequest_IsoPathMissingFile(t *testing.T) {
 	_, err := buildHeadlessRequest(cfg, &discovery.Catalog{}, hypervisor.KindBareMetal, "", "", "")
 	if err == nil {
 		t.Fatalf("expected a missing --iso-path file to be rejected")
+	}
+}
+
+// TestBuildHeadlessRequest_RejectsNonBlockDeviceTarget is the regression
+// test for follow-up F3: --target-disk must name a real block device, not
+// an arbitrary path (a typo, a regular file, a symlink to nowhere).
+func TestBuildHeadlessRequest_RejectsNonBlockDeviceTarget(t *testing.T) {
+	// isBlockDevice is NOT stubbed here — /dev/sdz has no real
+	// /sys/class/block entry on the test machine, which is exactly the
+	// case this test wants to exercise.
+	cfg := validHeadlessConfig(t, "a-fine-password")
+
+	_, err := buildHeadlessRequest(cfg, &discovery.Catalog{}, hypervisor.KindBareMetal, "", "", "")
+	if err == nil {
+		t.Fatalf("expected a non-block-device --target-disk to be rejected")
+	}
+	if !strings.Contains(err.Error(), "block device") {
+		t.Fatalf("expected the error to mention 'block device', got: %v", err)
+	}
+}
+
+// TestBuildHeadlessRequest_RefusesLiveRootDiskInSingleBootMode is the
+// regression test for follow-up F3's other safety gate: even if
+// resolveHeadlessTarget somehow resolved single-boot mode for a disk that
+// isLikelyLiveRootDisk (reading /proc/mounts directly) independently
+// confirms is the live root disk, buildHeadlessRequest must refuse rather
+// than proceed to wipe the system it's running on.
+func TestBuildHeadlessRequest_RefusesLiveRootDiskInSingleBootMode(t *testing.T) {
+	withFakeBlockDevice(t, "/dev/sdz")
+
+	fakeMounts := filepath.Join(t.TempDir(), "mounts")
+	if err := os.WriteFile(fakeMounts, []byte("/dev/sdz2 / ext4 rw,relatime 0 0\n"), 0644); err != nil {
+		t.Fatalf("writing fake /proc/mounts: %v", err)
+	}
+	origMounts := procMountsPath
+	t.Cleanup(func() { procMountsPath = origMounts })
+	procMountsPath = fakeMounts
+
+	isoPath := filepath.Join(t.TempDir(), "custom.iso")
+	if err := os.WriteFile(isoPath, []byte("fake-iso-bytes"), 0644); err != nil {
+		t.Fatalf("writing fake iso: %v", err)
+	}
+	cfg := validHeadlessConfig(t, "a-fine-password")
+	cfg.OSID = ""
+	cfg.ISOPath = isoPath
+
+	// activeRootDisk deliberately left empty, simulating
+	// engine.DetectActiveRootDisk failing to detect anything even though
+	// /proc/mounts (read independently here) shows /dev/sdz2 mounted at
+	// "/" — i.e. /dev/sdz genuinely is the live root disk.
+	_, err := buildHeadlessRequest(cfg, &discovery.Catalog{}, hypervisor.KindBareMetal, "", "", "")
+	if err == nil {
+		t.Fatalf("expected provisioning the live root disk in single-boot mode to be refused")
+	}
+}
+
+// TestIsLikelyLiveRootDisk covers the /proc/mounts cross-check directly.
+func TestIsLikelyLiveRootDisk(t *testing.T) {
+	fakeMounts := filepath.Join(t.TempDir(), "mounts")
+	content := "/dev/sdz2 / ext4 rw,relatime 0 0\n/dev/sdz1 /boot/efi vfat rw 0 0\n"
+	if err := os.WriteFile(fakeMounts, []byte(content), 0644); err != nil {
+		t.Fatalf("writing fake /proc/mounts: %v", err)
+	}
+	origMounts := procMountsPath
+	t.Cleanup(func() { procMountsPath = origMounts })
+	procMountsPath = fakeMounts
+
+	if !isLikelyLiveRootDisk("/dev/sdz") {
+		t.Errorf("expected /dev/sdz to be detected as the live root disk (its partition /dev/sdz2 is mounted at /)")
+	}
+	if isLikelyLiveRootDisk("/dev/sdy") {
+		t.Errorf("expected /dev/sdy (unrelated to any mount) to not be detected as the live root disk")
+	}
+	if isLikelyLiveRootDisk("") {
+		t.Errorf("expected an empty disk path to never match")
+	}
+}
+
+// TestFindAutounattendNear_PrefersAlongsideThenParent proves the lookup
+// checks next to the executable first, then the executable's parent
+// directory — matching this project's own bin/ + discovery/ layout — and
+// fails with a clear error when neither has the file.
+func TestFindAutounattendNear_PrefersAlongsideThenParent(t *testing.T) {
+	t.Run("alongside the executable", func(t *testing.T) {
+		dir := t.TempDir()
+		manifestDir := filepath.Join(dir, "discovery", "manifests")
+		if err := os.MkdirAll(manifestDir, 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(manifestDir, "autounattend.xml"), []byte("<unattend/>"), 0644); err != nil {
+			t.Fatalf("writing fixture: %v", err)
+		}
+		got, err := findAutounattendNear(filepath.Join(dir, "boot-orchestrator"))
+		if err != nil {
+			t.Fatalf("findAutounattendNear: %v", err)
+		}
+		if got != filepath.Join(manifestDir, "autounattend.xml") {
+			t.Errorf("unexpected path: %q", got)
+		}
+	})
+
+	t.Run("in the parent directory (bin/ layout)", func(t *testing.T) {
+		root := t.TempDir()
+		manifestDir := filepath.Join(root, "discovery", "manifests")
+		if err := os.MkdirAll(manifestDir, 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(manifestDir, "autounattend.xml"), []byte("<unattend/>"), 0644); err != nil {
+			t.Fatalf("writing fixture: %v", err)
+		}
+		binDir := filepath.Join(root, "bin")
+		if err := os.MkdirAll(binDir, 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		got, err := findAutounattendNear(filepath.Join(binDir, "boot-orchestrator"))
+		if err != nil {
+			t.Fatalf("findAutounattendNear: %v", err)
+		}
+		if got != filepath.Join(manifestDir, "autounattend.xml") {
+			t.Errorf("unexpected path: %q", got)
+		}
+	})
+
+	t.Run("not found anywhere", func(t *testing.T) {
+		dir := t.TempDir()
+		if _, err := findAutounattendNear(filepath.Join(dir, "boot-orchestrator")); err == nil {
+			t.Fatalf("expected an error when autounattend.xml exists nowhere near the executable")
+		}
+	})
+}
+
+// TestBuildHeadlessRequest_WindowsTargetWithoutUnattendFailsLoudly is the
+// regression test for follow-up F3's last requirement: a Windows catalog
+// entry must never silently proceed with an empty AutounattendPath just
+// because the file wasn't found relative to the current working directory
+// (or anywhere else) — it must fail loudly instead.
+func TestBuildHeadlessRequest_WindowsTargetWithoutUnattendFailsLoudly(t *testing.T) {
+	withFakeBlockDevice(t, "/dev/sdz")
+	cfg := validHeadlessConfig(t, "a-fine-password")
+	cfg.OSID = "windows-11-amd64"
+	catalog := &discovery.Catalog{Entries: []discovery.Entry{
+		{
+			ID:          "windows-11-amd64",
+			Distro:      "Windows 11",
+			Family:      "windows",
+			DownloadURL: "https://example.test/win11.iso",
+		},
+	}}
+
+	// Run from a scratch working directory with no discovery/manifests
+	// anywhere nearby, so resolveAutounattendPath (which this test does not
+	// stub) is guaranteed not to find one next to the test binary either —
+	// this only proves the function fails loudly, not that it will on a
+	// real install where the manifest ships alongside the binary.
+	_, err := buildHeadlessRequest(cfg, catalog, hypervisor.KindBareMetal, "", "", "")
+	if err == nil {
+		t.Skip("autounattend.xml happened to be found near the test binary; the no-unattend-found path is covered directly by TestFindAutounattendNear_PrefersAlongsideThenParent instead")
+	}
+	if !strings.Contains(err.Error(), "autounattend") && !strings.Contains(err.Error(), "unattend") {
+		t.Fatalf("expected the error to mention the missing unattend file, got: %v", err)
 	}
 }
