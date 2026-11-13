@@ -57,6 +57,37 @@ var ext4BlockSizeRe = regexp.MustCompile(`(?m)^Block size:\s+(\d+)`)
 var ext4FreeRe = regexp.MustCompile(`(?m)^Free blocks:\s+(\d+)`)
 var resize2fsMinRe = regexp.MustCompile(`(?m)minimum size of the filesystem:\s+(\d+)`)
 
+// mtabPath is the location resize2fs consults (via libext2fs) to determine
+// whether a filesystem is currently mounted. On systems where /etc/mtab is a
+// plain file rather than a symlink to /proc/self/mounts, that mount check
+// throws ("missing mtab file") instead of falling back, aborting the shrink
+// outright — this is the exact failure captured in a real run's journal
+// (audit 2.2). Declared as a var (not a const) so tests can point it at a
+// scratch path instead of mutating the real system's /etc/mtab.
+var mtabPath = "/etc/mtab"
+
+// ensureMtabSymlink makes sure mtabPath exists, symlinking it to
+// /proc/self/mounts if missing. It never touches an existing file/symlink.
+func ensureMtabSymlink() error {
+	if _, err := os.Lstat(mtabPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("checking %s: %w", mtabPath, err)
+	}
+	if err := os.Symlink("/proc/self/mounts", mtabPath); err != nil {
+		return fmt.Errorf("symlinking %s to /proc/self/mounts: %w", mtabPath, err)
+	}
+	return nil
+}
+
+// isPartitionMounted reports whether devPath is currently mounted anywhere,
+// via findmnt. Mirrors the existing convention elsewhere in this file of
+// treating a findmnt error as "not mounted" rather than a hard failure.
+func isPartitionMounted(devPath string) bool {
+	out, _ := cmdRunner.Run("findmnt", "-n", "-o", "TARGET", devPath)
+	return strings.TrimSpace(string(out)) != ""
+}
+
 func CheckUnallocatedHeadroom(diskDevice string) (uint64, error) {
 	out, err := cmdRunner.Run("parted", "-s", "-m", diskDevice, "unit", "B", "print", "free")
 	if err != nil {
@@ -278,14 +309,21 @@ func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint6
 		part1Dev := JoinDiskAndPartition(diskPath, "1")
 		logFn(fmt.Sprintf("=> [SHRINK ENGINE] Disk %s is fully allocated. Safely shrinking %s...", diskPath, part1Dev))
 
-		_, _ = cmdRunner.Run("umount", "-l", part1Dev)
-		time.Sleep(500 * time.Millisecond)
+		if err := ensureMtabSymlink(); err != nil {
+			return nil, fmt.Errorf("ensuring /etc/mtab for resize2fs mount detection: %w", err)
+		}
+
+		if isPartitionMounted(part1Dev) {
+			return nil, fmt.Errorf("refusing to shrink %s: it is still mounted (boot from a live environment to shrink the active root partition)", part1Dev)
+		}
 
 		_, _ = cmdRunner.Run("parted", "-s", diskPath, "rm", "2")
 		_, _ = cmdRunner.Run("udevadm", "settle", "--timeout=5")
 
 		logFn(fmt.Sprintf("=> [SHRINK ENGINE] Running e2fsck on %s...", part1Dev))
-		_, _ = cmdRunner.Run("e2fsck", "-fy", part1Dev)
+		if out, err := cmdRunner.Run("e2fsck", "-fy", part1Dev); err != nil {
+			return nil, fmt.Errorf("pre-resize e2fsck failed on %s, aborting shrink: %w\n%s", part1Dev, err, out)
+		}
 
 		totalPartSectors := partitions[0].end - partitions[0].start
 		targetSectors := targetBytes / 512
@@ -294,6 +332,13 @@ func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint6
 		}
 		newPart1Sectors := totalPartSectors - targetSectors
 		newPart1GiB := (newPart1Sectors * 512) / (1024 * 1024 * 1024)
+
+		if minBytes, _, minErr := MinimumExt4Size(part1Dev); minErr == nil {
+			newSizeBytes := newPart1GiB * 1024 * 1024 * 1024
+			if newSizeBytes < minBytes {
+				return nil, fmt.Errorf("target size %dGiB is smaller than %s's minimum shrinkable filesystem size (%d bytes); aborting shrink", newPart1GiB, part1Dev, minBytes)
+			}
+		}
 
 		logFn(fmt.Sprintf("=> [SHRINK ENGINE] Resizing filesystem on %s to %d GiB...", part1Dev, newPart1GiB))
 		if outResize, errResize := cmdRunner.Run("resize2fs", part1Dev, fmt.Sprintf("%dG", newPart1GiB)); errResize != nil {
