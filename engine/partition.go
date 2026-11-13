@@ -111,6 +111,25 @@ func exitCodeOf(err error) int {
 	return -1
 }
 
+// isConfirmedSwapPartition reports whether devPath is genuinely a swap
+// partition, before any caller is allowed to `parted rm` it. partedFSName
+// is the filesystem name parted's own "print" output reported for this
+// partition; it alone is not trusted (parted's cache can be stale, and a
+// previous version of this check also wrongly matched on partition number
+// alone). This requires independent agreement from blkid's own TYPE probe
+// as well — both must say "swap" — before treating the partition as
+// confirmed swap (audit 1B.6).
+func isConfirmedSwapPartition(devPath, partedFSName string) bool {
+	if !strings.Contains(strings.ToLower(partedFSName), "swap") {
+		return false
+	}
+	out, err := cmdRunner.RunStdout("blkid", "-o", "value", "-s", "TYPE", devPath)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(strings.ToLower(string(out))) == "swap"
+}
+
 func CheckUnallocatedHeadroom(diskDevice string) (uint64, error) {
 	out, err := cmdRunner.Run("parted", "-s", "-m", diskDevice, "unit", "B", "print", "free")
 	if err != nil {
@@ -280,12 +299,19 @@ func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint6
 	}
 	maxDiskSectors := uint64(maxDiskSizeBytes / 512)
 
-	// 3. Inspect trailing swap
+	// 3. Inspect trailing swap. Audit 1B.6: this used to also treat ANY disk
+	// whose last partition happened to be numbered 3 as swap
+	// (`lastPart.num == 3`), regardless of its actual filesystem type — on a
+	// disk with a third real (non-swap) partition, that would delete it.
+	// isConfirmedSwapPartition now requires agreement between parted's own
+	// fs-type column and an independent blkid probe before anything is
+	// removed.
 	hasSwapAtEnd := false
 	var swapPartNum int
 	if len(partitions) > 0 {
 		lastPart := partitions[len(partitions)-1]
-		if strings.Contains(strings.ToLower(lastPart.fs), "swap") || lastPart.num == 3 {
+		lastPartDev := JoinDiskAndPartition(diskPath, fmt.Sprintf("%d", lastPart.num))
+		if isConfirmedSwapPartition(lastPartDev, lastPart.fs) {
 			hasSwapAtEnd = true
 			swapPartNum = lastPart.num
 		}
@@ -299,6 +325,9 @@ func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint6
 		}
 
 		logFn(fmt.Sprintf("=> [HARDWARE PARTITION] Converting trailing slice %d (%.1f GiB) to primary ext4...", swapPartNum, float64(swapBytes)/(1024*1024*1024)))
+		// Confirmed swap (type, via isConfirmedSwapPartition above) and large
+		// enough (size, via the swapBytes check above) — only now is it
+		// removed.
 		_, _ = cmdRunner.Run("parted", "-s", diskPath, "rm", fmt.Sprintf("%d", swapPartNum))
 		_, _ = cmdRunner.Run("partprobe", diskPath)
 		_, _ = cmdRunner.Run("udevadm", "settle", "--timeout=5")

@@ -87,7 +87,20 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       write that follows. Tests (`engine/preflight_safety_test.go`, all via mockRunner):
       abort cases for LVM/LUKS/mdraid/BitLocker, pass-case for plain ext4/vfat, empty-disk
       refusal, Secure-Boot-enabled warning, Secure-Boot-disabled no-warning.
-- [ ] 6. Verify `parted rm 2` only removes confirmed swap slice — Not started
+- [x] 6. Verify `parted rm 2` only removes confirmed swap slice — Done (commit TBD).
+      Root cause (`engine/partition.go` `CarveHardwarePartitionAtBoundary`, the trailing-swap
+      branch): `strings.Contains(strings.ToLower(lastPart.fs), "swap") || lastPart.num == 3`
+      — the `|| lastPart.num == 3` meant ANY disk whose last partition happened to be
+      numbered 3 was treated as swap and removed, regardless of actual filesystem type; a
+      disk with a real third data partition (not swap) would have had it deleted.
+      Reproduced in `TestCarveHardwarePartitionAtBoundary_DoesNotDeleteNonSwapPartitionThree`
+      (fails pre-fix, confirmed). Fixed with `isConfirmedSwapPartition(devPath,
+      partedFSName)`: requires BOTH parted's own fs-type column AND an independent `blkid
+      -o value -s TYPE` probe to agree the partition is swap before any removal; the
+      existing size-sufficiency check (swap slice large enough for the target) is
+      unchanged and still runs first. Tests: non-swap-partition-3 no-delete,
+      confirmed-swap-converts-correctly, parted/blkid-mismatch no-delete, focused
+      `isConfirmedSwapPartition` table test (4 cases).
 
 ### C. Headless mode and loop targets
 - [ ] 7. --headless/--os-id/--iso-path/--target-disk/--username/--password-file/--yes — Not started
