@@ -40,7 +40,28 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
       fail under `set -e`) that removes both `/mnt/target/tmp/.orch_pwhash` and the
       script's own on-disk path on every exit path, not just success. Proved by
       `engine/autonomous_installer_script_test.go`.
-- [ ] 3. Detect admin group (sudo/wheel) in chroot, verify useradd — Not started
+- [x] 3. Detect admin group (sudo/wheel) in chroot, verify useradd — Done (commit TBD).
+      Root cause (engine/bootloader.go `assertDefaultCredentials`): hardcoded `-G sudo` /
+      `usermod -aG sudo` unconditionally. On Fedora/RHEL/Arch/openSUSE (no "sudo" group),
+      `usermod -aG sudo` fails and was swallowed by `2>/dev/null || true`, silently
+      producing an account with **no admin group at all** — combined with root locked by
+      default, a full lockout on first boot. The function also always returned `nil` and
+      logged "Verified: ... full sudo privileges" even when nothing was actually verified.
+      Fixed: extracted `renderAccountProvisioningScript` (pure, testable) which runs
+      `getent group sudo` then `getent group wheel` inside the chroot and uses whichever
+      exists (warns if neither does); after useradd/usermod it re-checks `id -u <user>` and
+      prints a sentinel (`ORCH_ACCOUNT_VERIFIED`/`ORCH_ACCOUNT_MISSING`, exit 7) rather than
+      assuming success. `assertDefaultCredentials` now returns a real error if that sentinel
+      is absent. Proved end-to-end by actually executing the generated script via `sh -c`
+      against fake `getent`/`useradd`/`usermod`/`chpasswd`/`id` stubs on a temp `PATH`
+      (`engine/account_provisioning_script_test.go` — sudo case, wheel case, no-group case,
+      useradd-succeeds-but-no-account case, useradd-hard-failure case) plus a Go-level mock
+      test (`TestAssertDefaultCredentials_FailsLoudlyWhenAccountNotVerified`).
+      **Known gap, intentionally not touched here:** `assertDefaultCredentials`'s only
+      caller (`AutoConfigureDualBoot`) still only logs this new error as a `[WARNING]` and
+      continues the rest of provisioning. Making every critical step hard-fail the whole
+      pipeline is the subject of Phase 4 item 25 (silent-error audit across the whole
+      codebase), done deliberately as one pass rather than piecemeal here.
 - [ ] 4. Min password length 8, reserved username rejection — Not started
 
 ### B. Safety gates

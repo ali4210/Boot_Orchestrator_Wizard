@@ -70,7 +70,7 @@ func TestAssertDefaultCredentials_NoHardcodedSaleem(t *testing.T) {
 					}
 				}
 			}
-			return []byte(""), nil
+			return []byte("ORCH_ACCOUNT_VERIFIED admin_group=sudo\n"), nil
 		},
 	}
 	cmdRunner = mock
@@ -95,5 +95,38 @@ func TestAssertDefaultCredentials_NoHardcodedSaleem(t *testing.T) {
 	sudoersPath := filepath.Join(rootPath, "etc", "sudoers.d", "janedoe")
 	if _, statErr := os.Stat(sudoersPath); statErr != nil {
 		t.Fatalf("expected a sudoers.d entry for %q, stat err: %v", creds.Username, statErr)
+	}
+}
+
+// TestAssertDefaultCredentials_FailsLoudlyWhenAccountNotVerified is the
+// Go-level regression test for audit 1A.3's "fail loudly if missing"
+// requirement: before this fix, assertDefaultCredentials returned nil
+// unconditionally as long as the chroot command itself didn't error,
+// regardless of whether the account was ever actually created. Now, if the
+// chroot script's output doesn't contain the ORCH_ACCOUNT_VERIFIED sentinel
+// (see renderAccountProvisioningScript), assertDefaultCredentials must
+// return a real error so callers can't silently proceed with no usable
+// account on the target.
+func TestAssertDefaultCredentials_FailsLoudlyWhenAccountNotVerified(t *testing.T) {
+	origRunner := cmdRunner
+	t.Cleanup(func() { cmdRunner = origRunner })
+	cmdRunner = &mockRunner{
+		Handler: func(name string, args []string) ([]byte, error) {
+			// Simulates the chroot command itself exiting 0 (e.g. a shell
+			// quoting bug skipped the verification block entirely) but
+			// never printing the success sentinel.
+			return []byte("useradd: some warning\n"), nil
+		},
+	}
+
+	rootPath := t.TempDir()
+	creds := Credentials{Username: "janedoe", Password: "a-fine-password"}
+
+	err := assertDefaultCredentials(rootPath, creds, nil)
+	if err == nil {
+		t.Fatalf("expected assertDefaultCredentials to fail loudly when the account was never verified")
+	}
+	if !strings.Contains(err.Error(), "janedoe") {
+		t.Fatalf("expected the error to name the account, got: %v", err)
 	}
 }

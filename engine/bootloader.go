@@ -439,27 +439,70 @@ func assertDefaultCredentials(rootPath string, creds Credentials, logFn func(str
 		rootCmd = fmt.Sprintf("echo %s | chpasswd -e 2>/dev/null || true", shellSingleQuote("root:"+hash))
 	}
 
-	script := fmt.Sprintf(`
-set -e
-%s
+	script := renderAccountProvisioningScript(rootCmd, creds.Username, shellSingleQuote(creds.Username+":"+hash))
 
-if ! id -u %[2]s >/dev/null 2>&1; then
-    useradd -m -s /bin/bash -G sudo %[2]s 2>/dev/null || true
-fi
-echo %[3]s | chpasswd -e 2>/dev/null || true
-usermod -aG sudo %[2]s 2>/dev/null || true
-`, rootCmd, creds.Username, shellSingleQuote(creds.Username+":"+hash))
-
-	if out, err := cmdRunner.Run("chroot", rootPath, "/bin/sh", "-c", script); err != nil {
-		logFn(fmt.Sprintf("=> [NOTICE] Account configuration warning: %v (%s)", err, string(out)))
+	out, runErr := cmdRunner.Run("chroot", rootPath, "/bin/sh", "-c", script)
+	outStr := string(out)
+	if runErr != nil || !strings.Contains(outStr, "ORCH_ACCOUNT_VERIFIED") {
+		return fmt.Errorf("account %q was not verified to exist after provisioning (id -u failed): %v (%s)", creds.Username, runErr, outStr)
+	}
+	if strings.Contains(outStr, "admin_group=none") {
+		logFn(fmt.Sprintf("=> [WARNING] No sudo/wheel admin group found in the target; %s has no admin privileges.", creds.Username))
 	}
 
 	rootState := "locked"
 	if creds.AllowRootLogin {
 		rootState = "enabled"
 	}
-	logFn(fmt.Sprintf("=> [ACCOUNTS] Verified: %s configured with full sudo privileges; root login %s.", creds.Username, rootState))
+	logFn(fmt.Sprintf("=> [ACCOUNTS] Verified: %s exists; root login %s.", creds.Username, rootState))
 	return nil
+}
+
+// renderAccountProvisioningScript builds the /bin/sh script assertDefaultCredentials
+// runs inside the target chroot. Kept as a pure function (no cmdRunner, no
+// filesystem access) so its admin-group-detection and account-verification
+// logic can be exercised directly with `sh -c` against fake stub commands in
+// a test, not just mocked at the Go level.
+//
+// Debian/Ubuntu's admin group is "sudo"; Fedora/RHEL/Arch/openSUSE use
+// "wheel". Hardcoding "sudo" (the previous behavior) silently produced an
+// account with NO admin group at all on any non-Debian-family target, since
+// `usermod -aG sudo` fails when the group doesn't exist — combined with root
+// locked by default, that is a full lockout. This detects whichever group
+// actually exists in the chroot's own /etc/group before using it, and
+// verifies with `id -u` that the account genuinely exists afterward instead
+// of assuming success (audit 1A.3).
+func renderAccountProvisioningScript(rootCmd, username, credLine string) string {
+	return fmt.Sprintf(`
+set -e
+%s
+
+ADMIN_GROUP=""
+if getent group sudo >/dev/null 2>&1; then
+    ADMIN_GROUP="sudo"
+elif getent group wheel >/dev/null 2>&1; then
+    ADMIN_GROUP="wheel"
+fi
+
+if ! id -u %[2]s >/dev/null 2>&1; then
+    if [ -n "$ADMIN_GROUP" ]; then
+        useradd -m -s /bin/bash -G "$ADMIN_GROUP" %[2]s
+    else
+        useradd -m -s /bin/bash %[2]s
+    fi
+fi
+echo %[3]s | chpasswd -e
+if [ -n "$ADMIN_GROUP" ]; then
+    usermod -aG "$ADMIN_GROUP" %[2]s
+fi
+
+if id -u %[2]s >/dev/null 2>&1; then
+    echo "ORCH_ACCOUNT_VERIFIED admin_group=${ADMIN_GROUP:-none}"
+else
+    echo "ORCH_ACCOUNT_MISSING" >&2
+    exit 7
+fi
+`, rootCmd, username, credLine)
 }
 
 func queryFilesystemType(targetPartition string) string {
