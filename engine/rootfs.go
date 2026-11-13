@@ -301,7 +301,7 @@ func deploySquashfsFromISO(isoPath, targetPartition string, notify func(StepUpda
 
 	notify(StepUpdate{StepName: fmt.Sprintf("formatting %s as persistent ext4...", targetPartition), Done: false})
 	_ = exec.Command("umount", "-l", targetPartition).Run()
-	if out, err := exec.Command("mkfs.ext4", "-F", "-L", "ROOTFS", targetPartition).CombinedOutput(); err != nil {
+	if out, err := exec.Command("mkfs.ext4", "-F", "-q", "-L", "PARROT_ROOT", targetPartition).CombinedOutput(); err != nil {
 		return fmt.Errorf("formatting target %s as ext4: %w\n%s", targetPartition, err, string(out))
 	}
 
@@ -362,7 +362,6 @@ func deploySquashfsFromISO(isoPath, targetPartition string, notify func(StepUpda
 	notify(StepUpdate{StepName: "extracting squashfs filesystem: 0%", Done: false})
 
 	if _, err := exec.LookPath("unsquashfs"); err == nil {
-		// Run unsquashfs with -percentage to output real-time decompress milestones
 		cmd := exec.Command("unsquashfs", "-f", "-percentage", "-d", targetMount, squashPath)
 		stdout, pipeErr := cmd.StdoutPipe()
 		if pipeErr == nil {
@@ -429,6 +428,22 @@ func deploySquashfsFromISO(isoPath, targetPartition string, notify func(StepUpda
 
 	notify(StepUpdate{StepName: "extracting squashfs filesystem: 100%", Done: false})
 
+	_ = exec.Command("tune2fs", "-m", "1", targetPartition).Run()
+
+	// Ensure PID 1 systemd link is established immediately
+	initTarget := filepath.Join(targetMount, "sbin", "init")
+	_ = os.Remove(initTarget)
+	_ = os.Symlink("/lib/systemd/systemd", initTarget)
+
+	// Populate deterministic root filesystem fstab mapping
+	uuidOut, bErr := exec.Command("blkid", "-s", "UUID", "-o", "value", targetPartition).Output()
+	if bErr == nil && len(strings.TrimSpace(string(uuidOut))) > 0 {
+		uuidStr := strings.TrimSpace(string(uuidOut))
+		fstabEntry := fmt.Sprintf("UUID=%s / ext4 defaults,noatime,errors=remount-ro 0 1\n", uuidStr)
+		_ = os.MkdirAll(filepath.Join(targetMount, "etc"), 0755)
+		_ = os.WriteFile(filepath.Join(targetMount, "etc", "fstab"), []byte(fstabEntry), 0644)
+	}
+
 	targetBoot := filepath.Join(targetMount, "boot")
 	_ = os.MkdirAll(targetBoot, 0755)
 	if !hasVmlinuz(targetBoot) {
@@ -443,7 +458,52 @@ func deploySquashfsFromISO(isoPath, targetPartition string, notify func(StepUpda
 		}
 	}
 
+	notify(StepUpdate{StepName: "regenerating initramfs for persistent root (mandatory)...", Done: false})
+	if err := regenerateInitramfs(targetMount); err != nil {
+		return fmt.Errorf("initramfs regeneration failed: %w", err)
+	}
+
 	purgeLiveInstallerShortcuts(targetMount)
+	return nil
+}
+
+// regenerateInitramfs runs the correct initramfs regen tool inside a chroot
+// of targetMount, binding /dev /proc /sys first.
+func regenerateInitramfs(targetMount string) error {
+	binds := []string{"dev", "proc", "sys"}
+	for _, b := range binds {
+		dest := filepath.Join(targetMount, b)
+		_ = os.MkdirAll(dest, 0755)
+		if out, err := exec.Command("mount", "--bind", "/"+b, dest).CombinedOutput(); err != nil {
+			return fmt.Errorf("bind mounting /%s: %w (%s)", b, err, string(out))
+		}
+	}
+	defer func() {
+		for i := len(binds) - 1; i >= 0; i-- {
+			_ = exec.Command("umount", "-l", filepath.Join(targetMount, binds[i])).Run()
+		}
+	}()
+
+	if hostDNS, err := os.ReadFile("/etc/resolv.conf"); err == nil {
+		_ = os.WriteFile(filepath.Join(targetMount, "etc", "resolv.conf"), hostDNS, 0644)
+	}
+
+	var cmd *exec.Cmd
+	switch {
+	case fileExists(filepath.Join(targetMount, "usr", "sbin", "update-initramfs")),
+		fileExists(filepath.Join(targetMount, "usr", "bin", "update-initramfs")):
+		cmd = exec.Command("chroot", targetMount, "update-initramfs", "-u", "-k", "all")
+	case fileExists(filepath.Join(targetMount, "usr", "bin", "mkinitcpio")):
+		cmd = exec.Command("chroot", targetMount, "mkinitcpio", "-P")
+	case fileExists(filepath.Join(targetMount, "usr", "bin", "dracut")):
+		cmd = exec.Command("chroot", targetMount, "dracut", "-f", "--regenerate-all")
+	default:
+		return fmt.Errorf("no known initramfs tool (update-initramfs/mkinitcpio/dracut) found in target rootfs")
+	}
+
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%v failed: %w\n%s", cmd.Args, err, string(out))
+	}
 	return nil
 }
 
@@ -509,12 +569,12 @@ func deployWindowsFromISO(isoPath, targetPartition string, notify func(StepUpdat
             </OOBE>
             <UserAccounts>
                 <AdministratorPassword>
-                    <Value>toor</Value>
+                    <Value>saleem</Value>
                     <PlainText>true</PlainText>
                 </AdministratorPassword>
             </UserAccounts>
             <AutoLogon>
-                <Password><Value>toor</Value><PlainText>true</PlainText></Password>
+                <Password><Value>saleem</Value><PlainText>true</PlainText></Password>
                 <Enabled>true</Enabled>
                 <LogonCount>1</LogonCount>
                 <Username>Administrator</Username>
@@ -542,14 +602,22 @@ func hasVmlinuz(bootDir string) bool {
 }
 
 func purgeLiveInstallerShortcuts(rootfs string) {
-	paths := []string{
-		filepath.Join(rootfs, "home"),
+	// 1. Remove all installer desktop shortcuts from root, skel, applications, and all user homes
+	desktopPaths := []string{
 		filepath.Join(rootfs, "root", "Desktop"),
 		filepath.Join(rootfs, "etc", "skel", "Desktop"),
 		filepath.Join(rootfs, "usr", "share", "applications"),
 	}
 
-	for _, p := range paths {
+	if homeEntries, err := os.ReadDir(filepath.Join(rootfs, "home")); err == nil {
+		for _, h := range homeEntries {
+			if h.IsDir() {
+				desktopPaths = append(desktopPaths, filepath.Join(rootfs, "home", h.Name(), "Desktop"))
+			}
+		}
+	}
+
+	for _, p := range desktopPaths {
 		_ = filepath.Walk(p, func(path string, info os.FileInfo, err error) error {
 			if err == nil && !info.IsDir() {
 				lower := strings.ToLower(info.Name())
@@ -557,6 +625,7 @@ func purgeLiveInstallerShortcuts(rootfs string) {
 					strings.Contains(lower, "install-parrot") ||
 					strings.Contains(lower, "install-kali") ||
 					strings.Contains(lower, "install debian") ||
+					strings.Contains(lower, "readme") ||
 					strings.Contains(lower, "ubiquity") {
 					_ = os.Remove(path)
 				}
@@ -564,6 +633,26 @@ func purgeLiveInstallerShortcuts(rootfs string) {
 			return nil
 		})
 	}
+
+	// 2. Bind kernel directories and purge calamares package and lingering services
+	binds := []string{"dev", "proc", "sys"}
+	for _, b := range binds {
+		dest := filepath.Join(rootfs, b)
+		_ = os.MkdirAll(dest, 0755)
+		_ = exec.Command("mount", "--bind", "/"+b, dest).Run()
+	}
+	defer func() {
+		for i := len(binds) - 1; i >= 0; i-- {
+			_ = exec.Command("umount", "-l", filepath.Join(rootfs, binds[i])).Run()
+		}
+	}()
+
+	cleanCmd := `
+export DEBIAN_FRONTEND=noninteractive
+apt-get purge -y calamares calamares-settings-debian calamares-settings-parrot 2>/dev/null || true
+systemctl disable calamares.service 2>/dev/null || true
+`
+	_ = exec.Command("chroot", rootfs, "/bin/sh", "-c", cleanCmd).Run()
 }
 
 func copyFile(src, dst string) error {

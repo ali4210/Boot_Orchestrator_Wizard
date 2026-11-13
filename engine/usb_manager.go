@@ -5,19 +5,36 @@
 package engine
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
+
+type flexibleRM string
+
+func (r *flexibleRM) UnmarshalJSON(b []byte) error {
+	raw := strings.TrimSpace(string(b))
+	raw = strings.Trim(raw, `"`)
+	if raw == "true" || raw == "1" {
+		*r = "1"
+	} else {
+		*r = "0"
+	}
+	return nil
+}
 
 type usbDeviceRecord struct {
 	Name       string            `json:"name"`
@@ -26,7 +43,7 @@ type usbDeviceRecord struct {
 	Mountpoint string            `json:"mountpoint"`
 	FSType     string            `json:"fstype"`
 	Type       string            `json:"type"`
-	Removable  string            `json:"rm"`
+	Removable  flexibleRM        `json:"rm"`
 	Vendor     string            `json:"vendor"`
 	Model      string            `json:"model"`
 	Children   []usbDeviceRecord `json:"children,omitempty"`
@@ -65,15 +82,22 @@ type USBProvisionResult struct {
 
 func QueryBlockDeviceBytes(devName string) (uint64, error) {
 	baseName := filepath.Base(devName)
-	for len(baseName) > 0 && (baseName[len(baseName)-1] >= '0' && baseName[len(baseName)-1] <= '9') {
-		baseName = baseName[:len(baseName)-1]
-	}
-	baseName = strings.TrimSuffix(baseName, "p")
 
+	// 1. Check if exact partition node exists in /sys/class/block
 	sizeFile := filepath.Join("/sys/class/block", baseName, "size")
 	data, err := os.ReadFile(sizeFile)
 	if err != nil {
-		return 0, fmt.Errorf("reading block size from %s: %w", sizeFile, err)
+		// 2. If exact partition not found, fallback to parent disk
+		parent := baseName
+		for len(parent) > 0 && (parent[len(parent)-1] >= '0' && parent[len(parent)-1] <= '9') {
+			parent = parent[:len(parent)-1]
+		}
+		parent = strings.TrimSuffix(parent, "p")
+		sizeFile = filepath.Join("/sys/class/block", parent, "size")
+		data, err = os.ReadFile(sizeFile)
+		if err != nil {
+			return 0, fmt.Errorf("reading block size for %s: %w", devName, err)
+		}
 	}
 
 	sectors, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
@@ -97,7 +121,7 @@ func ProbeRemovableTargets() ([]USBTargetDevice, error) {
 	var targets []USBTargetDevice
 
 	for _, dev := range data.BlockDevices {
-		isUSB := strings.ToLower(dev.Tran) == "usb" || dev.Removable == "1" || dev.Removable == "true" || strings.HasPrefix(dev.Name, "sdc") || strings.HasPrefix(dev.Name, "sdd")
+		isUSB := strings.ToLower(dev.Tran) == "usb" || dev.Removable == "1" || dev.Removable == "true" || strings.HasPrefix(dev.Name, "sdc") || strings.HasPrefix(dev.Name, "sdd") || strings.HasPrefix(dev.Name, "sde")
 		if isUSB && dev.Type == "disk" {
 			devPath := "/dev/" + dev.Name
 			byteSize, _ := QueryBlockDeviceBytes(dev.Name)
@@ -169,12 +193,8 @@ func PrepareAutonomousUSBDisk(targetDev USBTargetDevice, logFn func(string)) (*U
 	_ = exec.Command("udevadm", "settle", "--timeout=10").Run()
 	time.Sleep(1 * time.Second)
 
-	part1 := diskPath + "1"
-	part2 := diskPath + "2"
-	if strings.Contains(diskPath, "nvme") || strings.Contains(diskPath, "mmcblk") {
-		part1 = diskPath + "p1"
-		part2 = diskPath + "p2"
-	}
+	part1 := JoinDiskAndPartition(diskPath, "1")
+	part2 := JoinDiskAndPartition(diskPath, "2")
 
 	logFn("=> [USB PREPARE] Formatting Partition 1 as ext4 [ORCH_STORAGE]...")
 	if out, err := exec.Command("mkfs.ext4", "-F", "-q", "-L", "ORCH_STORAGE", part1).CombinedOutput(); err != nil {
@@ -204,8 +224,6 @@ func PrepareAutonomousUSBDisk(targetDev USBTargetDevice, logFn func(string)) (*U
 	}, nil
 }
 
-// ArmAutonomousUSBBootloader guarantees BOOTX64.EFI exists on Partition 2 (ORCH_BOOT)
-// by compiling a standalone monolithic core with exact verified modules.
 func ArmAutonomousUSBBootloader(bootPart, isoPayloadPath, targetDisk string, logFn func(string)) error {
 	if logFn == nil {
 		logFn = func(string) {}
@@ -233,26 +251,25 @@ func ArmAutonomousUSBBootloader(bootPart, isoPayloadPath, targetDisk string, log
 	targetShim := filepath.Join(efiBootDir, "BOOTX64.EFI")
 	targetGrub := filepath.Join(efiBootDir, "grubx64.efi")
 
-	// 1. Write the main grub.cfg to all standard search directories
-	logFn("=> [UNIVERSAL EFI] Injecting autonomous offline orchestration boot configuration...")
-	grubCfgContent := fmt.Sprintf(`set default="0"
-set timeout=3
+	logFn("=> [UNIVERSAL EFI] Injecting autonomous zero-touch orchestration boot configuration...")
+
+	grubCfgContent := `set default="0"
+set timeout=2
 
 search --no-floppy --set=storage_part --label ORCH_STORAGE
 
 menuentry "Universal OS Orchestrator: Autonomous Offline Resizer & Installer" {
     set isofile="/os_image.payload"
     loopback loop ($storage_part)$isofile
-    linux (loop)/live/vmlinuz boot=live findiso=$isofile components quiet splash systemd.run=/transient_resize.sh systemd.run_success_action=reboot
+    linux (loop)/live/vmlinuz boot=live findiso=$isofile components quiet systemd.run="bash -c 'mkdir -p /mnt/vault && for i in $(seq 1 30); do mount -L ORCH_STORAGE /mnt/vault 2>/dev/null && break; sleep 1; done; if [ -f /mnt/vault/transient_resize.sh ]; then bash /mnt/vault/transient_resize.sh > /dev/tty1 2>&1; fi'"
     initrd (loop)/live/initrd.img
 }
-`, targetDisk)
+`
 
 	_ = os.WriteFile(filepath.Join(efiBootDir, "grub.cfg"), []byte(grubCfgContent), 0644)
 	_ = os.WriteFile(filepath.Join(bootGrubDir, "grub.cfg"), []byte(grubCfgContent), 0644)
 	_ = os.WriteFile(filepath.Join(bootMount, "grub.cfg"), []byte(grubCfgContent), 0644)
 
-	// 2. Prepare early-grub.cfg using verified search commands
 	earlyCfg := filepath.Join("/tmp", "early-grub.cfg")
 	earlyCfgContent := `search --no-floppy --label --set=root ORCH_BOOT
 set prefix=($root)/EFI/BOOT
@@ -261,7 +278,6 @@ normal
 	_ = os.WriteFile(earlyCfg, []byte(earlyCfgContent), 0644)
 	defer os.Remove(earlyCfg)
 
-	// 3. Monolithic compilation using actual available modules on Kali Linux
 	builtMonolithic := false
 	grubModDir := "/usr/lib/grub/x86_64-efi"
 	if fi, err := os.Stat(grubModDir); err == nil && fi.IsDir() {
@@ -287,7 +303,6 @@ normal
 		}
 	}
 
-	// 4. Guaranteed Fallback: Harvest existing host signed binaries if monolithic compilation failed
 	if !builtMonolithic || fileIsEmpty(targetShim) {
 		logFn("=> [UNIVERSAL EFI] Staging verified EFI bootloader from host system...")
 		candidates := []string{
@@ -307,12 +322,10 @@ normal
 		}
 	}
 
-	// Always duplicate targetShim to grubx64.efi so both standard UEFI entry paths exist
 	if _, err := os.Stat(targetShim); err == nil {
 		_ = copyFile(targetShim, targetGrub)
 	}
 
-	// Copy MokManager if available
 	mokSources := []string{
 		"/usr/lib/shim/mmx64.efi.signed",
 		"/boot/efi/EFI/kali/mmx64.efi",
@@ -328,7 +341,6 @@ normal
 
 	_ = exec.Command("sync").Run()
 
-	// Strict sanity assertion: fail fast if the file is absent or empty
 	fi, err := os.Stat(targetShim)
 	if err != nil || fi.Size() == 0 {
 		return fmt.Errorf("fatal: failed to populate non-zero byte EFI binary at %s", targetShim)
@@ -347,6 +359,12 @@ func fileIsEmpty(path string) bool {
 }
 
 func StagePayloadWithContext(ctx context.Context, srcPath, destDir string, progressFn func(written, total int64)) (string, error) {
+	// Transparently extract ISO if srcPath points to a ZIP file
+	scratchDir := filepath.Join(os.TempDir(), "orch_extracted_payload")
+	if normalizedPath, err := EnsureRawISO(srcPath, scratchDir, progressFn); err == nil {
+		srcPath = normalizedPath
+	}
+
 	destPath := filepath.Join(destDir, "os_image.payload")
 
 	src, err := os.Open(srcPath)
@@ -381,6 +399,9 @@ func StagePayloadWithContext(ctx context.Context, srcPath, destDir string, progr
 	}
 	defer dst.Close()
 
+	bufWriter := bufio.NewWriterSize(dst, 8*1024*1024)
+	defer bufWriter.Flush()
+
 	buf := make([]byte, 4*1024*1024)
 	written := startOffset
 	lastUpdate := time.Now()
@@ -388,6 +409,7 @@ func StagePayloadWithContext(ctx context.Context, srcPath, destDir string, progr
 	for {
 		select {
 		case <-ctx.Done():
+			_ = bufWriter.Flush()
 			_ = dst.Sync()
 			return destPath, ctx.Err()
 		default:
@@ -395,7 +417,7 @@ func StagePayloadWithContext(ctx context.Context, srcPath, destDir string, progr
 
 		n, rErr := src.Read(buf)
 		if n > 0 {
-			wn, wErr := dst.Write(buf[:n])
+			wn, wErr := bufWriter.Write(buf[:n])
 			if wErr != nil {
 				return "", fmt.Errorf("writing to storage vault: %w", wErr)
 			}
@@ -415,11 +437,34 @@ func StagePayloadWithContext(ctx context.Context, srcPath, destDir string, progr
 		}
 	}
 
+	_ = bufWriter.Flush()
 	_ = dst.Sync()
-	_ = exec.Command("sync").Run()
 	return destPath, nil
 }
 
+func newOptimizedHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConns:          128,
+			MaxIdleConnsPerHost:   32,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+			ReadBufferSize:        4 * 1024 * 1024,
+			WriteBufferSize:       4 * 1024 * 1024,
+		},
+	}
+}
+
+// DownloadPayloadToUSB implements dual-engine acceleration:
+// 1. Parallel 8-worker segmented downloads via HTTP Range headers.
+// 2. High-throughput single-stream fallback with 8MB write buffering.
 func DownloadPayloadToUSB(targetDev USBTargetDevice, imageURL string, progressFn func(written, total int64)) error {
 	mountPoint := targetDev.MountPoint
 	autoMounted := false
@@ -448,8 +493,124 @@ func DownloadPayloadToUSB(targetDev USBTargetDevice, imageURL string, progressFn
 	}()
 
 	destPath := filepath.Join(mountPoint, "os_image.payload")
+	client := newOptimizedHTTPClient()
 
-	resp, err := http.Get(imageURL)
+	// Probe server capabilities via HEAD request
+	headResp, err := client.Head(imageURL)
+	var totalBytes int64 = -1
+	supportsRanges := false
+
+	if err == nil {
+		defer headResp.Body.Close()
+		totalBytes = headResp.ContentLength
+		acceptRanges := headResp.Header.Get("Accept-Ranges")
+		if strings.EqualFold(acceptRanges, "bytes") && totalBytes > 20*1024*1024 {
+			supportsRanges = true
+		}
+	}
+
+	// 1. Multi-Stream Parallel Segment Acceleration Engine
+	if supportsRanges && totalBytes > 0 {
+		out, cErr := os.OpenFile(destPath, os.O_CREATE|os.O_RDWR, 0644)
+		if cErr == nil {
+			if tErr := out.Truncate(totalBytes); tErr == nil {
+				const numWorkers = 8
+				chunkSize := totalBytes / numWorkers
+				var totalWritten int64
+				var wg sync.WaitGroup
+				var workerErr error
+				var errMu sync.Mutex
+
+				lastUpdate := time.Now()
+				var updateMu sync.Mutex
+
+				for i := 0; i < numWorkers; i++ {
+					wg.Add(1)
+					startOffset := int64(i) * chunkSize
+					endOffset := startOffset + chunkSize - 1
+					if i == numWorkers-1 {
+						endOffset = totalBytes - 1
+					}
+
+					go func(start, end int64) {
+						defer wg.Done()
+						req, rErr := http.NewRequest("GET", imageURL, nil)
+						if rErr != nil {
+							errMu.Lock()
+							workerErr = rErr
+							errMu.Unlock()
+							return
+						}
+						req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+
+						resp, doErr := client.Do(req)
+						if doErr != nil {
+							errMu.Lock()
+							workerErr = doErr
+							errMu.Unlock()
+							return
+						}
+						defer resp.Body.Close()
+
+						if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+							errMu.Lock()
+							workerErr = fmt.Errorf("range request failed with HTTP %s", resp.Status)
+							errMu.Unlock()
+							return
+						}
+
+						buf := make([]byte, 512*1024)
+						curOffset := start
+
+						for {
+							n, readErr := resp.Body.Read(buf)
+							if n > 0 {
+								_, writeErr := out.WriteAt(buf[:n], curOffset)
+								if writeErr != nil {
+									errMu.Lock()
+									workerErr = writeErr
+									errMu.Unlock()
+									return
+								}
+								curOffset += int64(n)
+								currentTotal := atomic.AddInt64(&totalWritten, int64(n))
+
+								updateMu.Lock()
+								if time.Since(lastUpdate) > 150*time.Millisecond || currentTotal >= totalBytes {
+									if progressFn != nil {
+										progressFn(currentTotal, totalBytes)
+									}
+									lastUpdate = time.Now()
+								}
+								updateMu.Unlock()
+							}
+							if readErr != nil {
+								if readErr != io.EOF {
+									errMu.Lock()
+									workerErr = readErr
+									errMu.Unlock()
+								}
+								break
+							}
+						}
+					}(startOffset, endOffset)
+				}
+
+				wg.Wait()
+				_ = out.Sync()
+				out.Close()
+
+				if workerErr == nil {
+					return nil
+				}
+			} else {
+				out.Close()
+			}
+		}
+	}
+
+	// 2. High-Throughput Buffered Single-Stream Fallback Engine
+	resp, err := client.Get(imageURL)
 	if err != nil {
 		return fmt.Errorf("connecting to image stream: %w", err)
 	}
@@ -461,26 +622,32 @@ func DownloadPayloadToUSB(targetDev USBTargetDevice, imageURL string, progressFn
 
 	out, err := os.Create(destPath)
 	if err != nil {
-		return fmt.Errorf("creating destination file on USB: %w", err)
+		return fmt.Errorf("creating destination payload on USB: %w", err)
 	}
 	defer out.Close()
 
+	bufWriter := bufio.NewWriterSize(out, 8*1024*1024)
+	defer bufWriter.Flush()
+
 	total := resp.ContentLength
-	buf := make([]byte, 32*1024)
+	buf := make([]byte, 4*1024*1024)
 	var written int64
+	lastUpdate := time.Now()
 
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
-			nWrite, writeErr := out.Write(buf[:n])
-			if nWrite > 0 {
-				written += int64(nWrite)
+			nWrite, writeErr := bufWriter.Write(buf[:n])
+			if writeErr != nil {
+				return fmt.Errorf("writing to USB storage: %w", writeErr)
+			}
+			written += int64(nWrite)
+
+			if time.Since(lastUpdate) > 150*time.Millisecond || written == total {
 				if progressFn != nil {
 					progressFn(written, total)
 				}
-			}
-			if writeErr != nil {
-				return fmt.Errorf("writing to USB storage: %w", writeErr)
+				lastUpdate = time.Now()
 			}
 		}
 		if readErr != nil {
@@ -491,6 +658,7 @@ func DownloadPayloadToUSB(targetDev USBTargetDevice, imageURL string, progressFn
 		}
 	}
 
+	_ = bufWriter.Flush()
 	_ = out.Sync()
 	return nil
 }
@@ -527,7 +695,6 @@ func ProbeUSBPayloads() ([]USBPayload, error) {
 
 	candidateVaults := []string{
 		"/mnt/orch_usb_storage",
-		"/mnt/orch_drive_sdc1",
 		"/media",
 		"/run/media",
 	}
@@ -699,10 +866,7 @@ func FactoryResetUSB(diskPath, fsType string) error {
 	_ = exec.Command("udevadm", "settle", "--timeout=10").Run()
 	time.Sleep(1 * time.Second)
 
-	part1 := diskPath + "1"
-	if strings.Contains(diskPath, "nvme") || strings.Contains(diskPath, "mmcblk") {
-		part1 = diskPath + "p1"
-	}
+	part1 := JoinDiskAndPartition(diskPath, "1")
 
 	switch strings.ToLower(fsType) {
 	case "ntfs":

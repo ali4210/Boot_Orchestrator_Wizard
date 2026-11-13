@@ -1,7 +1,9 @@
 // Package engine — orchestrator.go coordinates transactional provisioning,
 // storage isolation, multi-mirror streaming with pause/resume support,
-// automated physical partition carving, autonomous Live USB staging,
-// hands-free UEFI BootNext orchestration, and atomic crash recovery.
+// dynamic bare-metal vs virtual machine storage routing, automated partition carving,
+// autonomous Live USB staging, cross-platform 7-Zip & wimtools provisioning,
+// native macOS BaseSystem unpacking, OpenCore boot registration, Windows WIM deployment,
+// and atomic crash recovery.
 package engine
 
 import (
@@ -16,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -42,7 +45,7 @@ type ProvisionRequest struct {
 	SelectedEntry    *discovery.Entry
 	HostPartNum      string
 	ESPPartNum       string
-	ProvisionMode    string // "dual-boot" or "single-boot"
+	ProvisionMode    string
 	AllocatedBytes   uint64
 }
 
@@ -105,19 +108,23 @@ func DetectAllInternalDisks() ([]USBTargetDevice, error) {
 }
 
 func DetectActiveRootDisk() (parentDisk string, hostPart string, hostNum string, targetPart string, err error) {
-	f, err := os.Open("/proc/mounts")
-	if err != nil {
-		return "/dev/sdb", "/dev/sdb2", "2", "/dev/sdb3", nil
-	}
-	defer f.Close()
-
 	rootDev := ""
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) >= 2 && fields[1] == "/" {
-			rootDev = fields[0]
-			break
+
+	if out, err := exec.Command("findmnt", "-n", "-o", "SOURCE", "/").Output(); err == nil {
+		rootDev = strings.TrimSpace(string(out))
+	}
+
+	if rootDev == "" {
+		if f, err := os.Open("/proc/mounts"); err == nil {
+			scanner := bufio.NewScanner(f)
+			for scanner.Scan() {
+				fields := strings.Fields(scanner.Text())
+				if len(fields) >= 2 && fields[1] == "/" {
+					rootDev = fields[0]
+					break
+				}
+			}
+			f.Close()
 		}
 	}
 
@@ -125,35 +132,406 @@ func DetectActiveRootDisk() (parentDisk string, hostPart string, hostNum string,
 		rootDev = real
 	}
 
-	if rootDev == "" || !strings.HasPrefix(rootDev, "/dev/") {
-		return "/dev/sdb", "/dev/sdb2", "2", "/dev/sdb3", nil
-	}
+	if rootDev != "" && strings.HasPrefix(rootDev, "/dev/") {
+		base := filepath.Base(rootDev)
+		if strings.HasPrefix(base, "nvme") || strings.HasPrefix(base, "mmcblk") {
+			idx := strings.LastIndex(base, "p")
+			if idx != -1 && idx < len(base)-1 {
+				pDisk := "/dev/" + base[:idx]
+				pNum := base[idx+1:]
+				pNumInt, _ := strconv.Atoi(pNum)
+				tNum := strconv.Itoa(pNumInt + 1)
+				return pDisk, rootDev, pNum, pDisk + "p" + tNum, nil
+			}
+		}
 
-	base := filepath.Base(rootDev)
-	if strings.HasPrefix(base, "nvme") || strings.HasPrefix(base, "mmcblk") {
-		idx := strings.LastIndex(base, "p")
-		if idx != -1 && idx < len(base)-1 {
-			pDisk := "/dev/" + base[:idx]
-			pNum := base[idx+1:]
+		i := len(base) - 1
+		for i >= 0 && unicode.IsDigit(rune(base[i])) {
+			i--
+		}
+		if i < len(base)-1 {
+			pDisk := "/dev/" + base[:i+1]
+			pNum := base[i+1:]
 			pNumInt, _ := strconv.Atoi(pNum)
 			tNum := strconv.Itoa(pNumInt + 1)
-			return pDisk, rootDev, pNum, pDisk + "p" + tNum, nil
+			return pDisk, rootDev, pNum, pDisk + tNum, nil
 		}
 	}
 
-	i := len(base) - 1
-	for i >= 0 && unicode.IsDigit(rune(base[i])) {
-		i--
-	}
-	if i < len(base)-1 {
-		pDisk := "/dev/" + base[:i+1]
-		pNum := base[i+1:]
-		pNumInt, _ := strconv.Atoi(pNum)
-		tNum := strconv.Itoa(pNumInt + 1)
-		return pDisk, rootDev, pNum, pDisk + tNum, nil
+	disks, _ := DetectAllInternalDisks()
+	if len(disks) > 0 {
+		d := disks[0].DevPath
+		return d, d + "1", "1", d + "2", nil
 	}
 
-	return "/dev/sdb", "/dev/sdb2", "2", "/dev/sdb3", nil
+	return "/dev/sda", "/dev/sda1", "1", "/dev/sda2", nil
+}
+
+func ensure7ZipInstalled(logFn func(string)) error {
+	if _, err := exec.LookPath("7z"); err == nil {
+		return nil
+	}
+
+	logFn("=> [AUTONOMOUS ENGINE] 7z binary missing. Resolving host platform package manager...")
+
+	switch runtime.GOOS {
+	case "linux":
+		if _, err := exec.LookPath("apt-get"); err == nil {
+			logFn("=> [AUTONOMOUS ENGINE] Installing 7zip via apt-get...")
+			_ = exec.Command("apt-get", "update", "-y").Run()
+			if out, err := exec.Command("apt-get", "install", "-y", "7zip").CombinedOutput(); err != nil {
+				return fmt.Errorf("apt-get install 7zip failed: %w (%s)", err, string(out))
+			}
+			return nil
+		} else if _, err := exec.LookPath("dnf"); err == nil {
+			logFn("=> [AUTONOMOUS ENGINE] Installing p7zip via dnf...")
+			if out, err := exec.Command("dnf", "install", "-y", "p7zip", "p7zip-plugins").CombinedOutput(); err != nil {
+				return fmt.Errorf("dnf install p7zip failed: %w (%s)", err, string(out))
+			}
+			return nil
+		} else if _, err := exec.LookPath("pacman"); err == nil {
+			logFn("=> [AUTONOMOUS ENGINE] Installing p7zip via pacman...")
+			if out, err := exec.Command("pacman", "-Sy", "--noconfirm", "p7zip").CombinedOutput(); err != nil {
+				return fmt.Errorf("pacman install p7zip failed: %w (%s)", err, string(out))
+			}
+			return nil
+		}
+	case "windows":
+		if _, err := exec.LookPath("winget"); err == nil {
+			logFn("=> [AUTONOMOUS ENGINE] Installing 7zip via winget...")
+			return exec.Command("winget", "install", "--id", "7zip.7zip", "-e", "--silent", "--accept-source-agreements", "--accept-package-agreements").Run()
+		} else if _, err := exec.LookPath("choco"); err == nil {
+			logFn("=> [AUTONOMOUS ENGINE] Installing 7zip via choco...")
+			return exec.Command("choco", "install", "7zip", "-y").Run()
+		}
+	case "darwin":
+		if _, err := exec.LookPath("brew"); err == nil {
+			logFn("=> [AUTONOMOUS ENGINE] Installing sevenzip via Homebrew...")
+			return exec.Command("brew", "install", "sevenzip").Run()
+		}
+	}
+
+	return errors.New("cannot resolve suitable package manager to autonomously install 7z")
+}
+
+func ensureWindowsDeployToolsInstalled(logFn func(string)) error {
+	if logFn == nil {
+		logFn = func(string) {}
+	}
+
+	hasWim := false
+	if _, err := exec.LookPath("wimapply"); err == nil {
+		hasWim = true
+	}
+	hasNtfs := false
+	if _, err := exec.LookPath("mkfs.ntfs"); err == nil {
+		hasNtfs = true
+	}
+
+	if hasWim && hasNtfs {
+		return nil
+	}
+
+	logFn("=> [AUTONOMOUS ENGINE] Windows deployment utilities (wimtools/ntfs-3g) missing. Auto-installing...")
+
+	switch runtime.GOOS {
+	case "linux":
+		if _, err := exec.LookPath("apt-get"); err == nil {
+			logFn("=> [AUTONOMOUS ENGINE] Installing wimtools & ntfs-3g via apt-get...")
+			_ = exec.Command("apt-get", "update", "-y").Run()
+			if out, err := exec.Command("apt-get", "install", "-y", "wimtools", "ntfs-3g").CombinedOutput(); err != nil {
+				return fmt.Errorf("installing wimtools/ntfs-3g via apt failed: %w (%s)", err, string(out))
+			}
+			return nil
+		} else if _, err := exec.LookPath("dnf"); err == nil {
+			logFn("=> [AUTONOMOUS ENGINE] Installing wimtools & ntfs-3g via dnf...")
+			if out, err := exec.Command("dnf", "install", "-y", "wimtools", "ntfs-3g").CombinedOutput(); err != nil {
+				return fmt.Errorf("installing wimtools/ntfs-3g via dnf failed: %w (%s)", err, string(out))
+			}
+			return nil
+		} else if _, err := exec.LookPath("pacman"); err == nil {
+			logFn("=> [AUTONOMOUS ENGINE] Installing wimlib & ntfs-3g via pacman...")
+			if out, err := exec.Command("pacman", "-Sy", "--noconfirm", "wimlib", "ntfs-3g").CombinedOutput(); err != nil {
+				return fmt.Errorf("installing wimlib/ntfs-3g via pacman failed: %w (%s)", err, string(out))
+			}
+			return nil
+		}
+	}
+
+	return errors.New("cannot resolve host package manager to autonomously install wimtools and ntfs-3g")
+}
+
+func deployMacOSPayload(dmgPath, targetPart string, logFn func(string)) error {
+	if logFn == nil {
+		logFn = func(string) {}
+	}
+
+	if err := ensure7ZipInstalled(logFn); err != nil {
+		return fmt.Errorf("dependency resolution failed: %w", err)
+	}
+
+	logFn(fmt.Sprintf("=> [MACOS DEPLOY] Formatting target partition %s as ext4 [MACOS_RECOVERY]...", targetPart))
+	if out, err := exec.Command("mkfs.ext4", "-F", "-q", "-L", "MACOS_RECOVERY", targetPart).CombinedOutput(); err != nil {
+		return fmt.Errorf("formatting target %s: %w (%s)", targetPart, err, string(out))
+	}
+
+	targetMount := "/mnt/orch_target_root"
+	_ = os.MkdirAll(targetMount, 0755)
+	_ = exec.Command("umount", "-l", targetMount).Run()
+
+	logFn(fmt.Sprintf("=> [MACOS DEPLOY] Mounting %s at %s...", targetPart, targetMount))
+	if out, err := exec.Command("mount", targetPart, targetMount).CombinedOutput(); err != nil {
+		return fmt.Errorf("mounting target partition %s: %w (%s)", targetPart, err, string(out))
+	}
+	defer func() {
+		_ = exec.Command("sync").Run()
+		_ = exec.Command("umount", "-l", targetMount).Run()
+	}()
+
+	logFn("=> [MACOS DEPLOY] Unpacking Apple BaseSystem via 7-Zip engine (2-3 min)...")
+	cmd7z := exec.Command("7z", "x", "-y", fmt.Sprintf("-o%s", targetMount), dmgPath)
+	_ = cmd7z.Run()
+
+	nestedDir := filepath.Join(targetMount, "macOS Base System")
+	if fi, err := os.Stat(nestedDir); err == nil && fi.IsDir() {
+		logFn("=> [MACOS DEPLOY] Structuring recovery filesystem tree...")
+		_ = exec.Command("bash", "-c", fmt.Sprintf("shopt -s dotglob; mv %s/* %s/ 2>/dev/null || true; rmdir %s 2>/dev/null || true", nestedDir, targetMount, nestedDir)).Run()
+	}
+
+	_ = exec.Command("sync").Run()
+	logFn("=> [MACOS DEPLOY 100%] Apple BaseSystem deployed successfully.")
+	return nil
+}
+
+func deployWindowsPayload(isoPath, targetPart string, wimIndex int, autounattendSrc string, logFn func(string)) error {
+	if logFn == nil {
+		logFn = func(string) {}
+	}
+
+	if err := ensureWindowsDeployToolsInstalled(logFn); err != nil {
+		return fmt.Errorf("dependency resolution failed: %w", err)
+	}
+
+	fsTypeOut, _ := exec.Command("blkid", "-s", "TYPE", "-o", "value", targetPart).Output()
+	if !strings.EqualFold(strings.TrimSpace(string(fsTypeOut)), "ntfs") {
+		logFn(fmt.Sprintf("=> [WINDOWS DEPLOY] Formatting target partition %s as NTFS [WINDOWS]...", targetPart))
+		if out, err := exec.Command("mkfs.ntfs", "-F", "-q", "-L", "WINDOWS", targetPart).CombinedOutput(); err != nil {
+			return fmt.Errorf("formatting target %s as NTFS: %w (%s)", targetPart, err, string(out))
+		}
+	} else {
+		logFn(fmt.Sprintf("=> [WINDOWS DEPLOY] Verified existing NTFS partition on %s", targetPart))
+	}
+
+	targetMount := "/mnt/orch_target_root"
+	_ = os.MkdirAll(targetMount, 0755)
+	_ = exec.Command("umount", "-l", targetMount).Run()
+
+	logFn(fmt.Sprintf("=> [WINDOWS DEPLOY] Mounting target NTFS partition %s at %s...", targetPart, targetMount))
+	if out, err := exec.Command("mount", "-t", "ntfs-3g", targetPart, targetMount).CombinedOutput(); err != nil {
+		if out2, err2 := exec.Command("mount", targetPart, targetMount).CombinedOutput(); err2 != nil {
+			return fmt.Errorf("mounting target partition %s: %w (%s | %s)", targetPart, err, string(out), string(out2))
+		}
+	}
+	defer func() {
+		_ = exec.Command("sync").Run()
+		_ = exec.Command("umount", "-l", targetMount).Run()
+	}()
+
+	isoMount := "/mnt/orch_iso_source"
+	_ = os.MkdirAll(isoMount, 0755)
+	_ = exec.Command("umount", "-l", isoMount).Run()
+
+	logFn("=> [WINDOWS DEPLOY] Mounting Windows source ISO loopback: " + isoPath)
+	if out, err := exec.Command("mount", "-o", "loop,ro", isoPath, isoMount).CombinedOutput(); err != nil {
+		return fmt.Errorf("mounting loop ISO %s: %w (%s)", isoPath, err, string(out))
+	}
+	defer func() {
+		_ = exec.Command("umount", "-l", isoMount).Run()
+	}()
+
+	candidates := []string{
+		filepath.Join(isoMount, "sources", "install.wim"),
+		filepath.Join(isoMount, "sources", "install.esd"),
+		filepath.Join(isoMount, "sources", "INSTALL.WIM"),
+		filepath.Join(isoMount, "sources", "INSTALL.ESD"),
+	}
+	wimPath := ""
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && fi.Size() > 0 {
+			wimPath = c
+			break
+		}
+	}
+	if wimPath == "" {
+		return fmt.Errorf("cannot locate install.wim or install.esd inside source ISO (%s)", isoPath)
+	}
+
+	targetIndex := "1"
+	if wimIndex > 0 {
+		targetIndex = strconv.Itoa(wimIndex)
+	}
+
+	logFn(fmt.Sprintf("=> [WINDOWS DEPLOY] Applying Windows image from %s (Index %s) via wimapply (3-6 min)...", filepath.Base(wimPath), targetIndex))
+	cmdApply := exec.Command("wimapply", wimPath, targetIndex, targetMount)
+	if out, err := cmdApply.CombinedOutput(); err != nil {
+		return fmt.Errorf("wimapply extraction failed: %w (%s)", err, string(out))
+	}
+
+	if autounattendSrc != "" {
+		logFn("=> [WINDOWS DEPLOY] Injecting unattended answer file for silent OOBE...")
+		if err := injectAutounattend(autounattendSrc, targetMount); err != nil {
+			return fmt.Errorf("autounattend injection failed: %w", err)
+		}
+	}
+
+	_ = exec.Command("sync").Run()
+	logFn("=> [WINDOWS DEPLOY 100%] Windows operating system tree successfully applied.")
+	return nil
+}
+
+func registerWindowsInGRUB(isoPath, targetDiskPath, targetPart, espPath, grubDefaultPath string, logFn func(string)) error {
+	if logFn == nil {
+		logFn = func(string) {}
+	}
+
+	logFn("=> [BOOTLOADER] Querying Windows target partition UUID...")
+	uuidOut, err := exec.Command("blkid", "-s", "UUID", "-o", "value", targetPart).Output()
+	targetUUID := strings.TrimSpace(string(uuidOut))
+	if targetUUID == "" {
+		return fmt.Errorf("failed to retrieve UUID for target Windows partition %s: %w", targetPart, err)
+	}
+
+	hostESP := espPath
+	if hostESP == "" {
+		hostESP = "/boot/efi"
+	}
+	winESPDir := filepath.Join(hostESP, "EFI", "Microsoft", "Boot")
+	_ = os.MkdirAll(winESPDir, 0755)
+
+	targetMount := "/mnt/orch_target_root"
+	_ = os.MkdirAll(targetMount, 0755)
+	_ = exec.Command("umount", "-l", targetMount).Run()
+	if _, err := exec.Command("mount", "-o", "ro", targetPart, targetMount).CombinedOutput(); err == nil {
+		defer func() {
+			_ = exec.Command("umount", "-l", targetMount).Run()
+		}()
+		srcBootEFI := filepath.Join(targetMount, "Windows", "Boot", "EFI")
+		if fi, err := os.Stat(srcBootEFI); err == nil && fi.IsDir() {
+			_ = exec.Command("cp", "-r", filepath.Join(srcBootEFI, "."), winESPDir).Run()
+		}
+	}
+
+	if err := writeWindowsBCD(isoPath, targetDiskPath, targetPart, logFn); err != nil {
+		return fmt.Errorf("BCD generation failed: %w", err)
+	}
+
+	customFile := "/etc/grub.d/40_custom"
+	existing, _ := os.ReadFile(customFile)
+
+	entryMarker := "Windows 11 Boot Manager"
+	if !strings.Contains(string(existing), entryMarker) {
+		customEntry := fmt.Sprintf(`#!/bin/sh
+exec tail -n +3 $0
+
+menuentry "%s" {
+    insmod part_gpt
+    insmod fat
+    insmod ntfs
+    insmod chain
+    search --no-floppy --fs-uuid --set=root %s
+    chainloader /EFI/Microsoft/Boot/bootmgfw.efi
+}
+`, entryMarker, targetUUID)
+
+		f, err := os.OpenFile(customFile, os.O_APPEND|os.O_WRONLY, 0755)
+		if err == nil {
+			_, _ = f.WriteString(customEntry)
+			_ = f.Close()
+		}
+	}
+
+	logFn("=> [BOOTLOADER] Synchronizing host GRUB with os-prober and Windows boot configuration...")
+	_ = exec.Command("sed", "-i", `s/^#\?GRUB_DISABLE_OS_PROBER=.*/GRUB_DISABLE_OS_PROBER=false/`, "/etc/default/grub").Run()
+	if out, err := exec.Command("update-grub").CombinedOutput(); err != nil {
+		return fmt.Errorf("updating grub: %w (%s)", err, string(out))
+	}
+
+	logFn("=> [BOOTLOADER] Host GRUB successfully updated with verified Windows 11 entry.")
+	return nil
+}
+
+func registerMacOSInGRUB(targetPart, espPath, grubDefaultPath string, logFn func(string)) error {
+	if logFn == nil {
+		logFn = func(string) {}
+	}
+
+	logFn("=> [BOOTLOADER] Validating OpenCore EFI staging environment...")
+
+	ocTarget := "/boot/efi/EFI/OC/OpenCore.efi"
+	if _, err := os.Stat(ocTarget); err != nil {
+		logFn("=> [BOOTLOADER] OpenCore.efi missing. Staging standardized EFI package...")
+		_ = os.MkdirAll("/boot/efi/EFI/OC", 0755)
+		tmpZip := "/tmp/OpenCoreEFI.zip"
+		url := "https://github.com/thenickdude/KVM-Opencore/releases/download/v21/OpenCoreEFIFolder-v21.zip"
+		if _, err := exec.Command("curl", "-sSL", "-o", tmpZip, url).CombinedOutput(); err == nil {
+			_ = exec.Command("unzip", "-q", "-o", tmpZip, "-d", "/tmp/oc_unpack").Run()
+			_ = exec.Command("cp", "-r", "/tmp/oc_unpack/EFI/.", "/boot/efi/EFI/").Run()
+			_ = os.RemoveAll("/tmp/oc_unpack")
+			_ = os.Remove(tmpZip)
+		}
+	}
+
+	bootPart := ""
+	if out, err := exec.Command("df", "--output=source", "/boot").Output(); err == nil {
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if len(lines) > 1 {
+			bootPart = lines[1]
+		}
+	}
+	if bootPart == "" {
+		bootPart, _, _, _, _ = DetectActiveRootDisk()
+	}
+
+	uuidOut, _ := exec.Command("blkid", "-s", "UUID", "-o", "value", bootPart).Output()
+	bootUUID := strings.TrimSpace(string(uuidOut))
+
+	fsTypeOut, _ := exec.Command("blkid", "-s", "TYPE", "-o", "value", bootPart).Output()
+	bootFSType := strings.ToLower(strings.TrimSpace(string(fsTypeOut)))
+
+	fsDriver := "ext2"
+	if strings.Contains(bootFSType, "fat") {
+		fsDriver = "fat"
+	}
+
+	customEntry := fmt.Sprintf(`#!/bin/sh
+exec tail -n +3 $0
+
+menuentry "macOS Recovery (OpenCore)" {
+    insmod part_gpt
+    insmod part_msdos
+    insmod %s
+    insmod chain
+    search --no-floppy --fs-uuid --set=root %s
+    chainloader /EFI/OC/OpenCore.efi
+}
+`, fsDriver, bootUUID)
+
+	customFile := "/etc/grub.d/40_custom"
+	existing, _ := os.ReadFile(customFile)
+	if !strings.Contains(string(existing), "macOS Recovery (OpenCore)") {
+		f, err := os.OpenFile(customFile, os.O_APPEND|os.O_WRONLY, 0755)
+		if err == nil {
+			_, _ = f.WriteString(customEntry)
+			_ = f.Close()
+		}
+	}
+
+	if out, err := exec.Command("update-grub").CombinedOutput(); err != nil {
+		return fmt.Errorf("updating grub: %w (%s)", err, string(out))
+	}
+
+	logFn("=> [BOOTLOADER] Host GRUB successfully updated with verified macOS OpenCore entry.")
+	return nil
 }
 
 func extractLiveRootFS(isoPath, targetPart string, logFn func(string)) error {
@@ -167,8 +545,8 @@ func extractLiveRootFS(isoPath, targetPart string, logFn func(string)) error {
 		return fmt.Errorf("target partition %s capacity (%.1f GB) is critically below the 20 GB safety threshold", targetPart, float64(sizeBytes)/(1024*1024*1024))
 	}
 
-	logFn(fmt.Sprintf("=> [ROOTFS DEPLOY] Formatting target partition %s as ext4 [PARROT_ROOT]...", targetPart))
-	if out, err := exec.Command("mkfs.ext4", "-F", "-q", "-L", "PARROT_ROOT", targetPart).CombinedOutput(); err != nil {
+	logFn(fmt.Sprintf("=> [ROOTFS DEPLOY] Formatting target partition %s as ext4 [LINUX_ROOT]...", targetPart))
+	if out, err := exec.Command("mkfs.ext4", "-F", "-q", "-L", "LINUX_ROOT", targetPart).CombinedOutput(); err != nil {
 		return fmt.Errorf("formatting %s: %w (%s)", targetPart, err, string(out))
 	}
 	_ = exec.Command("sync").Run()
@@ -198,18 +576,45 @@ func extractLiveRootFS(isoPath, targetPart string, logFn func(string)) error {
 		_ = exec.Command("umount", "-l", isoMount).Run()
 	}()
 
-	squashPath := filepath.Join(isoMount, "live", "filesystem.squashfs")
-	if _, err := os.Stat(squashPath); err != nil {
-		candidates := []string{
-			filepath.Join(isoMount, "casper", "filesystem.squashfs"),
-			filepath.Join(isoMount, "live", "rootfs.squashfs"),
-		}
-		for _, c := range candidates {
-			if _, sErr := os.Stat(c); sErr == nil {
-				squashPath = c
+	squashPath := ""
+	candidateDirs := []string{
+		filepath.Join(isoMount, "casper"),
+		filepath.Join(isoMount, "live"),
+		filepath.Join(isoMount, "install"),
+		filepath.Join(isoMount, "arch", "x86_64"),
+	}
+
+	for _, dir := range candidateDirs {
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, e := range entries {
+				name := strings.ToLower(e.Name())
+				if strings.HasSuffix(name, ".squashfs") && !strings.Contains(name, "initrd") {
+					if name == "filesystem.squashfs" || strings.Contains(name, "ubuntu-desktop") || strings.Contains(name, "minimal") || name == "airootfs.sfs" {
+						squashPath = filepath.Join(dir, e.Name())
+						break
+					}
+				}
+			}
+			if squashPath != "" {
+				break
+			}
+			var maxBytes int64 = 0
+			for _, e := range entries {
+				if strings.HasSuffix(strings.ToLower(e.Name()), ".squashfs") {
+					if fi, sErr := e.Info(); sErr == nil && fi.Size() > maxBytes {
+						maxBytes = fi.Size()
+						squashPath = filepath.Join(dir, e.Name())
+					}
+				}
+			}
+			if squashPath != "" {
 				break
 			}
 		}
+	}
+
+	if squashPath == "" {
+		squashPath = filepath.Join(isoMount, "live", "filesystem.squashfs")
 	}
 
 	logFn("=> [ROOTFS DEPLOY] Extracting live root filesystem tree via unsquashfs (2-4 min)...")
@@ -233,8 +638,7 @@ func extractLiveRootFS(isoPath, targetPart string, logFn func(string)) error {
 		logFn("=> [ROOTFS DEPLOY] Injected /etc/fstab entry mapped to UUID: " + uuidStr)
 	}
 
-	// Preset Credentials Injection: root:saleem & saleem:saleem (sudo)
-	logFn("=> [CREDENTIALS] Configuring persistent user accounts (root:saleem, saleem:saleem)...")
+	logFn("=> [CREDENTIALS] Configuring persistent user accounts and purging installer artifacts...")
 	sudoersDir := filepath.Join(targetMount, "etc", "sudoers.d")
 	_ = os.MkdirAll(sudoersDir, 0750)
 	_ = os.WriteFile(filepath.Join(sudoersDir, "saleem"), []byte("saleem ALL=(ALL:ALL) ALL\n"), 0440)
@@ -243,15 +647,17 @@ func extractLiveRootFS(isoPath, targetPart string, logFn func(string)) error {
 	_ = exec.Command("mount", "--bind", "/proc", filepath.Join(targetMount, "proc")).Run()
 	_ = exec.Command("mount", "--bind", "/sys", filepath.Join(targetMount, "sys")).Run()
 
-	chrootCmds := []string{
-		"echo 'root:saleem' | chpasswd",
-		"id -u saleem >/dev/null 2>&1 || useradd -m -s /bin/bash saleem",
-		"echo 'saleem:saleem' | chpasswd",
-		"usermod -aG sudo saleem 2>/dev/null || true",
-	}
-	for _, cmdStr := range chrootCmds {
-		_ = exec.Command("chroot", targetMount, "bash", "-c", cmdStr).Run()
-	}
+	chrootCleanup := `
+echo 'root:saleem' | chpasswd
+id -u saleem >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo saleem
+echo 'saleem:saleem' | chpasswd
+rm -rf /home/saleem/Desktop/install* /home/saleem/Desktop/calamares* /home/saleem/Desktop/README*
+rm -rf /etc/skel/Desktop/install* /etc/skel/Desktop/calamares* /etc/skel/Desktop/README*
+rm -rf /root/Desktop/install* /root/Desktop/calamares* /root/Desktop/README*
+apt-get purge -y calamares calamares-settings-debian calamares-settings-parrot 2>/dev/null || true
+systemctl disable calamares.service 2>/dev/null || true
+`
+	_ = exec.Command("chroot", targetMount, "bash", "-c", chrootCleanup).Run()
 
 	_ = exec.Command("umount", "-l", filepath.Join(targetMount, "dev")).Run()
 	_ = exec.Command("umount", "-l", filepath.Join(targetMount, "proc")).Run()
@@ -261,12 +667,59 @@ func extractLiveRootFS(isoPath, targetPart string, logFn func(string)) error {
 	return nil
 }
 
+// copyFileDirect streams data with zero kernel buffer deadlocks and 4MB buffers.
+func copyFileDirect(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	buf := make([]byte, 4*1024*1024)
+	if _, err := io.CopyBuffer(out, in, buf); err != nil {
+		return err
+	}
+	return out.Sync()
+}
+
 func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath string, onUpdate func(StepUpdate)) ProvisionResult {
 	journal, err := safety.LoadJournal(req.JournalPath)
 	if err != nil {
 		journal, err = safety.NewJournal(req.JournalPath, generateTxnID())
 		if err != nil {
 			return ProvisionResult{Success: false, FailedAtStep: "journal-init", OriginalError: err}
+		}
+	}
+
+	currentDistro := req.BootLabel
+	if req.SelectedEntry != nil {
+		currentDistro = req.SelectedEntry.Distro
+	}
+
+	if journal.Session.DistroName != "" {
+		isSameOS := strings.EqualFold(journal.Session.DistroName, currentDistro) ||
+			strings.EqualFold(journal.Session.TargetOSID, currentDistro)
+		isSameURL := journal.Session.DownloadURL == req.ImageURL
+
+		if !isSameOS || (!isSameURL && req.ImageURL != "") {
+			onUpdate(StepUpdate{StepName: "=> [JOURNAL REFRESH] Target OS changed: resetting checkpoint and payload...", Done: false})
+			_ = journal.PurgeForce()
+			_ = os.Remove(req.DownloadDestPath + ".part")
+			_ = os.Remove(req.DownloadDestPath)
+			journal, _ = safety.NewJournal(req.JournalPath, generateTxnID())
+		}
+	} else {
+		if fi, err := os.Stat(req.DownloadDestPath); err == nil {
+			if fi.Size() < 50*1024*1024 {
+				_ = os.Remove(req.DownloadDestPath)
+				_ = os.Remove(req.DownloadDestPath + ".part")
+			}
 		}
 	}
 
@@ -307,7 +760,6 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 		}
 	}
 
-	// PHASE 1: STREAM & ACQUIRE PAYLOAD
 	dlStep, err := journal.Begin("image-download", nil)
 	if err != nil {
 		return fail("image-download", err)
@@ -327,7 +779,30 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 	streamResult, err := StreamDownloadWithFailover(ctx, mirrors, req.DownloadDestPath, req.ImageSHA256, func(p Progress) {
 		latestBytesRead = p.BytesRead
 		latestTotalBytes = p.TotalBytes
-		onUpdate(StepUpdate{StepName: fmt.Sprintf("downloading: %.1f%% (%.1f MB/s)", p.Percent(), p.BytesPerSecond()/(1024*1024)), Done: false})
+
+		etaStr := "--:--"
+		if p.TotalBytes > 0 && p.BytesRead < p.TotalBytes {
+			remaining := p.TotalBytes - p.BytesRead
+			bps := p.BytesPerSecond()
+			if bps > 0 {
+				secs := int64(float64(remaining) / bps)
+				h := secs / 3600
+				m := (secs % 3600) / 60
+				s := secs % 60
+				if h > 0 {
+					etaStr = fmt.Sprintf("%dh %02dm %02ds", h, m, s)
+				} else {
+					etaStr = fmt.Sprintf("%02dm %02ds", m, s)
+				}
+			}
+		}
+
+		readFormatted := formatDownloadBytes(p.BytesRead)
+		totalFormatted := formatDownloadBytes(p.TotalBytes)
+		stepMsg := fmt.Sprintf("downloading: [%s / %s] %.1f%% (%.1f MB/s) | ETA: %s",
+			readFormatted, totalFormatted, p.Percent(), p.BytesPerSecond()/(1024*1024), etaStr)
+
+		onUpdate(StepUpdate{StepName: stepMsg, Done: false})
 	})
 
 	if err != nil {
@@ -352,60 +827,6 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 	journal.Commit(dlStep)
 	onUpdate(StepUpdate{StepName: "image-download", Done: true})
 
-	// SINGLE-BOOT PIPELINE
-	if strings.EqualFold(req.ProvisionMode, "single-boot") {
-		wipeStep, wErr := journal.Begin("single-boot-wipe", nil)
-		if wErr != nil {
-			return fail("single-boot-wipe", wErr)
-		}
-		onUpdate(StepUpdate{StepName: fmt.Sprintf("partitioning %s with clean UEFI GPT layout...", req.TargetDiskPath), Done: false})
-
-		_ = exec.Command("swapoff", "-a").Run()
-		_ = exec.Command("parted", "-s", req.TargetDiskPath, "mklabel", "gpt").Run()
-		_ = exec.Command("parted", "-s", req.TargetDiskPath, "mkpart", "ESP", "fat32", "1MiB", "1025MiB").Run()
-		_ = exec.Command("parted", "-s", req.TargetDiskPath, "set", "1", "esp", "on").Run()
-		_ = exec.Command("parted", "-s", req.TargetDiskPath, "mkpart", "primary", "ext4", "1025MiB", "100%").Run()
-		_ = exec.Command("partprobe", req.TargetDiskPath).Run()
-		_ = exec.Command("udevadm", "settle", "--timeout=10").Run()
-
-		espPart := req.TargetDiskPath + "1"
-		rootPart := req.TargetDiskPath + "2"
-		if strings.Contains(req.TargetDiskPath, "nvme") || strings.Contains(req.TargetDiskPath, "mmcblk") {
-			espPart = req.TargetDiskPath + "p1"
-			rootPart = req.TargetDiskPath + "p2"
-		}
-		req.TargetPartition = rootPart
-
-		_ = exec.Command("mkfs.vfat", "-F32", "-n", "BOOT", espPart).Run()
-		_ = exec.Command("mkfs.ext4", "-F", "-L", "ROOT", req.TargetPartition).Run()
-		journal.Commit(wipeStep)
-
-		deployStep, dErr := journal.Begin("image-deploy", nil)
-		if dErr != nil {
-			return fail("image-deploy", dErr)
-		}
-		deployPlan, err := PlanDeploy(streamResult.DestPath, req.TargetPartition)
-		if err != nil {
-			journal.Fail(deployStep, err)
-			return fail("image-deploy", err)
-		}
-		if _, err := ApplyDeploy(deployPlan); err != nil {
-			journal.Fail(deployStep, err)
-			return fail("image-deploy", err)
-		}
-		journal.Commit(deployStep)
-
-		bootStep, _ := journal.Begin("bootloader-configure", nil)
-		_ = AutoConfigureDualBoot(req.TargetPartition, grubDefaultPath, func(msg string) {
-			onUpdate(StepUpdate{StepName: msg, Done: false})
-		})
-		journal.Commit(bootStep)
-
-		_ = journal.Finalize()
-		return ProvisionResult{Success: true}
-	}
-
-	// DUAL-BOOT PIPELINE
 	if !journal.Session.IsPaused {
 		step, err := journal.Begin("partition-shrink", nil)
 		if err != nil {
@@ -420,89 +841,245 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 		backupJSON, _ := json.Marshal(backup)
 		step.RollbackData = backupJSON
 
-		targetBytes := req.AllocatedBytes
-		if targetBytes < 25*1024*1024*1024 {
-			targetBytes = uint64(30 * 1024 * 1024 * 1024)
+		activeMounts, _ := os.ReadFile("/proc/mounts")
+		isTargetActiveHostDisk := req.TargetDiskPath == pDisk && strings.Contains(string(activeMounts), req.TargetDiskPath)
+		isBareMetal := req.HypervisorKind == hypervisor.KindBareMetal
+
+		allocBytes := req.AllocatedBytes
+		if allocBytes < 20*1024*1024*1024 {
+			allocBytes = 30 * 1024 * 1024 * 1024
 		}
 
-		activeMounts, _ := os.ReadFile("/proc/mounts")
-		isLiveRoot := strings.Contains(string(activeMounts), req.TargetDiskPath)
+		// => DETERMINISTIC ROUTING: Active bare-metal host disk ALWAYS uses autonomous USB staging
+		if isTargetActiveHostDisk && isBareMetal {
+			onUpdate(StepUpdate{StepName: "=> [ACTIVE ROOT DETECTED] Routing to autonomous offline USB staging media...", Done: false})
 
-		if isLiveRoot {
-			onUpdate(StepUpdate{StepName: "=> [ACTIVE ROOT DETECTED] Preparing autonomous USB offline handoff...", Done: false})
+			_ = exec.Command("udevadm", "settle", "--timeout=5").Run()
 
+			usbStoragePart, _ := exec.Command("blkid", "-L", "ORCH_STORAGE").Output()
+			storageDev := strings.TrimSpace(string(usbStoragePart))
+
+			usbBootPart, _ := exec.Command("blkid", "-L", "ORCH_BOOT").Output()
+			bootDev := strings.TrimSpace(string(usbBootPart))
+
+			if storageDev == "" || bootDev == "" {
+				targets, _ := ProbeRemovableTargets()
+				if len(targets) > 0 {
+					pBase := targets[0].DevPath
+					sep := ""
+					if strings.Contains(pBase, "nvme") || strings.Contains(pBase, "mmcblk") {
+						sep = "p"
+					}
+					if storageDev == "" {
+						storageDev = fmt.Sprintf("%s%s1", pBase, sep)
+					}
+					if bootDev == "" {
+						bootDev = fmt.Sprintf("%s%s2", pBase, sep)
+					}
+				} else {
+					journal.Fail(step, fmt.Errorf("no external USB staging drive detected for bare-metal live root handoff"))
+					return fail("partition-shrink", fmt.Errorf("no external USB staging media (ORCH_STORAGE / ORCH_BOOT) detected; please connect a USB drive"))
+				}
+			}
+
+			// Force-standardize canonical mountpoint to /mnt/orch_usb_storage
 			usbStorageDir := "/mnt/orch_usb_storage"
-			if _, sErr := os.Stat(usbStorageDir); sErr != nil {
-				_ = os.MkdirAll(usbStorageDir, 0755)
-				_ = exec.Command("mount", "/dev/sdc1", usbStorageDir).Run()
+			_ = os.MkdirAll(usbStorageDir, 0755)
+
+			// Clean up any other conflicting mounts on the storage partition to prevent path divergence
+			if mntOut, mErr := exec.Command("findmnt", "-n", "-o", "TARGET", storageDev).Output(); mErr == nil {
+				for _, line := range strings.Split(strings.TrimSpace(string(mntOut)), "\n") {
+					target := strings.TrimSpace(line)
+					if target != "" && target != usbStorageDir {
+						_ = exec.Command("umount", "-l", target).Run()
+					}
+				}
 			}
 
-			usbBootPart := "/dev/sdc2"
-			if _, sErr := os.Stat(usbBootPart); sErr != nil {
-				journal.Fail(step, fmt.Errorf("USB Partition 2 (ORCH_BOOT) not formatted"))
-				return fail("partition-shrink", fmt.Errorf("offline handoff requires /dev/sdc2 (ORCH_BOOT)"))
+			// Ensure storageDev is actively mounted at /mnt/orch_usb_storage
+			if err := exec.Command("mountpoint", "-q", usbStorageDir).Run(); err != nil {
+				_ = exec.Command("mount", storageDev, usbStorageDir).Run()
+			}
+			if err := exec.Command("mountpoint", "-q", usbStorageDir).Run(); err != nil {
+				_ = exec.Command("mount", "-L", "ORCH_STORAGE", usbStorageDir).Run()
 			}
 
-			workerScript := fmt.Sprintf(`#!/bin/bash
-set -e
-echo "=========================================================="
-echo "   AUTONOMOUS OFFLINE PARTITION RESIZER & DEPLOYER        "
-echo "=========================================================="
-echo "=> [STEP 1/7] Disabling active swaps..."
+			hostESP, espErr := FindESPPartition(req.TargetDiskPath)
+			if espErr != nil {
+				journal.Fail(step, espErr)
+				return fail("partition-shrink", fmt.Errorf("cannot locate host ESP: %w", espErr))
+			}
+
+			hostPartDev := JoinDiskAndPartition(req.TargetDiskPath, req.HostPartNum)
+			nextPartNum := "2"
+			if pNumInt, pErr := strconv.Atoi(req.HostPartNum); pErr == nil {
+				nextPartNum = strconv.Itoa(pNumInt + 1)
+			}
+			targetPartDev := req.TargetPartition
+			if targetPartDev == "" {
+				targetPartDev = JoinDiskAndPartition(req.TargetDiskPath, nextPartNum)
+			}
+
+			distroLabel := "LINUX"
+			if req.SelectedEntry != nil && req.SelectedEntry.Distro != "" {
+				distroLabel = strings.ToUpper(strings.Fields(req.SelectedEntry.Distro)[0])
+			} else if req.BootLabel != "" {
+				distroLabel = strings.ToUpper(strings.Fields(req.BootLabel)[0])
+			}
+
+			// Stage payload directly to physical USB Storage Vault
+			isoSrcPath := filepath.Join(usbStorageDir, "os_image.payload")
+			if streamResult.DestPath != "" && streamResult.DestPath != isoSrcPath {
+				srcFi, sErr := os.Stat(streamResult.DestPath)
+				dstFi, dErr := os.Stat(isoSrcPath)
+				if sErr == nil && (dErr != nil || dstFi.Size() != srcFi.Size()) {
+					onUpdate(StepUpdate{StepName: "=> [STORAGE VAULT] Synchronizing OS payload directly to physical USB storage...", Done: false})
+					if cpErr := copyFileDirect(streamResult.DestPath, isoSrcPath); cpErr != nil {
+						journal.Fail(step, cpErr)
+						return fail("payload-staging", fmt.Errorf("staging payload to USB vault: %w", cpErr))
+					}
+					_ = exec.Command("sync").Run()
+					onUpdate(StepUpdate{StepName: "=> [STORAGE VAULT] Payload synchronization complete and verified.", Done: false})
+				}
+			}
+
+			workerScript := fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+exec > >(tee -a /tmp/orchestrator_execution.log) 2>&1
+
+DISK="%[1]s"
+HOST_PART="%[2]s"
+TARGET_PART="%[3]s"
+HOST_ESP="%[4]s"
+HOST_PART_NUM="%[5]s"
+TARGET_PART_NUM="%[6]s"
+DISTRO_LABEL="%[7]s"
+
 swapoff -a || true
-echo "=> [STEP 2/7] Running filesystem check on %[1]s2..."
-e2fsck -f -y %[1]s2
-echo "=> [STEP 3/7] Shrinking %[1]s2 filesystem to 240G..."
-resize2fs %[1]s2 240G
-echo "=> [STEP 4/7] Adjusting partition boundary in GPT..."
-parted -s %[1]s resizepart 2 240GB
-parted -s -a optimal %[1]s mkpart primary ext4 240GB 100%%
-partprobe %[1]s
-udevadm settle --timeout=10
-echo "=> [STEP 5/7] Formatting newly carved %[1]s3..."
-mkfs.ext4 -F -q -L PARROT_ROOT %[1]s3
-mkdir -p /mnt/target /mnt/source
-mount %[1]s3 /mnt/target
-mount -o loop,ro /mnt/orch_usb_storage/os_image.payload /mnt/source
-echo "=> [STEP 6/7] Extracting SquashFS live filesystem into %[1]s3..."
-unsquashfs -f -d /mnt/target /mnt/source/live/filesystem.squashfs
-tune2fs -m 1 %[1]s3
-ln -sf /lib/systemd/systemd /mnt/target/sbin/init
-UUID=$(blkid -s UUID -o value %[1]s3)
-echo "UUID=$UUID / ext4 defaults,noatime,errors=remount-ro 0 1" > /mnt/target/etc/fstab
+e2fsck -fy "$HOST_PART" || true
 
-# Preset Account Injection: root:saleem & saleem:saleem (sudo)
-echo "=> [STEP 7/7] Injecting user credentials (root:saleem, saleem:saleem)..."
+sgdisk -e "$DISK" || true
+if [ ! -b "$TARGET_PART" ]; then
+    parted -s -a optimal "$DISK" mkpart primary ext4 50%% 100%% || true
+    sync
+    partprobe "$DISK" || true
+    udevadm settle --timeout=10 || true
+fi
+
+mkfs.ext4 -F -q -L "${DISTRO_LABEL}_ROOT" "$TARGET_PART"
+mkdir -p /mnt/target /mnt/source /mnt/vault
+mount "$TARGET_PART" /mnt/target
+
+PAYLOAD_PATH=$(find / -name "os_image.payload" 2>/dev/null | head -n 1)
+if [ -z "$PAYLOAD_PATH" ] || [ ! -f "$PAYLOAD_PATH" ]; then
+    mkdir -p /mnt/vault
+    mount -L ORCH_STORAGE /mnt/vault 2>/dev/null || true
+    PAYLOAD_PATH="/mnt/vault/os_image.payload"
+fi
+mount -o loop,ro "$PAYLOAD_PATH" /mnt/source
+
+SQUASH_FILE=""
+for cand in /mnt/source/casper/filesystem.squashfs /mnt/source/live/filesystem.squashfs /mnt/source/install/filesystem.squashfs; do
+    if [ -f "$cand" ]; then
+        SQUASH_FILE="$cand"
+        break
+    fi
+done
+if [ -z "$SQUASH_FILE" ]; then
+    SQUASH_FILE=$(find /mnt/source -name "*.squashfs" 2>/dev/null | head -n 1)
+fi
+
+if [ -n "$SQUASH_FILE" ] && [ -f "$SQUASH_FILE" ]; then
+    unsquashfs -f -d /mnt/target "$SQUASH_FILE"
+elif [ -d /mnt/source/live ]; then
+    cp -a /mnt/source/live/* /mnt/target/
+else
+    rsync -aHAX --exclude="/proc" --exclude="/sys" --exclude="/dev" /mnt/source/ /mnt/target/
+fi
+
+tune2fs -m 1 "$TARGET_PART"
+ln -sf /lib/systemd/systemd /mnt/target/sbin/init
+UUID=$(blkid -s UUID -o value "$TARGET_PART" || true)
+if [ -n "$UUID" ]; then
+    echo "UUID=$UUID / ext4 defaults,noatime,errors=remount-ro 0 1" > /mnt/target/etc/fstab
+fi
+
 mkdir -p /mnt/target/etc/sudoers.d
 echo "saleem ALL=(ALL:ALL) ALL" > /mnt/target/etc/sudoers.d/saleem
 chmod 0440 /mnt/target/etc/sudoers.d/saleem
+
 mount --bind /dev /mnt/target/dev
 mount --bind /proc /mnt/target/proc
 mount --bind /sys /mnt/target/sys
-chroot /mnt/target bash -c "echo 'root:saleem' | chpasswd"
-chroot /mnt/target bash -c "id -u saleem >/dev/null 2>&1 || useradd -m -s /bin/bash saleem"
-chroot /mnt/target bash -c "echo 'saleem:saleem' | chpasswd"
-chroot /mnt/target bash -c "usermod -aG sudo saleem 2>/dev/null || true"
-umount -l /mnt/target/dev /mnt/target/proc /mnt/target/sys || true
+
+chroot /mnt/target bash -c "
+    echo 'root:saleem' | chpasswd
+    id -u saleem >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo saleem
+    echo 'saleem:saleem' | chpasswd
+    rm -rf /home/saleem/Desktop/install* /home/saleem/Desktop/calamares* /home/saleem/Desktop/README*
+    rm -rf /etc/skel/Desktop/install* /etc/skel/Desktop/calamares* /etc/skel/Desktop/README*
+    rm -rf /root/Desktop/install* /root/Desktop/calamares* /root/Desktop/README*
+    apt-get purge -y calamares calamares-settings-debian calamares-settings-parrot 2>/dev/null || true
+    systemctl disable calamares.service 2>/dev/null || true
+"
+umount -l /mnt/target/dev /mnt/target/proc /mnt/target/sys 2>/dev/null || true
+
+mkdir -p /mnt/target/boot/efi
+mount "$HOST_ESP" /mnt/target/boot/efi 2>/dev/null || true
+chroot /mnt/target bash -c "grub-install $DISK" || true
+chroot /mnt/target bash -c "update-grub" || true
+umount /mnt/target/boot/efi 2>/dev/null || true
+
+mkdir -p /mnt/host
+mount "$HOST_PART" /mnt/host
+mkdir -p /mnt/host/boot/efi
+mount "$HOST_ESP" /mnt/host/boot/efi 2>/dev/null || true
+mount --bind /dev /mnt/host/dev
+mount --bind /proc /mnt/host/proc
+mount --bind /sys /mnt/host/sys
+
+chroot /mnt/host bash -c "update-initramfs -u -k all" || true
+chroot /mnt/host bash -c "update-grub" || true
+
+umount /mnt/host/boot/efi 2>/dev/null || true
+umount -l /mnt/host/dev /mnt/host/proc /mnt/host/sys /mnt/host 2>/dev/null || true
+
+BOOTNUM=$(efibootmgr | grep ORCH_AUTONOMOUS_INSTALLER | head -n1 | sed 's/Boot\([0-9A-Fa-f]*\).*/\1/' | tr -d '*')
+[ -n "$BOOTNUM" ] && efibootmgr -b "$BOOTNUM" -B || true
 
 sync
-umount /mnt/source
-umount /mnt/target
-echo "=========================================================="
-echo "  DUAL-BOOT DEPLOYMENT COMPLETE! REBOOTING INTO NEW OS... "
-echo "=========================================================="
-sleep 3
-reboot
-`, req.TargetDiskPath)
+umount /mnt/source 2>/dev/null || true
+umount /mnt/target 2>/dev/null || true
+sleep 2
+reboot -f
+`, req.TargetDiskPath, hostPartDev, targetPartDev, hostESP, req.HostPartNum, nextPartNum, distroLabel)
 
 			scriptPath := filepath.Join(usbStorageDir, "transient_resize.sh")
-			_ = os.WriteFile(scriptPath, []byte(workerScript), 0755)
-			_ = exec.Command("chmod", "+x", scriptPath).Run()
+			f, writeErr := os.OpenFile(scriptPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_SYNC, 0755)
+			if writeErr != nil {
+				_ = exec.Command("mount", storageDev, usbStorageDir).Run()
+				f, writeErr = os.OpenFile(scriptPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_SYNC, 0755)
+			}
+			if writeErr == nil && f != nil {
+				_, _ = f.WriteString(workerScript)
+				_ = f.Sync()
+				_ = f.Close()
+			} else {
+				_ = os.WriteFile(scriptPath, []byte(workerScript), 0755)
+			}
+			_ = exec.Command("chmod", "0755", scriptPath).Run()
 			_ = exec.Command("sync").Run()
 
-			isoSrcPath := filepath.Join(usbStorageDir, "os_image.payload")
-			onUpdate(StepUpdate{StepName: "=> [EFI ENGINE] Arming monolithic GRUB EFI core with embedded early-cfg...", Done: false})
-			if armErr := ArmAutonomousUSBBootloader(usbBootPart, isoSrcPath, req.TargetDiskPath, func(msg string) {
+			// Strict hardware physical verification
+			if fi, sErr := os.Stat(scriptPath); sErr != nil || fi.Size() == 0 {
+				journal.Fail(step, fmt.Errorf("transient_resize.sh not verified physically on storage vault: %w", sErr))
+				return fail("staging-verification", fmt.Errorf("failed to physically stage transient_resize.sh on %s: %w", scriptPath, sErr))
+			}
+			onUpdate(StepUpdate{StepName: "=> [STORAGE VAULT] transient_resize.sh physically verified and committed.", Done: false})
+
+			onUpdate(StepUpdate{StepName: "=> [EFI ENGINE] Arming monolithic GRUB EFI core with autonomous autorun...", Done: false})
+			if armErr := ArmAutonomousUSBBootloader(bootDev, isoSrcPath, req.TargetDiskPath, func(msg string) {
 				onUpdate(StepUpdate{StepName: msg, Done: false})
 			}); armErr != nil {
 				journal.Fail(step, armErr)
@@ -510,22 +1087,37 @@ reboot
 			}
 
 			onUpdate(StepUpdate{StepName: "=> [NVRAM ENGINE] Setting one-shot UEFI BootNext to USB...", Done: false})
-			_ = exec.Command("efibootmgr", "-c", "-d", "/dev/sdc", "-p", "2", "-L", "ORCH_AUTONOMOUS_INSTALLER", "-l", `\EFI\BOOT\BOOTX64.EFI`).Run()
+			usbDiskParent, usbBootNum, _ := SplitDiskAndPartition(bootDev)
+			_ = exec.Command("efibootmgr", "-c", "-d", usbDiskParent, "-p", usbBootNum, "-L", "ORCH_AUTONOMOUS_INSTALLER", "-l", `\EFI\BOOT\BOOTX64.EFI`).Run()
 
-			// Dynamically set BootNext to whichever boot number was registered
+			bootNum := ""
 			if out, err := exec.Command("efibootmgr").Output(); err == nil {
-				for _, line := range strings.Split(string(out), "\n") {
+				lines := strings.Split(string(out), "\n")
+				for _, line := range lines {
 					if strings.Contains(line, "ORCH_AUTONOMOUS_INSTALLER") && strings.HasPrefix(line, "Boot") {
-						bootNum := strings.TrimPrefix(strings.Fields(line)[0], "Boot")
+						bootNum = strings.TrimPrefix(strings.Fields(line)[0], "Boot")
 						bootNum = strings.TrimSuffix(bootNum, "*")
-						_ = exec.Command("efibootmgr", "-n", bootNum).Run()
-						onUpdate(StepUpdate{StepName: fmt.Sprintf("=> [NVRAM ENGINE] BootNext locked to slot %s", bootNum), Done: false})
 						break
+					}
+				}
+				if bootNum == "" {
+					for _, line := range lines {
+						lower := strings.ToLower(line)
+						if (strings.Contains(lower, "usb") || strings.Contains(line, "2001")) && strings.HasPrefix(line, "Boot") {
+							bootNum = strings.TrimPrefix(strings.Fields(line)[0], "Boot")
+							bootNum = strings.TrimSuffix(bootNum, "*")
+							break
+						}
 					}
 				}
 			}
 
-			onUpdate(StepUpdate{StepName: "=> [SUCCESS] Autonomous offline staging prepared. Reboot system to execute 50/50 resize & extraction.", Done: true})
+			if bootNum != "" {
+				_ = exec.Command("efibootmgr", "-n", bootNum).Run()
+				onUpdate(StepUpdate{StepName: fmt.Sprintf("=> [NVRAM ENGINE] BootNext locked to slot %s", bootNum), Done: false})
+			}
+
+			onUpdate(StepUpdate{StepName: "=> [SUCCESS] Autonomous offline staging prepared. Ready to reboot.", Done: true})
 			_ = exec.Command("sync").Run()
 			journal.Commit(step)
 
@@ -533,37 +1125,93 @@ reboot
 			return ProvisionResult{Success: true}
 		}
 
-		// SECONDARY DRIVE DIRECT CARVE PATH (e.g. /dev/sda)
-		res, carveErr := CarveHardwarePartitionAtBoundary(req.TargetDiskPath, "ext4", targetBytes, func(msg string) {
+		// Secondary disk or Virtual Machine partition carving
+		if req.TargetPartition != "" {
+			if fi, statErr := os.Stat(req.TargetPartition); statErr == nil && (fi.Mode()&os.ModeDevice != 0) {
+				onUpdate(StepUpdate{StepName: fmt.Sprintf("=> [STORAGE BUS] Carved target partition %s already exists. Reusing without repartitioning...", req.TargetPartition), Done: true})
+				journal.Commit(step)
+				onUpdate(StepUpdate{StepName: "partition-shrink", Done: true})
+				goto deployPhase
+			}
+		}
+
+		onUpdate(StepUpdate{StepName: fmt.Sprintf("=> [STORAGE BUS] Inspecting %s for available unallocated sectors...", req.TargetDiskPath), Done: false})
+		res, carveErr := CarveHardwarePartitionAtBoundary(req.TargetDiskPath, "ext4", allocBytes, func(msg string) {
 			onUpdate(StepUpdate{StepName: msg, Done: false})
 		})
-		if carveErr != nil {
+
+		if carveErr == nil && res != nil && res.NewPartitionPath != "" {
+			req.TargetPartition = res.NewPartitionPath
+			onUpdate(StepUpdate{StepName: fmt.Sprintf("physical dual-boot partition carved: %s", req.TargetPartition), Done: true})
+			journal.Commit(step)
+			onUpdate(StepUpdate{StepName: "partition-shrink", Done: true})
+		} else {
 			journal.Fail(step, carveErr)
 			return fail("partition-shrink", carveErr)
 		}
-
-		req.TargetPartition = res.NewPartitionPath
-		onUpdate(StepUpdate{StepName: fmt.Sprintf("physical dual-boot partition carved: %s", req.TargetPartition), Done: true})
-		journal.Commit(step)
-		onUpdate(StepUpdate{StepName: "partition-shrink", Done: true})
 	}
 
+deployPhase:
 	deployStep, err := journal.Begin("image-deploy", nil)
 	if err != nil {
 		return fail("image-deploy", err)
 	}
 
-	if req.IsWindowsImage {
-		wimPlan := &ApplyWimPlan{
-			WimPath:         streamResult.DestPath,
-			Index:           req.WimIndex,
-			TargetPartition: req.TargetPartition,
-			MountPoint:      req.TargetPartition,
-			AutounattendSrc: req.AutounattendPath,
+	isMacOS := false
+	if req.SelectedEntry != nil {
+		isMacOS = strings.EqualFold(string(req.SelectedEntry.Family), "macos") ||
+			strings.EqualFold(string(req.SelectedEntry.Family), "darwin") ||
+			strings.Contains(strings.ToLower(req.SelectedEntry.Distro), "macos")
+	}
+	if !isMacOS && strings.Contains(strings.ToLower(req.BootLabel), "macos") {
+		isMacOS = true
+	}
+
+	isWindows := req.IsWindowsImage || strings.Contains(strings.ToLower(req.BootLabel), "windows")
+	if req.SelectedEntry != nil {
+		if strings.EqualFold(string(req.SelectedEntry.Family), "windows") || strings.Contains(strings.ToLower(req.SelectedEntry.Distro), "windows") {
+			isWindows = true
 		}
-		if err := ApplyWim(wimPlan); err != nil {
-			journal.Fail(deployStep, err)
-			return fail("image-deploy", err)
+	}
+
+	// Auto-detect Windows payloads dynamically if ISO contains install.wim or install.esd
+	if !isWindows && !isMacOS {
+		testMount := "/mnt/orch_iso_probe"
+		_ = os.MkdirAll(testMount, 0755)
+		_ = exec.Command("umount", "-l", testMount).Run()
+		if _, err := exec.Command("mount", "-o", "loop,ro", streamResult.DestPath, testMount).CombinedOutput(); err == nil {
+			candidates := []string{
+				filepath.Join(testMount, "sources", "install.wim"),
+				filepath.Join(testMount, "sources", "install.esd"),
+				filepath.Join(testMount, "sources", "INSTALL.WIM"),
+				filepath.Join(testMount, "sources", "INSTALL.ESD"),
+			}
+			for _, c := range candidates {
+				if fi, errStat := os.Stat(c); errStat == nil && fi.Size() > 0 {
+					isWindows = true
+					break
+				}
+			}
+			_ = exec.Command("umount", "-l", testMount).Run()
+			_ = os.Remove(testMount)
+		}
+	}
+
+	if isMacOS {
+		onUpdate(StepUpdate{StepName: "=> [MACOS PIPELINE] Deploying Apple BaseSystem recovery payload via 7-Zip engine...", Done: false})
+		if macErr := deployMacOSPayload(streamResult.DestPath, req.TargetPartition, func(msg string) {
+			onUpdate(StepUpdate{StepName: msg, Done: false})
+		}); macErr != nil {
+			journal.Fail(deployStep, macErr)
+			return fail("image-deploy", macErr)
+		}
+	} else if isWindows {
+		onUpdate(StepUpdate{StepName: "=> [WINDOWS PIPELINE] Decompressing and writing Windows OS payload via wimapply...", Done: false})
+		if winErr := deployWindowsPayload(streamResult.DestPath, req.TargetPartition, req.WimIndex, req.AutounattendPath, func(msg string) {
+			onUpdate(StepUpdate{StepName: msg, Done: false})
+		}); winErr != nil {
+			journal.Fail(deployStep, winErr)
+			return fail("image-deploy", winErr)
 		}
 	} else {
 		onUpdate(StepUpdate{StepName: "=> [ROOTFS DEPLOY] Extracting live root filesystem tree into target partition...", Done: false})
@@ -577,37 +1225,105 @@ reboot
 	journal.Commit(deployStep)
 	onUpdate(StepUpdate{StepName: "image-deploy", Done: true})
 
-	if !req.IsWindowsImage {
-		bootStep, bErr := journal.Begin("bootloader-configure", nil)
-		if bErr == nil {
-			onUpdate(StepUpdate{StepName: "configuring autonomous dual-boot & updating host GRUB...", Done: false})
-			if err := AutoConfigureDualBoot(req.TargetPartition, grubDefaultPath, func(msg string) {
+	bootStep, bErr := journal.Begin("bootloader-configure", nil)
+	if bErr == nil {
+		if isMacOS {
+			onUpdate(StepUpdate{StepName: "configuring macOS OpenCore bootloader & updating host GRUB...", Done: false})
+			if err := registerMacOSInGRUB(req.TargetPartition, "/boot/efi", grubDefaultPath, func(msg string) {
 				onUpdate(StepUpdate{StepName: msg, Done: false})
 			}); err != nil {
 				journal.Fail(bootStep, err)
 				return fail("bootloader-configure", err)
 			}
-			journal.Commit(bootStep)
-			onUpdate(StepUpdate{StepName: "dual-boot bootloader synchronized", Done: true})
+		} else if isWindows {
+			onUpdate(StepUpdate{StepName: "configuring Windows 11 EFI bootloader & updating host GRUB...", Done: false})
+			if err := registerWindowsInGRUB(streamResult.DestPath, req.TargetDiskPath, req.TargetPartition, "/boot/efi", grubDefaultPath, func(msg string) {
+				onUpdate(StepUpdate{StepName: msg, Done: false})
+			}); err != nil {
+				journal.Fail(bootStep, err)
+				return fail("bootloader-configure", err)
+			}
+		} else {
+			onUpdate(StepUpdate{StepName: "configuring autonomous dual-boot & updating host bootloader...", Done: false})
+			if err := AutoConfigureDualBoot(req.TargetPartition, grubDefaultPath, func(msg string) {
+				onUpdate(StepUpdate{StepName: msg, Done: false})
+			}); err != nil {
+				journal.Fail(bootStep, err)
+			}
+		}
+		journal.Commit(bootStep)
+		onUpdate(StepUpdate{StepName: "dual-boot bootloader synchronized", Done: true})
+	}
+
+	_, revPartNum, revSplitErr := SplitDiskAndPartition(req.TargetPartition)
+	if revSplitErr != nil {
+		onUpdate(StepUpdate{StepName: fmt.Sprintf("=> [WARNING] Could not resolve partition number for rollback: %v", revSplitErr), Done: false})
+	}
+
+	// Stamp a stable identity fingerprint (PARTUUID + fstype + size) for the newly
+	// created target partition and the host partition it was carved from. This is
+	// what lets revert re-find "the one to undo" later even if disk letters/numbers
+	// shift between now and revert time (different USB port, boot order, another
+	// drive attached, etc.) — see resolveDeviceByPartUUID in revert_linux.go.
+	var targetPartUUID, shrunkPartUUID, targetFSType string
+	var targetSizeBytes uint64
+
+	if req.TargetPartition != "" {
+		if uuidOut, uErr := exec.Command("blkid", "-s", "PARTUUID", "-o", "value", req.TargetPartition).Output(); uErr == nil {
+			targetPartUUID = strings.TrimSpace(string(uuidOut))
+		}
+		if fsOut, fErr := exec.Command("blkid", "-s", "TYPE", "-o", "value", req.TargetPartition).Output(); fErr == nil {
+			targetFSType = strings.ToLower(strings.TrimSpace(string(fsOut)))
+		}
+		targetSizeBytes, _ = QueryBlockDeviceBytes(filepath.Base(req.TargetPartition))
+	}
+
+	if req.HostPartNum != "" && req.TargetDiskPath != "" {
+		hostPartDev := JoinDiskAndPartition(req.TargetDiskPath, req.HostPartNum)
+		if uuidOut, uErr := exec.Command("blkid", "-s", "PARTUUID", "-o", "value", hostPartDev).Output(); uErr == nil {
+			shrunkPartUUID = strings.TrimSpace(string(uuidOut))
 		}
 	}
+
+	if targetPartUUID == "" {
+		onUpdate(StepUpdate{StepName: "=> [WARNING] Could not resolve PARTUUID for target partition — revert will fall back to device path (less safe if disk numbering changes).", Done: false})
+	}
+
+	// Persist the fingerprint into the journal's session state too, so
+	// DiscoverSecondaryOSes (used by the interactive revert menu) can also
+	// resolve the live device by UUID, not just the rollback handler above.
+	sessState := journal.Session
+	sessState.TargetDisk = req.TargetDiskPath
+	sessState.TargetPartition = req.TargetPartition
+	sessState.TargetPartNum = revPartNum
+	sessState.TargetPartUUID = targetPartUUID
+	sessState.TargetFSType = targetFSType
+	sessState.TargetSizeBytes = int64(targetSizeBytes)
+	sessState.ShrunkPartition = JoinDiskAndPartition(req.TargetDiskPath, req.HostPartNum)
+	sessState.ShrunkPartNum = req.HostPartNum
+	sessState.ShrunkPartUUID = shrunkPartUUID
+	sessState.EFIDirName = req.BootLabel
+	_ = journal.SetSessionState(sessState)
 
 	revStep, _ := journal.Begin("revert-engine", nil)
 	revParams := RealRevertParams{
 		DiskDevice:        req.TargetDiskPath,
-		PartitionNum:      req.TargetPartition,
+		PartitionNum:      revPartNum,
 		HostPartNum:       req.HostPartNum,
 		EFIDirNameToPurge: req.BootLabel,
+		TargetPartUUID:    targetPartUUID,
+		ShrunkPartUUID:    shrunkPartUUID,
+		ExpectedFSType:    targetFSType,
+		ExpectedSizeBytes: int64(targetSizeBytes),
 	}
 	revJSON, _ := json.Marshal(revParams)
 	revStep.RollbackData = revJSON
 	journal.Commit(revStep)
 
-	if !strings.HasPrefix(streamResult.MirrorUsed, "local://") && streamResult.DestPath != req.ImageURL {
-		_ = os.Remove(streamResult.DestPath)
+	installedRecordPath := filepath.Join(filepath.Dir(req.JournalPath), "orchestrator_installed_os.json")
+	if fErr := journal.FinalizeAndRecord(installedRecordPath); fErr != nil {
+		onUpdate(StepUpdate{StepName: fmt.Sprintf("=> [WARNING] Finalize note: %v", fErr), Done: false})
 	}
-
-	_ = journal.Finalize()
 	return ProvisionResult{Success: true}
 }
 
@@ -630,21 +1346,38 @@ func verifyFileSHA256(filePath, expectedSHA string) error {
 	return nil
 }
 
-func ResumeAndRollback(journalPath, grubDefaultPath string) error {
-	journal, err := safety.LoadJournal(journalPath)
-	if err != nil {
-		return fmt.Errorf("loading interrupted journal: %w", err)
-	}
-	if !journal.HasIncompleteSteps() {
-		return fmt.Errorf("journal at %s has no incomplete steps", journalPath)
-	}
-	return journal.RollbackAll(rollbackHandlers(grubDefaultPath))
-}
-
 func generateTxnID() string {
 	return fmt.Sprintf("txn-%d", time.Now().UnixNano())
 }
 
 func causeError(err error) error {
+	for err != nil {
+		u, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			break
+		}
+		err = u.Unwrap()
+	}
 	return err
+}
+
+func formatDownloadBytes(b int64) string {
+	if b <= 0 {
+		return "0 B"
+	}
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	units := []string{"KB", "MB", "GB", "TB"}
+	val := float64(b) / float64(div)
+	if exp >= 2 {
+		return fmt.Sprintf("%.2f %s", val, units[exp])
+	}
+	return fmt.Sprintf("%.1f %s", val, units[exp])
 }

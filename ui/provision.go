@@ -89,7 +89,7 @@ func (m Model) handleProvisionStep(msg provisionStepMsg, ch chan provisionStepMs
 	lineLower := strings.ToLower(line)
 
 	if m.speed == nil || m.speed.TotalBytes == 0 {
-		m.speed = NewSpeedTracker(1000)
+		m.speed = NewSpeedTracker(6 * 1024 * 1024 * 1024)
 	}
 
 	// 1. Dynamic Extraction Percentage Parser (unsquashfs / rootfs tree unpacking)
@@ -114,7 +114,7 @@ func (m Model) handleProvisionStep(msg provisionStepMsg, ch chan provisionStepMs
 		}
 	}
 
-	// 2. Reversion Step Parser (Option 3 Progress Driver)
+	// 2. Reversion Step Parser
 	if strings.Contains(lineLower, "[revert") {
 		parts := strings.Fields(line)
 		for _, part := range parts {
@@ -135,23 +135,40 @@ func (m Model) handleProvisionStep(msg provisionStepMsg, ch chan provisionStepMs
 		return m, listenForStepUpdates(ch)
 	}
 
-	// 3. Network Stream & USB Payload Staging Parser (Full 0% to 100% scale)
+	// 3. Network Stream & USB Payload Staging Parser
 	isStaging := strings.Contains(lineLower, "payload staging:")
 	isDownload := strings.HasPrefix(lineLower, "downloading:")
 	isCompress := strings.HasPrefix(lineLower, "compressing:")
 
 	if isStaging || isDownload || isCompress {
 		parts := strings.Fields(line)
+		// Extract true total size if present in [read / total]
+		for i, part := range parts {
+			if part == "/" && i+1 < len(parts) {
+				totalStr := strings.TrimSuffix(parts[i+1], "]")
+				if totalVal, err := strconv.ParseFloat(totalStr, 64); err == nil && totalVal > 0 {
+					var totalBytes uint64
+					if i+2 < len(parts) && strings.HasPrefix(parts[i+2], "GB") {
+						totalBytes = uint64(totalVal * 1024 * 1024 * 1024)
+					} else if i+2 < len(parts) && strings.HasPrefix(parts[i+2], "MB") {
+						totalBytes = uint64(totalVal * 1024 * 1024)
+					}
+					if totalBytes > 0 && (m.speed.TotalBytes != totalBytes*2) {
+						m.speed.TotalBytes = totalBytes * 2 // Download is 50% of total deployment pipeline
+					}
+				}
+				break
+			}
+		}
+
 		for _, part := range parts {
 			if strings.HasSuffix(part, "%") {
 				pctStr := strings.TrimSuffix(part, "%")
 				if pctVal, err := strconv.ParseFloat(pctStr, 64); err == nil && pctVal >= 0 {
 					var overallPct float64
 					if isStaging {
-						// Payload staging to USB runs 0% -> 100%
 						overallPct = pctVal / 100.0
 					} else {
-						// Remote downloads consume first half of pipeline
 						overallPct = (pctVal / 100.0) * 0.50
 					}
 
@@ -217,18 +234,11 @@ func (m Model) handleProvisionDone(msg provisionDoneMsg) (Model, tea.Cmd) {
 	}
 
 	if res.Success {
-		_ = engine.PurgeStagedPayload()
-		_ = engine.PurgeIntermediatePayloads("/mnt/orch_usb_storage")
-
-		m.hasStagedPayload = false
-		m.stagedPayloadSize = 0
-		m.stagedPayloadPath = ""
-
 		if m.speed != nil && m.speed.TotalBytes > 0 {
 			m.speed.Sample(m.speed.TotalBytes)
 		}
 
-		m.statusLog = append(m.statusLog, "=> [POST-INSTALL CLEANUP] Autonomous purge completed: intermediate payloads reclaimed.")
+		m.statusLog = append(m.statusLog, "=> [STAGED] Autonomous offline staging prepared. Payload and worker script are armed on USB.")
 		m.screen = ScreenDone
 		return m, nil
 	}
@@ -245,5 +255,6 @@ func (m Model) handleProvisionDone(msg provisionDoneMsg) (Model, tea.Cmd) {
 			m.statusLog = append(m.statusLog, "Failed step "+res.FailedAtStep+" — automatic rollback completed safely.")
 		}
 	}
+
 	return m, nil
 }

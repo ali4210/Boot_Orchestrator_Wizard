@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -118,9 +119,10 @@ func CarvePartitionInFreeSpace(diskPath, fsType string, sizeGB int) (*PartitionR
 		return nil, fmt.Errorf("disk %s has msdos partition table and all 4 primary slots are occupied", diskPath)
 	}
 
+	// Always use explicit GiB (binary) to prevent parted decimal truncation bugs
 	endParam := "100%"
 	if sizeGB > 0 {
-		endParam = fmt.Sprintf("+%dGB", sizeGB)
+		endParam = fmt.Sprintf("+%dGiB", sizeGB)
 	}
 
 	cmdMakePart := exec.Command("parted", "-s", "-a", "optimal", diskPath, "mkpart", "primary", fsType, startSector, endParam)
@@ -134,12 +136,7 @@ func CarvePartitionInFreeSpace(diskPath, fsType string, sizeGB int) (*PartitionR
 	_ = exec.Command("partprobe", diskPath).Run()
 	_ = exec.Command("udevadm", "settle", "--timeout=10").Run()
 
-	baseDisk := strings.TrimPrefix(diskPath, "/dev/")
-	sep := ""
-	if len(baseDisk) > 0 && (baseDisk[len(baseDisk)-1] >= '0' && baseDisk[len(baseDisk)-1] <= '9') {
-		sep = "p"
-	}
-	newDevPath := fmt.Sprintf("/dev/%s%s%d", baseDisk, sep, targetPartNum)
+	newDevPath := JoinDiskAndPartition(diskPath, fmt.Sprintf("%d", targetPartNum))
 
 	nodeReady := false
 	for i := 0; i < 20; i++ {
@@ -183,7 +180,7 @@ func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint6
 	// 1. Check if unallocated free sectors exist on disk
 	freeHeadroom, _ := CheckUnallocatedHeadroom(diskPath)
 	if freeHeadroom >= targetBytes && targetBytes > 0 {
-		logFn(fmt.Sprintf("=> [HARDWARE PARTITION] Found %.1f GB unallocated space. Carving dedicated slice...", float64(freeHeadroom)/(1024*1024*1024)))
+		logFn(fmt.Sprintf("=> [HARDWARE PARTITION] Found %.1f GiB unallocated space. Carving dedicated slice...", float64(freeHeadroom)/(1024*1024*1024)))
 		return CarvePartitionInFreeSpace(diskPath, fsType, int(targetBytes/(1024*1024*1024)))
 	}
 
@@ -247,10 +244,10 @@ func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint6
 		swapBytes := (partitions[len(partitions)-1].end - partitions[len(partitions)-1].start) * 512
 		// Safety assertion: Ensure swap slice is physically large enough
 		if swapBytes < targetBytes && targetBytes > 0 {
-			return nil, fmt.Errorf("insufficient contiguous space (available trailing slice: %.1f GB, required: %.1f GB). Boot Live USB to shrink active root partition", float64(swapBytes)/(1024*1024*1024), float64(targetBytes)/(1024*1024*1024))
+			return nil, fmt.Errorf("insufficient contiguous space (available trailing slice: %.1f GiB, required: %.1f GiB). Boot Live USB to shrink active root partition", float64(swapBytes)/(1024*1024*1024), float64(targetBytes)/(1024*1024*1024))
 		}
 
-		logFn(fmt.Sprintf("=> [HARDWARE PARTITION] Converting trailing slice %d (%.1f GB) to primary ext4...", swapPartNum, float64(swapBytes)/(1024*1024*1024)))
+		logFn(fmt.Sprintf("=> [HARDWARE PARTITION] Converting trailing slice %d (%.1f GiB) to primary ext4...", swapPartNum, float64(swapBytes)/(1024*1024*1024)))
 		_ = exec.Command("parted", "-s", diskPath, "rm", fmt.Sprintf("%d", swapPartNum)).Run()
 		_ = exec.Command("partprobe", diskPath).Run()
 		_ = exec.Command("udevadm", "settle", "--timeout=5").Run()
@@ -259,12 +256,7 @@ func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint6
 		startSec := partitions[len(partitions)-2].end + 1
 		endSec := maxDiskSectors - 2048
 
-		baseDisk := strings.TrimPrefix(diskPath, "/dev/")
-		sep := ""
-		if len(baseDisk) > 0 && (baseDisk[len(baseDisk)-1] >= '0' && baseDisk[len(baseDisk)-1] <= '9') {
-			sep = "p"
-		}
-		newDevPath := fmt.Sprintf("/dev/%s%s%d", baseDisk, sep, swapPartNum)
+		newDevPath := JoinDiskAndPartition(diskPath, fmt.Sprintf("%d", swapPartNum))
 
 		mkCmd := exec.Command("parted", "-s", "-a", "optimal", diskPath, "mkpart", "primary", fsType, fmt.Sprintf("%ds", startSec), fmt.Sprintf("%ds", endSec))
 		if mkOut, mkErr := mkCmd.CombinedOutput(); mkErr != nil {
@@ -283,6 +275,45 @@ func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint6
 			NewPartitionPath: newDevPath,
 			NewPartNum:       fmt.Sprintf("%d", swapPartNum),
 		}, nil
+	}
+
+	// 4. Shrink Partition 1 on Secondary Data Disks (e.g. /dev/sda1)
+	if len(partitions) == 1 && partitions[0].num == 1 {
+		part1Dev := JoinDiskAndPartition(diskPath, "1")
+		logFn(fmt.Sprintf("=> [SHRINK ENGINE] Disk %s is fully allocated. Safely shrinking %s...", diskPath, part1Dev))
+
+		_ = exec.Command("umount", "-l", part1Dev).Run()
+		time.Sleep(500 * time.Millisecond)
+
+		_ = exec.Command("parted", "-s", diskPath, "rm", "2").Run()
+		_ = exec.Command("udevadm", "settle", "--timeout=5").Run()
+
+		logFn(fmt.Sprintf("=> [SHRINK ENGINE] Running e2fsck on %s...", part1Dev))
+		_ = exec.Command("e2fsck", "-fy", part1Dev).Run()
+
+		totalPartSectors := partitions[0].end - partitions[0].start
+		targetSectors := targetBytes / 512
+		if targetSectors >= totalPartSectors {
+			targetSectors = totalPartSectors / 2
+		}
+		newPart1Sectors := totalPartSectors - targetSectors
+		newPart1GiB := (newPart1Sectors * 512) / (1024 * 1024 * 1024)
+
+		logFn(fmt.Sprintf("=> [SHRINK ENGINE] Resizing filesystem on %s to %d GiB...", part1Dev, newPart1GiB))
+		if outResize, errResize := exec.Command("resize2fs", part1Dev, fmt.Sprintf("%dG", newPart1GiB)).CombinedOutput(); errResize != nil {
+			return nil, fmt.Errorf("resize2fs failed on %s: %w (%s)", part1Dev, errResize, string(outResize))
+		}
+
+		logFn(fmt.Sprintf("=> [SHRINK ENGINE] Adjusting GPT partition boundary to %dGiB...", newPart1GiB))
+		partedResizeCmd := exec.Command("parted", "---pretend-input-tty", diskPath, "resizepart", "1", fmt.Sprintf("%dGiB", newPart1GiB))
+		partedResizeCmd.Stdin = strings.NewReader("Yes\n")
+		_ = partedResizeCmd.Run()
+
+		_ = exec.Command("partprobe", diskPath).Run()
+		_ = exec.Command("udevadm", "settle", "--timeout=10").Run()
+
+		_ = exec.Command("e2fsck", "-fy", part1Dev).Run()
+		logFn("=> [SHRINK ENGINE] Partition 1 shrunk cleanly. Carving dedicated OS slice...")
 	}
 
 	return CarvePartitionInFreeSpace(diskPath, fsType, int(targetBytes/(1024*1024*1024)))
@@ -363,7 +394,7 @@ func PlanShrink(partitionPath string, safetyMarginBytes uint64) (*ShrinkPlan, er
 		TargetNewSizeBytes: target,
 		FreedBytes:         info.TotalBytes - target,
 		Steps: []string{
-			fmt.Sprintf("e2fsck -f %s", partitionPath),
+			fmt.Sprintf("e2fsck -f -y %s", partitionPath),
 			fmt.Sprintf("resize2fs %s %dK", partitionPath, target/1024),
 			"parted resizepart & allocate new partition",
 		},
@@ -397,15 +428,28 @@ func ApplyShrink(plan *ShrinkPlan) error {
 	return nil
 }
 
+// ShrinkPartitionNonInteractive executes a safe, non-interactive partition boundary
+// shrink using GNU parted, guaranteeing input piping to bypass any confirmation prompts.
+// It enforces a safe container boundary that is strictly larger than the filesystem.
+func ShrinkPartitionNonInteractive(diskPath, partNum string, targetGiB uint64) error {
+	partedCmd := exec.Command("parted", "---pretend-input-tty", diskPath, "resizepart", partNum, fmt.Sprintf("%dGiB", targetGiB))
+	partedCmd.Stdin = strings.NewReader("Yes\n")
+
+	if out, err := partedCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("parted resizepart %s %s failed: %w\n%s", diskPath, partNum, err, string(out))
+	}
+
+	_ = exec.Command("partprobe", diskPath).Run()
+	_ = exec.Command("udevadm", "settle", "--timeout=10").Run()
+	return nil
+}
+
 func ShrinkAndAllocate(spec PartitionSpec, logFn func(string)) (*PartitionResult, error) {
 	if logFn == nil {
 		logFn = func(string) {}
 	}
 
-	sourceDev := fmt.Sprintf("%sp%s", spec.DiskPath, spec.SourcePartNum)
-	if strings.HasPrefix(spec.DiskPath, "/dev/sd") || strings.HasPrefix(spec.DiskPath, "/dev/vd") {
-		sourceDev = fmt.Sprintf("%s%s", spec.DiskPath, spec.SourcePartNum)
-	}
+	sourceDev := JoinDiskAndPartition(spec.DiskPath, spec.SourcePartNum)
 
 	logFn(fmt.Sprintf("=> Planning shrink on %s...", sourceDev))
 	shrinkMargin := uint64(spec.ShrinkSizeGB) * 1024 * 1024 * 1024
@@ -478,6 +522,45 @@ func RollbackPartitionShrink(rollbackData json.RawMessage) error {
 	return nil
 }
 
+// SplitDiskAndPartition takes a partition device path (e.g. /dev/sdb3,
+// /dev/nvme0n1p3, /dev/mmcblk0p2) and returns the parent disk path and the
+// partition number.
+func SplitDiskAndPartition(partitionPath string) (diskPath string, partNum string, err error) {
+	base := filepath.Base(partitionPath)
+	dir := filepath.Dir(partitionPath)
+
+	if strings.Contains(base, "nvme") || strings.Contains(base, "mmcblk") {
+		idx := strings.LastIndex(base, "p")
+		if idx == -1 || idx == len(base)-1 {
+			return "", "", fmt.Errorf("could not parse NVMe/eMMC partition number from %s", partitionPath)
+		}
+		if idx == 0 || base[idx-1] < '0' || base[idx-1] > '9' {
+			return "", "", fmt.Errorf("unrecognized NVMe/eMMC naming scheme: %s", partitionPath)
+		}
+		return filepath.Join(dir, base[:idx]), base[idx+1:], nil
+	}
+
+	i := len(base) - 1
+	for i >= 0 && base[i] >= '0' && base[i] <= '9' {
+		i--
+	}
+	if i == len(base)-1 {
+		return "", "", fmt.Errorf("no partition number found in %s", partitionPath)
+	}
+	return filepath.Join(dir, base[:i+1]), base[i+1:], nil
+}
+
+// JoinDiskAndPartition joins a disk path and a partition number, correctly
+// handling NVMe/eMMC "pN" suffixes as well as standard SATA/USB devices.
+func JoinDiskAndPartition(diskPath, partNum string) string {
+	base := filepath.Base(diskPath)
+	if (len(base) > 0 && base[len(base)-1] >= '0' && base[len(base)-1] <= '9') ||
+		strings.Contains(base, "nvme") || strings.Contains(base, "mmcblk") {
+		return diskPath + "p" + partNum
+	}
+	return diskPath + partNum
+}
+
 func extractUint(re *regexp.Regexp, text string) (uint64, error) {
 	m := re.FindStringSubmatch(text)
 	if m == nil {
@@ -532,4 +615,49 @@ func writeDiskRegion(diskPath string, offset int64, data []byte) error {
 		return fmt.Errorf("dd write error: %w\n%s", err, out)
 	}
 	return nil
+}
+
+// FindESPPartition locates the EFI System Partition on diskPath by GPT partition
+// type GUID and the parted "esp"/"boot" flag.
+func FindESPPartition(diskPath string) (string, error) {
+	const espTypeGUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+	out, err := exec.Command("lsblk", "-n", "-r", "-o", "NAME,PARTTYPE", diskPath).Output()
+	if err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 2 && strings.EqualFold(fields[1], espTypeGUID) {
+				return "/dev/" + fields[0], nil
+			}
+		}
+	}
+
+	partedOut, err := exec.Command("parted", "-s", "-m", diskPath, "print").CombinedOutput()
+	if err == nil {
+		for _, line := range strings.Split(string(partedOut), "\n") {
+			if strings.Contains(line, "esp") || strings.Contains(line, "boot") {
+				fields := strings.Split(line, ":")
+				if len(fields) > 0 {
+					return JoinDiskAndPartition(diskPath, fields[0]), nil
+				}
+			}
+		}
+	}
+
+	for i := 1; i <= 4; i++ {
+		candidate := JoinDiskAndPartition(diskPath, fmt.Sprintf("%d", i))
+		fsOut, fsErr := exec.Command("blkid", "-s", "TYPE", "-o", "value", candidate).Output()
+		if fsErr == nil && strings.TrimSpace(string(fsOut)) == "vfat" {
+			probeDir, _ := os.MkdirTemp("", "orch-esp-probe-*")
+			if mountErr := exec.Command("mount", "-o", "ro", candidate, probeDir).Run(); mountErr == nil {
+				_, statErr := os.Stat(filepath.Join(probeDir, "EFI"))
+				_ = exec.Command("umount", "-l", probeDir).Run()
+				_ = os.RemoveAll(probeDir)
+				if statErr == nil {
+					return candidate, nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no EFI System Partition detected on %s", diskPath)
 }

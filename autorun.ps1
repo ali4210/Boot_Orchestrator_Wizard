@@ -5,7 +5,7 @@
  Supports:
    .\autorun.ps1              -> Standard elevated launch
    .\autorun.ps1 -Force (-f)  -> Force clean rebuild + launch
-   .\autorun.ps1 -Hard        -> Deep clean temporary artifacts + rebuild + launch
+   .\autorun.ps1 -Hard (-H)   -> Deep clean temporary artifacts + rebuild + launch
 ==============================================================================
 #>
 [CmdletBinding()]
@@ -13,10 +13,10 @@ param(
     [Alias("f")]
     [switch]$Force,
 
-    [Alias("hard")]
+    [Alias("H")]
     [switch]$Hard,
 
-    [Alias("h")]
+    [Alias("?")]
     [switch]$Help
 )
 
@@ -26,13 +26,13 @@ if ($Help) {
     Write-Host "Usage:"
     Write-Host "  .\autorun.ps1         Standard elevated launch"
     Write-Host "  .\autorun.ps1 -f      Force clean rebuild + auto-resolve modules + launch"
-    Write-Host "  .\autorun.ps1 -hard   Deep purge of caches, journals + fresh rebuild + launch"
-    Write-Host "  .\autorun.ps1 -h      Display this help menu"
+    Write-Host "  .\autorun.ps1 -Hard   Deep purge of caches, journals + fresh rebuild + launch"
+    Write-Host "  .\autorun.ps1 -?      Display this help menu"
     Write-Host ""
     exit 0
 }
 
-# --- 1. SELF-ELEVATION TRAMPOLINE (TRIGGERS NATIVE UAC "YES" PROMPT) ---
+# --- 1. SELF-ELEVATION TRAMPOLINE (TRIGGERS NATIVE UAC PROMPT) ---
 $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($currentIdentity)
 $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -48,7 +48,8 @@ if (-not $isAdmin) {
     if ($Hard)  { $paramList += "-Hard" }
     $paramString = $paramList -join " "
 
-    $arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"Set-Location '$PSScriptRoot'; & '$scriptPath' $paramString`""
+    # Keep console active and print any startup error directly
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -NoExit -Command `"Set-Location '$PSScriptRoot'; try { & '$scriptPath' $paramString } catch { Write-Host `$_.Exception.Message -ForegroundColor Red }; Read-Host 'Press Enter to close'`""
 
     try {
         Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -Verb RunAs
@@ -150,6 +151,7 @@ try {
     go build -ldflags="-s -w" -o $BinPath .\cmd\orchestrator\main.go
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[-] Compilation failed." -ForegroundColor Red
+        Read-Host "Press Enter to exit"
         exit 1
     }
 
@@ -165,4 +167,8 @@ finally {
 # --- 5. LAUNCH THE ORCHESTRATOR ---
 Write-Host "=> Launching Universal Boot Orchestrator..." -ForegroundColor Green
 & $BinPath
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[-] Process exited with code $LASTEXITCODE." -ForegroundColor Red
+    Read-Host "Press Enter to exit"
+}
 exit $LASTEXITCODE

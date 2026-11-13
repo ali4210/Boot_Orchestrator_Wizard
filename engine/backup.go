@@ -512,11 +512,11 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 	logFn(fmt.Sprintf("=> Reinstalling GRUB bootloader to %s...", targetDisk))
 	var grubScript string
 	if isUEFI {
-		grubScript = `
-grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=kali --recheck || grub-install /dev/sda
+		grubScript = fmt.Sprintf(`
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=kali --recheck || grub-install %s
 update-grub || grub-mkconfig -o /boot/grub/grub.cfg
 update-initramfs -u -k all || true
-`
+`, targetDisk)
 	} else {
 		grubScript = fmt.Sprintf(`
 grub-install %s || grub-install --recheck %s

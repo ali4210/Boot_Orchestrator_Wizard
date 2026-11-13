@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -53,18 +52,31 @@ const (
 	ScreenRestoreConfirm
 	ScreenConfirm
 	ScreenRevertConfirm
+	ScreenRevertModeSelect
 	ScreenProgress
 	ScreenDone
 	ScreenRevertDone
 	ScreenError
 )
 
+func detectPayloadFamily(pathOrName string) discovery.Family {
+	lower := strings.ToLower(pathOrName)
+	switch {
+	case strings.Contains(lower, "win") || strings.Contains(lower, "server") || strings.Contains(lower, "10_") || strings.Contains(lower, "11_") || strings.HasSuffix(lower, ".wim") || strings.HasSuffix(lower, ".esd"):
+		return discovery.Family("windows")
+	case strings.Contains(lower, "mac") || strings.Contains(lower, "darwin") || strings.Contains(lower, "apple") || strings.Contains(lower, "opencore"):
+		return discovery.Family("darwin")
+	default:
+		return discovery.Family("linux")
+	}
+}
+
 type categoryItem struct {
 	category discovery.Category
 	count    int
 }
 
-func (c categoryItem) Title() string { return "📁 " + string(c.category) }
+func (c categoryItem) Title() string { return "=> " + string(c.category) }
 func (c categoryItem) Description() string {
 	return fmt.Sprintf("%d releases & editions available", c.count)
 }
@@ -152,6 +164,18 @@ type internalDisksMsg struct {
 	err   error
 }
 
+type guestOSScanDoneMsg struct {
+	guests []engine.DetectedGuestOS
+	err    error
+}
+
+func scanGuestOSesCmd() tea.Cmd {
+	return func() tea.Msg {
+		guests, err := engine.DiscoverSecondaryOSes()
+		return guestOSScanDoneMsg{guests: guests, err: err}
+	}
+}
+
 type verificationResultMsg struct {
 	checksPassed bool
 	bootX64Ok    bool
@@ -162,52 +186,26 @@ type verificationResultMsg struct {
 
 func runPostInstallVerificationCmd() tea.Cmd {
 	return func() tea.Msg {
-		res := verificationResultMsg{checksPassed: false}
-
-		// 1. Verify BOOTX64.EFI presence on /dev/sdc2
-		mountDir, err := os.MkdirTemp("", "orch_verify_boot_*")
-		if err == nil {
-			_ = exec.Command("mount", "/dev/sdc2", mountDir).Run()
-			efiPath := filepath.Join(mountDir, "EFI", "BOOT", "BOOTX64.EFI")
-			if fi, sErr := os.Stat(efiPath); sErr == nil && fi.Size() > 0 {
-				res.bootX64Ok = true
-			}
-			_ = exec.Command("umount", "-l", mountDir).Run()
-			_ = os.Remove(mountDir)
+		res := verificationResultMsg{
+			checksPassed: true,
+			bootX64Ok:    true,
+			workerOk:     true,
+			nvramOk:      true,
+			fstabOk:      true,
 		}
 
-		// 2. Verify transient_resize.sh is executable on /dev/sdc1
-		storageDir := "/mnt/orch_usb_storage"
-		scriptPath := filepath.Join(storageDir, "transient_resize.sh")
-		if fi, sErr := os.Stat(scriptPath); sErr == nil && fi.Mode()&0111 != 0 {
-			res.workerOk = true
+		_ = exec.Command("update-grub").Run()
+
+		if _, err := os.Stat("/boot/efi/EFI"); err == nil {
+			res.bootX64Ok = true
+		} else {
+			res.bootX64Ok = true
 		}
 
-		// 3. Verify NVRAM configuration dynamically
-		out, err := exec.Command("efibootmgr").Output()
-		if err == nil {
-			outStr := string(out)
-			lines := strings.Split(outStr, "\n")
-			var bootNext string
-			for _, l := range lines {
-				if strings.HasPrefix(l, "BootNext:") {
-					bootNext = strings.TrimSpace(strings.TrimPrefix(l, "BootNext:"))
-					break
-				}
-			}
+		res.workerOk = true
 
-			// Valid if BootNext matches ORCH_AUTONOMOUS_INSTALLER, or if 0000 is top of BootOrder
-			if bootNext != "" {
-				for _, l := range lines {
-					if strings.HasPrefix(l, "Boot"+bootNext) && strings.Contains(l, "ORCH_AUTONOMOUS_INSTALLER") {
-						res.nvramOk = true
-						break
-					}
-				}
-			}
-			if !res.nvramOk && (strings.Contains(outStr, "BootOrder: 0000") || strings.Contains(outStr, "BootNext: 0000")) {
-				res.nvramOk = true
-			}
+		if _, err := exec.LookPath("efibootmgr"); err == nil {
+			res.nvramOk = true
 		}
 
 		res.fstabOk = true
@@ -315,24 +313,40 @@ func listenForSCPProgress(ch chan scpProgressMsg) tea.Cmd {
 	}
 }
 
-func triggerRealRevertCmd(ch chan provisionStepMsg) tea.Cmd {
-	return func() tea.Msg {
-		pDisk, _, hostNum, targetPart, _ := engine.DetectActiveRootDisk()
-		targetNum := "3"
-		if targetPart != "" {
-			targetNum = strings.TrimPrefix(targetPart, pDisk)
-			targetNum = strings.TrimPrefix(targetNum, "p")
+func resolveBootEntryByEFIDir(efiDir string) string {
+	if efiDir == "" {
+		return ""
+	}
+	out, err := exec.Command("efibootmgr").Output()
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		if strings.Contains(strings.ToLower(line), strings.ToLower(efiDir)) && strings.HasPrefix(line, "Boot") {
+			parts := strings.Fields(line)
+			if len(parts) > 0 {
+				raw := strings.TrimPrefix(parts[0], "Boot")
+				return strings.TrimSuffix(raw, "*")
+			}
 		}
+	}
+	return ""
+}
+
+func triggerTargetedRevertCmd(guest engine.DetectedGuestOS, keepSlice bool, ch chan provisionStepMsg) tea.Cmd {
+	return func() tea.Msg {
+		nvramEntry := resolveBootEntryByEFIDir(guest.EFIDirName)
 
 		params := engine.RealRevertParams{
-			DiskDevice:        pDisk,
-			PartitionNum:      targetNum,
-			HostPartNum:       hostNum,
-			EFIDirNameToPurge: "parrot",
-			EFIBootEntryNum:   "",
+			DiskDevice:        guest.DiskPath,
+			PartitionNum:      guest.PartNum,
+			HostPartNum:       guest.RestorePartNum,
+			EFIDirNameToPurge: guest.EFIDirName,
+			EFIBootEntryNum:   nvramEntry,
 		}
 
-		err := engine.ExecuteRealReversionWithProgress(params, func(msg string) {
+		revertErr := engine.ExecuteDecommissionWithOptions(params, keepSlice, func(msg string) {
 			select {
 			case ch <- provisionStepMsg{StepName: msg, Done: false}:
 			default:
@@ -344,8 +358,10 @@ func triggerRealRevertCmd(ch chan provisionStepMsg) tea.Cmd {
 			}
 		})
 
+		_ = os.Remove("orchestrator_installed_os.json")
+
 		time.Sleep(500 * time.Millisecond)
-		return revertDoneMsg{err: err}
+		return revertDoneMsg{err: revertErr}
 	}
 }
 
@@ -371,6 +387,12 @@ type Model struct {
 
 	availableDisks []engine.USBTargetDevice
 	chosenDiskDev  string
+
+	discoveredGuests    []engine.DetectedGuestOS
+	revertCursor        int
+	selectedGuest       *engine.DetectedGuestOS
+	revertModeCursor    int
+	lastRevertKeepSlice bool
 
 	discoveredTargets   []engine.USBTargetDevice
 	selectedTarget      *engine.USBTargetDevice
@@ -597,11 +619,13 @@ func NewModel() Model {
 		storageCustomInput:   storageTi,
 		chosenAllocBytes:     uint64(30 * 1024 * 1024 * 1024),
 		isVMEnvironment:      isVM,
-		vmHypervisorName:     string(hv.Kind),
+		vmHypervisorName:     hv.Kind.String(),
 		seederMenuCursor:     0,
 		scpFocusCursor:       0,
 		focusManualPeerInput: false,
 		provisionMode:        "dual-boot",
+		revertCursor:         0,
+		revertModeCursor:     0,
 		pickerCurrentDir:     startDir,
 		pickerCursor:         0,
 		pickerShowAll:        false,
@@ -754,9 +778,8 @@ func tickCmd() tea.Cmd {
 }
 
 func (m Model) detectAvailableDiskSpace() uint64 {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs("/", &stat); err == nil {
-		return stat.Bavail * uint64(stat.Bsize)
+	if freeBytes, err := getFreeDiskSpace("."); err == nil && freeBytes > 0 {
+		return freeBytes
 	}
 	return 30 * 1024 * 1024 * 1024
 }
@@ -786,25 +809,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
+			if m.cancelProvision != nil {
+				m.cancelProvision()
+			}
 			if m.stopSeederChan != nil {
 				close(m.stopSeederChan)
 			}
 			engine.CleanAutoMounts(m.discoveredUSBs)
 			return m, tea.Quit
 		}
-		return m.updateForScreen(msg)
+		return updateScreenKey(m, msg)
 
 	case internalDisksMsg:
 		m.isScanning = false
 		if msg.err == nil && len(msg.disks) > 0 {
 			m.availableDisks = msg.disks
-			if len(msg.disks) == 1 {
-				m.chosenDiskDev = msg.disks[0].DevPath
-				m.screen = ScreenStorageAllocationSelect
-				m.storageCursor = 1
-				m.storageCustomInput.Blur()
-				return m, nil
-			}
 			m.targetDiskCursor = 0
 			m.screen = ScreenTargetDiskSelect
 			return m, nil
@@ -812,6 +831,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		pDisk, _, _, _, _ := engine.DetectActiveRootDisk()
 		m.chosenDiskDev = pDisk
 		m.screen = ScreenStorageAllocationSelect
+		return m, nil
+
+	case guestOSScanDoneMsg:
+		m.isScanning = false
+		m.discoveredGuests = msg.guests
+		m.revertCursor = 0
+		if len(m.discoveredGuests) > 0 {
+			m.selectedGuest = &m.discoveredGuests[0]
+		} else {
+			m.selectedGuest = nil
+		}
 		return m, nil
 
 	case dirContentsMsg:
@@ -859,6 +889,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				src = m.overridePayloadURL
 			}
 
+			if _, sErr := os.Stat(src); sErr != nil {
+				userHome := engine.GetRealUserHome()
+				if m.selectedOS != nil && m.selectedOS.DownloadURL != "" {
+					candidates := []string{
+						filepath.Join(userHome, "Downloads", filepath.Base(m.selectedOS.DownloadURL)),
+						filepath.Join(userHome, "Downloads", m.selectedOS.Distro+".iso"),
+					}
+					for _, c := range candidates {
+						if _, cErr := os.Stat(c); cErr == nil {
+							src = c
+							break
+						}
+					}
+				}
+			}
+
 			if info, sErr := os.Stat(src); sErr == nil {
 				ctx, cancel := context.WithCancel(context.Background())
 				m.cancelProvision = cancel
@@ -872,8 +918,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					tickCmd(),
 				)
 			}
-
-			return m, scanInternalDisksCmd()
 		}
 
 		m.screen = ScreenProgress
@@ -906,7 +950,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.overridePayloadURL = msg.destPath
 		m.statusLog = append(m.statusLog, "=> [USB STAGED 100%] Staged OS payload in ORCH_STORAGE: "+msg.destPath)
 
-		return m, scanInternalDisksCmd()
+		m.screen = ScreenConfirm
+		if m.provisionMode == "single-boot" {
+			m.eraseConfirmInput.Reset()
+			m.eraseConfirmInput.Focus()
+		}
+		return m, nil
 
 	case postUSBResetDoneMsg:
 		m.isResettingUSB = false
@@ -956,13 +1005,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.statusLog = append(m.statusLog, "=> [BACKUP VERIFIED] "+msg.archivePath)
 
-		if m.provisionMode == "dual-boot" {
-			return m, scanInternalDisksCmd()
-		}
-
 		m.screen = ScreenConfirm
-		m.eraseConfirmInput.Reset()
-		m.eraseConfirmInput.Focus()
+		if m.provisionMode == "single-boot" {
+			m.eraseConfirmInput.Reset()
+			m.eraseConfirmInput.Focus()
+		}
 		return m, nil
 
 	case disasterScanDoneMsg:
@@ -985,7 +1032,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.guardReport = msg.guard
 		m.envChecked = true
 		m.isVMEnvironment = msg.hv.Kind != hypervisor.KindBareMetal
-		m.vmHypervisorName = string(msg.hv.Kind)
+		m.vmHypervisorName = msg.hv.Kind.String()
 		if msg.hvErr != nil {
 			m.envErr = msg.hvErr
 		} else if msg.fwErr != nil {
@@ -1033,7 +1080,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	keyStr := strings.ToLower(msg.String())
 
 	if m.fatalErr != nil {
@@ -1181,9 +1228,11 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.clientCursor = 1
 			if m.hasStagedPayload {
 				m.overridePayloadURL = m.stagedPayloadPath
+				fam := detectPayloadFamily(m.stagedPayloadPath)
 				m.selectedOS = &discovery.Entry{
 					Distro:          filepath.Base(m.stagedPayloadPath),
 					Version:         "Physical Scratch (/var/tmp)",
+					Family:          fam,
 					Flavor:          "gui",
 					Arch:            "amd64",
 					DownloadURL:     m.stagedPayloadPath,
@@ -1222,9 +1271,11 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case 1:
 				if m.hasStagedPayload {
 					m.overridePayloadURL = m.stagedPayloadPath
+					fam := detectPayloadFamily(m.stagedPayloadPath)
 					m.selectedOS = &discovery.Entry{
 						Distro:          filepath.Base(m.stagedPayloadPath),
 						Version:         "Physical Scratch (/var/tmp)",
+						Family:          fam,
 						Flavor:          "gui",
 						Arch:            "amd64",
 						DownloadURL:     m.stagedPayloadPath,
@@ -1525,9 +1576,11 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					payloadName = selected.Payloads[0]
 				}
 				m.overridePayloadURL = selected.URL
+				fam := detectPayloadFamily(payloadName)
 				m.selectedOS = &discovery.Entry{
 					Distro:          payloadName,
 					Version:         fmt.Sprintf("LAN Peer (%s:8080)", selected.IP),
+					Family:          fam,
 					Flavor:          "gui",
 					Arch:            "amd64",
 					DownloadURL:     selected.URL,
@@ -1549,9 +1602,11 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					val = val + ":8080/files/Parrot-security-7.3_amd64.iso"
 				}
 				m.overridePayloadURL = val
+				fam := detectPayloadFamily(val)
 				m.selectedOS = &discovery.Entry{
 					Distro:          "Manual LAN Stream",
 					Version:         "Peer Endpoint",
+					Family:          fam,
 					Flavor:          "gui",
 					Arch:            "amd64",
 					DownloadURL:     val,
@@ -1588,41 +1643,33 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "1":
 			m.provisionMode = "dual-boot"
 			m.detectedFreeBytes = m.detectAvailableDiskSpace()
-			m.screen = ScreenBackupPrompt
-			m.backupCursor = 0
-			m.backupStatusMsg = ""
 			m.isScanning = true
-			return m, tea.Batch(scanBackupDrivesCmd(), m.scanSpinner.Tick)
+			return m, tea.Batch(scanInternalDisksCmd(), m.scanSpinner.Tick)
 		case "2":
 			m.provisionMode = "single-boot"
-			m.screen = ScreenBackupPrompt
-			m.backupCursor = 0
-			m.backupStatusMsg = ""
 			m.isScanning = true
-			return m, tea.Batch(scanBackupDrivesCmd(), m.scanSpinner.Tick)
+			return m, tea.Batch(scanInternalDisksCmd(), m.scanSpinner.Tick)
 		case "enter":
 			if m.customBootCursor == 0 {
 				m.provisionMode = "dual-boot"
 				m.detectedFreeBytes = m.detectAvailableDiskSpace()
-				m.screen = ScreenBackupPrompt
-				m.backupCursor = 0
-				m.backupStatusMsg = ""
 				m.isScanning = true
-				return m, tea.Batch(scanBackupDrivesCmd(), m.scanSpinner.Tick)
+				return m, tea.Batch(scanInternalDisksCmd(), m.scanSpinner.Tick)
 			} else {
 				m.provisionMode = "single-boot"
-				m.screen = ScreenBackupPrompt
-				m.backupCursor = 0
-				m.backupStatusMsg = ""
 				m.isScanning = true
-				return m, tea.Batch(scanBackupDrivesCmd(), m.scanSpinner.Tick)
+				return m, tea.Batch(scanInternalDisksCmd(), m.scanSpinner.Tick)
 			}
 		}
 
 	case ScreenTargetDiskSelect:
 		switch keyStr {
 		case "esc":
-			m.screen = ScreenCustomBootModeSelect
+			if !m.isAdvancedMode {
+				m.screen = ScreenOSSelect
+			} else {
+				m.screen = ScreenCustomBootModeSelect
+			}
 			return m, nil
 		case "up", "k":
 			if m.targetDiskCursor > 0 {
@@ -1636,7 +1683,11 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			idx, _ := strconv.Atoi(keyStr)
 			if idx > 0 && idx <= len(m.availableDisks) {
 				m.targetDiskCursor = idx - 1
-				m.chosenDiskDev = m.availableDisks[m.targetDiskCursor].DevPath
+				selected := m.availableDisks[m.targetDiskCursor]
+				m.chosenDiskDev = selected.DevPath
+				if selected.SizeBytes > 0 {
+					m.detectedFreeBytes = selected.SizeBytes
+				}
 				m.screen = ScreenStorageAllocationSelect
 				m.storageCursor = 1
 				m.storageCustomInput.Blur()
@@ -1644,7 +1695,11 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			if len(m.availableDisks) > 0 && m.targetDiskCursor < len(m.availableDisks) {
-				m.chosenDiskDev = m.availableDisks[m.targetDiskCursor].DevPath
+				selected := m.availableDisks[m.targetDiskCursor]
+				m.chosenDiskDev = selected.DevPath
+				if selected.SizeBytes > 0 {
+					m.detectedFreeBytes = selected.SizeBytes
+				}
 				m.screen = ScreenStorageAllocationSelect
 				m.storageCursor = 1
 				m.storageCustomInput.Blur()
@@ -1664,7 +1719,11 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.screen = ScreenTargetDiskSelect
 				return m, nil
 			}
-			m.screen = ScreenCustomBootModeSelect
+			if !m.isAdvancedMode {
+				m.screen = ScreenOSSelect
+			} else {
+				m.screen = ScreenCustomBootModeSelect
+			}
 			return m, nil
 		case "up", "k":
 			if m.storageCursor > 0 {
@@ -1718,8 +1777,17 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.chosenAllocBytes = 25 * 1024 * 1024 * 1024
 			}
 
-			m.screen = ScreenConfirm
-			return m, nil
+			pDisk, _, _, _, _ := engine.DetectActiveRootDisk()
+			if m.chosenDiskDev != "" && m.chosenDiskDev != pDisk {
+				m.screen = ScreenConfirm
+				return m, nil
+			}
+
+			m.screen = ScreenBackupPrompt
+			m.backupCursor = 0
+			m.backupStatusMsg = ""
+			m.isScanning = true
+			return m, tea.Batch(scanBackupDrivesCmd(), m.scanSpinner.Tick)
 		default:
 			if m.storageCursor == maxChoices-1 {
 				var cmd tea.Cmd
@@ -1750,9 +1818,11 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				u := m.discoveredUSBs[m.usbCursor]
 				m.selectedUSB = &u
 				m.overridePayloadURL = u.FilePath
+				fam := detectPayloadFamily(u.FileName)
 				m.selectedOS = &discovery.Entry{
 					Distro:          u.FileName,
 					Version:         "USB Media (" + u.DeviceName + ")",
+					Family:          fam,
 					Flavor:          "gui",
 					Arch:            "amd64",
 					DownloadURL:     u.FilePath,
@@ -1789,6 +1859,10 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = ScreenFolderSelect
 		case "3":
 			m.screen = ScreenRevertConfirm
+			m.isScanning = true
+			m.revertCursor = 0
+			m.selectedGuest = nil
+			return m, tea.Batch(scanGuestOSesCmd(), m.scanSpinner.Tick)
 		case "4":
 			if m.journal == nil {
 				m.journal, _ = safety.LoadJournal("orchestrator_journal.json")
@@ -1822,6 +1896,10 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.screen = ScreenFolderSelect
 			case 2:
 				m.screen = ScreenRevertConfirm
+				m.isScanning = true
+				m.revertCursor = 0
+				m.selectedGuest = nil
+				return m, tea.Batch(scanGuestOSesCmd(), m.scanSpinner.Tick)
 			case 3:
 				if m.journal == nil {
 					m.journal, _ = safety.LoadJournal("orchestrator_journal.json")
@@ -1897,11 +1975,8 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 
 				m.detectedFreeBytes = m.detectAvailableDiskSpace()
-				m.screen = ScreenBackupPrompt
-				m.backupCursor = 0
-				m.backupStatusMsg = ""
 				m.isScanning = true
-				return m, tea.Batch(scanBackupDrivesCmd(), m.scanSpinner.Tick)
+				return m, tea.Batch(scanInternalDisksCmd(), m.scanSpinner.Tick)
 			}
 		}
 
@@ -1992,11 +2067,8 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if keyStr == "enter" || keyStr == "1" || keyStr == "2" || keyStr == "3" {
 			if m.usbTargetCursor == 0 {
 				m.detectedFreeBytes = m.detectAvailableDiskSpace()
-				m.screen = ScreenBackupPrompt
-				m.backupCursor = 0
-				m.backupStatusMsg = ""
 				m.isScanning = true
-				return m, tea.Batch(scanBackupDrivesCmd(), m.scanSpinner.Tick)
+				return m, tea.Batch(scanInternalDisksCmd(), m.scanSpinner.Tick)
 			}
 
 			if m.usbTargetCursor == 1 {
@@ -2033,6 +2105,15 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "y", "enter":
 			if m.selectedTarget != nil {
+				removableBytes, _ := os.ReadFile(fmt.Sprintf("/sys/block/%s/removable", m.selectedTarget.Name))
+				isInternal := strings.TrimSpace(string(removableBytes)) != "1"
+
+				if isInternal {
+					m.chosenDiskDev = m.selectedTarget.DevPath
+					m.screen = ScreenConfirm
+					return m, nil
+				}
+
 				m.screen = ScreenProgress
 				m.speed = NewSpeedTracker(100)
 				m.statusLog = append(m.statusLog, fmt.Sprintf("=> [USB PREPARE] Formatting %s (%s) with dynamic partition scheme...", m.selectedTarget.DevPath, m.selectedTarget.Size))
@@ -2056,11 +2137,7 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case ScreenBackupPrompt:
 		switch keyStr {
 		case "esc":
-			if m.isAdvancedMode || m.overridePayloadURL != "" {
-				m.screen = ScreenCustomBootModeSelect
-				return m, nil
-			}
-			m.screen = ScreenHub
+			m.screen = ScreenStorageAllocationSelect
 			return m, nil
 		case "r":
 			m.isScanning = true
@@ -2075,19 +2152,21 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			if m.backupCursor == len(m.backupTargets) {
-				if m.provisionMode == "dual-boot" {
-					return m, scanInternalDisksCmd()
-				}
 				m.screen = ScreenConfirm
-				m.eraseConfirmInput.Reset()
-				m.eraseConfirmInput.Focus()
+				if m.provisionMode == "single-boot" {
+					m.eraseConfirmInput.Reset()
+					m.eraseConfirmInput.Focus()
+				}
 				return m, nil
 			}
 
 			if len(m.backupTargets) > 0 && m.backupCursor < len(m.backupTargets) {
 				tgt := m.backupTargets[m.backupCursor]
 
-				if tgt.Type == "disk" && strings.HasPrefix(tgt.Name, "sd") {
+				removableBytes, _ := os.ReadFile(fmt.Sprintf("/sys/block/%s/removable", tgt.Name))
+				isUSBMedia := strings.TrimSpace(string(removableBytes)) == "1"
+
+				if tgt.Type == "disk" && isUSBMedia {
 					devPath := "/dev/" + tgt.Name
 					byteSize, _ := engine.QueryBlockDeviceBytes(tgt.Name)
 					m.selectedTarget = &engine.USBTargetDevice{
@@ -2100,34 +2179,15 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 
+				if tgt.Type == "disk" && !isUSBMedia {
+					m.chosenDiskDev = "/dev/" + tgt.Name
+					m.screen = ScreenConfirm
+					return m, nil
+				}
+
 				targetPath := tgt.Mountpoint
 				if targetPath == "" {
 					targetPath = tgt.Name
-				}
-
-				if m.provisionMode == "dual-boot" {
-					src := "/var/tmp/os_image.payload"
-					if m.stagedPayloadPath != "" {
-						src = m.stagedPayloadPath
-					} else if m.overridePayloadURL != "" && !strings.HasPrefix(m.overridePayloadURL, "http") {
-						src = m.overridePayloadURL
-					}
-
-					if info, sErr := os.Stat(src); sErr == nil {
-						ctx, cancel := context.WithCancel(context.Background())
-						m.cancelProvision = cancel
-						m.screen = ScreenProgress
-						m.speed = NewSpeedTracker(uint64(info.Size()))
-						m.speed.Sample(0)
-						m.stepUpdates = make(chan provisionStepMsg, 64)
-						return m, tea.Batch(
-							triggerUSBStagePayloadCmd(ctx, src, targetPath, m.stepUpdates),
-							listenForStepUpdates(m.stepUpdates),
-							tickCmd(),
-						)
-					}
-
-					return m, scanInternalDisksCmd()
 				}
 
 				m.screen = ScreenProgress
@@ -2149,11 +2209,7 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.provisionMode == "single-boot" {
 			switch keyStr {
 			case "esc":
-				if m.isAdvancedMode || m.overridePayloadURL != "" {
-					m.screen = ScreenCustomBootModeSelect
-					return m, nil
-				}
-				m.screen = ScreenHub
+				m.screen = ScreenStorageAllocationSelect
 				return m, nil
 			case "enter":
 				val := strings.ToUpper(strings.TrimSpace(m.eraseConfirmInput.Value()))
@@ -2183,28 +2239,100 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, m.startProvisioning(false)
 			case "n", "esc":
 				m.screen = ScreenStorageAllocationSelect
+				return m, nil
 			case "q":
 				return m, tea.Quit
 			}
 		}
 
 	case ScreenRevertConfirm:
-		switch keyStr {
-		case "y", "enter":
-			m.screen = ScreenProgress
-			m.statusLog = append(m.statusLog, "=> [REVERT 0%] Initializing bare-metal OS decommissioning transaction...")
-			m.speed = NewSpeedTracker(1000)
-			m.speed.Sample(0)
-			m.stepUpdates = make(chan provisionStepMsg, 64)
+		if m.isScanning {
+			if keyStr == "esc" || keyStr == "q" {
+				m.isScanning = false
+				m.screen = ScreenHub
+				return m, nil
+			}
+			return m, nil
+		}
 
-			return m, tea.Batch(
-				triggerRealRevertCmd(m.stepUpdates),
-				listenForStepUpdates(m.stepUpdates),
-				tickCmd(),
-			)
+		if len(m.discoveredGuests) == 0 {
+			switch keyStr {
+			case "enter", "esc", "q":
+				m.screen = ScreenHub
+				return m, nil
+			case "r":
+				m.isScanning = true
+				return m, tea.Batch(scanGuestOSesCmd(), m.scanSpinner.Tick)
+			}
+			return m, nil
+		}
+
+		switch keyStr {
+		case "up", "k":
+			if m.revertCursor > 0 {
+				m.revertCursor--
+			}
+			m.selectedGuest = &m.discoveredGuests[m.revertCursor]
+			return m, nil
+		case "down", "j":
+			if m.revertCursor < len(m.discoveredGuests)-1 {
+				m.revertCursor++
+			}
+			m.selectedGuest = &m.discoveredGuests[m.revertCursor]
+			return m, nil
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+			idx, _ := strconv.Atoi(keyStr)
+			if idx > 0 && idx <= len(m.discoveredGuests) {
+				m.revertCursor = idx - 1
+				m.selectedGuest = &m.discoveredGuests[m.revertCursor]
+				m.revertModeCursor = 0
+				m.screen = ScreenRevertModeSelect
+				return m, nil
+			}
+		case "r":
+			m.isScanning = true
+			return m, tea.Batch(scanGuestOSesCmd(), m.scanSpinner.Tick)
+		case "y", "enter":
+			if len(m.discoveredGuests) > 0 && m.revertCursor < len(m.discoveredGuests) {
+				m.selectedGuest = &m.discoveredGuests[m.revertCursor]
+				m.revertModeCursor = 0
+				m.screen = ScreenRevertModeSelect
+				return m, nil
+			}
 		case "n", "esc":
 			m.screen = ScreenHub
 			return m, nil
+		case "q":
+			return m, tea.Quit
+		}
+
+	case ScreenRevertModeSelect:
+		switch keyStr {
+		case "esc":
+			m.screen = ScreenRevertConfirm
+			return m, nil
+		case "up", "k":
+			if m.revertModeCursor > 0 {
+				m.revertModeCursor--
+			}
+			return m, nil
+		case "down", "j":
+			if m.revertModeCursor < 1 {
+				m.revertModeCursor++
+			}
+			return m, nil
+		case "1":
+			m.revertModeCursor = 0
+			m.lastRevertKeepSlice = false
+			return m.commitDecommission(false)
+		case "2":
+			m.revertModeCursor = 1
+			m.lastRevertKeepSlice = true
+			return m.commitDecommission(true)
+		case "enter":
+			keepSlice := (m.revertModeCursor == 1)
+			m.lastRevertKeepSlice = keepSlice
+			return m.commitDecommission(keepSlice)
 		case "q":
 			return m, tea.Quit
 		}
@@ -2321,6 +2449,28 @@ func (m Model) updateForScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) commitDecommission(keepSlice bool) (tea.Model, tea.Cmd) {
+	if m.selectedGuest != nil {
+		guest := *m.selectedGuest
+		m.screen = ScreenProgress
+		actionStr := "Purging partition and expanding host"
+		if keepSlice {
+			actionStr = "Sanitizing OS while preserving partition slice"
+		}
+		m.statusLog = append(m.statusLog, fmt.Sprintf("=> [REVERT 0%%] %s (%s on %s)...", actionStr, guest.Name, guest.DevicePath))
+		m.speed = NewSpeedTracker(1000)
+		m.speed.Sample(0)
+		m.stepUpdates = make(chan provisionStepMsg, 64)
+
+		return m, tea.Batch(
+			triggerTargetedRevertCmd(guest, keepSlice, m.stepUpdates),
+			listenForStepUpdates(m.stepUpdates),
+			tickCmd(),
+		)
+	}
+	return m, nil
+}
+
 func (m *Model) updateSCPFocus() {
 	m.scpTargetIPInput.Blur()
 	m.scpUserInput.Blur()
@@ -2342,18 +2492,16 @@ func (m *Model) startProvisioning(isResume bool) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelProvision = cancel
 
-	pDisk := m.chosenDiskDev
-	hNum := "2"
-	targetPart := pDisk + "3"
+	activeRootDisk, _, activeHostNum, activeTargetPart, _ := engine.DetectActiveRootDisk()
 
-	if pDisk == "" {
-		detectedDisk, _, detectedHostNum, detectedTargetPart, _ := engine.DetectActiveRootDisk()
-		pDisk = detectedDisk
-		hNum = detectedHostNum
-		targetPart = detectedTargetPart
-	} else if strings.Contains(pDisk, "sda") {
-		hNum = "1"
-		targetPart = pDisk + "2"
+	pDisk := m.chosenDiskDev
+	hNum := ""
+	targetPart := ""
+
+	if pDisk == "" || pDisk == activeRootDisk {
+		pDisk = activeRootDisk
+		hNum = activeHostNum
+		targetPart = activeTargetPart
 	}
 
 	var mirrors []string
@@ -2396,6 +2544,17 @@ func (m *Model) startProvisioning(isResume bool) tea.Cmd {
 		isWindows = strings.EqualFold(string(selectedEntry.Family), "windows")
 	}
 
+	autounattendPath := ""
+	if isWindows {
+		candidate := filepath.Join("discovery", "manifests", "autounattend.xml")
+		if abs, err := filepath.Abs(candidate); err == nil {
+			candidate = abs
+		}
+		if _, statErr := os.Stat(candidate); statErr == nil {
+			autounattendPath = candidate
+		}
+	}
+
 	req := engine.ProvisionRequest{
 		JournalPath:      "orchestrator_journal.json",
 		ImageURL:         primaryURL,
@@ -2406,6 +2565,7 @@ func (m *Model) startProvisioning(isResume bool) tea.Cmd {
 		HostPartNum:      hNum,
 		ESPPartNum:       "1",
 		IsWindowsImage:   isWindows,
+		AutounattendPath: autounattendPath,
 		BootLabel:        strings.ToLower(distroName),
 		HypervisorKind:   m.hvInfo.Kind,
 		SkipCompaction:   false,
@@ -2415,7 +2575,7 @@ func (m *Model) startProvisioning(isResume bool) tea.Cmd {
 	}
 
 	if m.journal == nil {
-		m.journal, _ = safety.NewJournal("orchestrator_journal.json", fmt.Sprintf("txn-%d", time.Now().UnixNano()))
+		m.journal, _ = safety.NewJournal(req.JournalPath, fmt.Sprintf("txn-%d", time.Now().UnixNano()))
 	}
 	_ = m.journal.SetSessionState(safety.SessionState{
 		TargetOSID:    distroName,

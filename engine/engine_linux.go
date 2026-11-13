@@ -170,10 +170,7 @@ func (e *LinuxStorageEngine) CreatePartition(diskID string, sizeBytes uint64, fs
 	_ = exec.Command("partprobe", diskID).Run()
 	time.Sleep(1 * time.Second)
 
-	targetPart := diskID + "2"
-	if strings.Contains(diskID, "nvme") {
-		targetPart = diskID + "p2"
-	}
+	targetPart := JoinDiskAndPartition(diskID, "2")
 
 	mkfsCmd := "mkfs.ext4"
 	if fsType == "vfat" || fsType == "fat32" {

@@ -12,7 +12,7 @@ if %ERRORLEVEL% NEQ 0 (
     echo ======================================================================
 )
 
-:: 2. Execute autorun.ps1 with execution policy bypass and forward all parameters
+:: 2. Forward directly through PowerShell launcher with argument preservation
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0autorun.ps1" %*
 
 set "EXIT_CODE=%ERRORLEVEL%"

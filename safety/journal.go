@@ -21,13 +21,22 @@ const (
 	StepRolledBack StepStatus = "rolled_back"
 )
 
-// SessionState records the overall transaction context for pause/resume.
+// SessionState records the overall transaction context across disks.
 type SessionState struct {
 	TargetOSID      string `json:"target_os_id,omitempty"`
 	DistroName      string `json:"distro_name,omitempty"`
-	ProvisionMode   string `json:"provision_mode,omitempty"` // "dual-boot", "single-boot"
-	TargetDisk      string `json:"target_disk,omitempty"`
-	TargetPartition string `json:"target_partition,omitempty"`
+	ProvisionMode   string `json:"provision_mode,omitempty"`    // "single-boot", "dual-boot", "triple-boot"
+	TargetDisk      string `json:"target_disk,omitempty"`       // e.g. "/dev/sda" (best-effort, resolved fresh on revert)
+	TargetPartition string `json:"target_partition,omitempty"`  // e.g. "/dev/sda2" (best-effort, resolved fresh on revert)
+	TargetPartNum   string `json:"target_part_num,omitempty"`   // e.g. "2"
+	TargetPartUUID  string `json:"target_part_uuid,omitempty"`  // stable fingerprint — survives device renaming
+	TargetFSType    string `json:"target_fs_type,omitempty"`    // fs type recorded at creation, for a sanity check on revert
+	TargetSizeBytes int64  `json:"target_size_bytes,omitempty"` // partition size recorded at creation, for a sanity check on revert
+	ShrunkPartition string `json:"shrunk_partition,omitempty"`  // e.g. "/dev/sda1" (best-effort, resolved fresh on revert)
+	ShrunkPartNum   string `json:"shrunk_part_num,omitempty"`   // e.g. "1"
+	ShrunkPartUUID  string `json:"shrunk_part_uuid,omitempty"`  // stable fingerprint of the host partition being expanded back
+	ShrunkFSType    string `json:"shrunk_fs_type,omitempty"`    // "ext4", "ntfs", "btrfs"
+	EFIDirName      string `json:"efi_dir_name,omitempty"`      // e.g. "Microsoft", "parrot"
 	DownloadURL     string `json:"download_url,omitempty"`
 	BytesDownloaded int64  `json:"bytes_downloaded,omitempty"`
 	TotalBytes      int64  `json:"total_bytes,omitempty"`
@@ -60,10 +69,14 @@ type Journal struct {
 // RollbackFunc undoes one step given its stored rollback data.
 type RollbackFunc func(data json.RawMessage) error
 
-// NewJournal creates a fresh journal file at path.
+// NewJournal creates a fresh journal file at path, auto-healing 0-byte crashed stubs.
 func NewJournal(path, txnID string) (*Journal, error) {
-	if _, err := os.Stat(path); err == nil {
-		return nil, fmt.Errorf("journal already exists at %s — call LoadJournal to resume or purge it first", path)
+	if fi, err := os.Stat(path); err == nil {
+		if fi.Size() == 0 {
+			_ = os.Remove(path)
+		} else {
+			return nil, fmt.Errorf("journal already exists at %s — call LoadJournal to resume or purge it first", path)
+		}
 	}
 	j := &Journal{
 		Path:      path,
@@ -78,8 +91,17 @@ func NewJournal(path, txnID string) (*Journal, error) {
 	return j, nil
 }
 
-// LoadJournal reads an existing journal.json.
+// LoadJournal reads an existing journal.json and rejects empty/invalid files cleanly.
 func LoadJournal(path string) (*Journal, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if fi.Size() == 0 {
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("journal at %s was 0 bytes (purged stale stub)", path)
+	}
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -93,7 +115,6 @@ func LoadJournal(path string) (*Journal, error) {
 }
 
 // HasIncompleteSteps reports whether an active operation is currently running or paused.
-// Completed or previously rolled-back/failed historical steps do not count as in-flight locks.
 func (j *Journal) HasIncompleteSteps() bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -112,7 +133,7 @@ func (j *Journal) hasIncompleteStepsLocked() bool {
 	return false
 }
 
-// GetUnfinishedSession returns the stored session parameters if an interrupted or paused session exists.
+// GetUnfinishedSession returns the stored session parameters if an interrupted session exists.
 func (j *Journal) GetUnfinishedSession() (*SessionState, bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -185,7 +206,7 @@ func (j *Journal) Fail(step *Step, cause error) error {
 	return j.flushLocked()
 }
 
-// RollbackAll undoes all committed, running, or failed steps in reverse order.
+// RollbackAll undoes steps in reverse chronological order.
 func (j *Journal) RollbackAll(handlers map[string]RollbackFunc) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -216,13 +237,34 @@ func (j *Journal) RollbackAll(handlers map[string]RollbackFunc) error {
 	return nil
 }
 
-// Finalize removes the journal file after a successful run.
-func (j *Journal) Finalize() error {
+// FinalizeAndRecord cleans up the transactional journal upon successful completion,
+// but first persists the session's identity fingerprint (PARTUUID etc.) into a
+// small permanent record file, so a later revert can still find and undo this
+// install after the transactional journal itself is gone. Pass the same
+// SessionState you were tracking (it's read out before wiping, so this must be
+// called before/instead of the old bare Finalize()).
+func (j *Journal) FinalizeAndRecord(recordPath string) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
 	if j.hasIncompleteStepsLocked() {
 		return fmt.Errorf("refusing to finalize: active operations still in flight")
+	}
+
+	// Persist the durable fact of "this OS was installed here" before wiping
+	// the transactional state. Best-effort: a failure here shouldn't block
+	// finishing the provision, but it does mean the install becomes
+	// undiscoverable by DiscoverSecondaryOSes later — worth logging upstream.
+	if recordPath != "" && (j.Session.TargetPartUUID != "" || j.Session.TargetPartition != "") {
+		record := &Journal{
+			Path:      recordPath,
+			TxnID:     j.TxnID,
+			CreatedAt: j.CreatedAt,
+			UpdatedAt: time.Now(),
+			Session:   j.Session,
+			Steps:     nil,
+		}
+		_ = record.flush()
 	}
 
 	j.Steps = nil
@@ -233,7 +275,14 @@ func (j *Journal) Finalize() error {
 	return nil
 }
 
-// PurgeForce unconditionally removes the journal file and releases state locks.
+// Finalize is kept for backward compatibility — it cleans up the transactional
+// journal without persisting an install record. Prefer FinalizeAndRecord for
+// any provisioning path that creates a revertible dual-boot partition.
+func (j *Journal) Finalize() error {
+	return j.FinalizeAndRecord("")
+}
+
+// PurgeForce unconditionally removes the journal file from disk.
 func (j *Journal) PurgeForce() error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -258,6 +307,9 @@ func (j *Journal) flushLocked() error {
 		return err
 	}
 	dir := filepath.Dir(j.Path)
+	if dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0755)
+	}
 	tmp, err := os.CreateTemp(dir, ".journal-*.tmp")
 	if err != nil {
 		return err

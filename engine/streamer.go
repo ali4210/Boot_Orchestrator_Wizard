@@ -1,6 +1,7 @@
 // Package engine — streamer.go implements the Resilient Multi-Mirror HTTP
 // Streamer with automated failover, HTTP Range pause/resume capabilities,
-// local file payload support, and single-pass SHA-256 verification.
+// local file payload support, single-pass SHA-256 verification, and autonomous
+// HTTP 416 range auto-recovery.
 package engine
 
 import (
@@ -226,7 +227,6 @@ func copyFromLocalFile(
 	}
 	defer src.Close()
 
-	// Wrap in stream decoder for transparent on-the-fly inflation
 	decoded, err := InspectAndDecodeStream(src)
 	if err != nil {
 		return nil, fmt.Errorf("stream decoder failed: %w", err)
@@ -319,6 +319,13 @@ func downloadFromSingleMirror(
 	if err != nil {
 		return nil, err
 	}
+
+	// Range Sanity Fallback: If remote returned HTTP 416 (offset >= file size), truncate & retry from 0
+	if useRange && resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		resp.Body.Close()
+		_ = os.Truncate(tmpPath, 0)
+		return downloadFromSingleMirror(ctx, client, url, tmpPath, 0, startTime, onProgress)
+	}
 	defer resp.Body.Close()
 
 	var file *os.File
@@ -343,7 +350,6 @@ func downloadFromSingleMirror(
 	}
 	defer file.Close()
 
-	// Route incoming socket stream through stream decoder
 	decoded, err := InspectAndDecodeStream(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed decoding stream payload: %w", err)

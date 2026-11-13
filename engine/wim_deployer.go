@@ -192,7 +192,11 @@ func injectAutounattend(srcPath, targetRoot string) error {
 	if err := xml.Unmarshal(data, new(struct{ XMLName xml.Name })); err != nil {
 		return fmt.Errorf("malformed XML answer file %s: %w", srcPath, err)
 	}
-	destPath := filepath.Join(targetRoot, "autounattend.xml")
+	pantherDir := filepath.Join(targetRoot, "Windows", "Panther")
+	if err := os.MkdirAll(pantherDir, 0755); err != nil {
+		return fmt.Errorf("creating Panther dir: %w", err)
+	}
+	destPath := filepath.Join(pantherDir, "unattend.xml")
 	return os.WriteFile(destPath, data, 0644)
 }
 
