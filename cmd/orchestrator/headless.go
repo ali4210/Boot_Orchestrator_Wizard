@@ -24,6 +24,16 @@ type headlessConfig struct {
 	Username     string
 	PasswordFile string
 	Yes          bool
+
+	// AllowUnverified opts into provisioning a payload with no checksum to
+	// verify the download against (audit follow-up F13) — every --iso-path
+	// is inherently unverified (no catalog checksum exists for an arbitrary
+	// local file), and some --os-id catalog entries are too (see
+	// docs/MANIFEST_AUDIT.md). Separate from --yes: --yes means "I confirm
+	// the target disk/OS/account", this means "I specifically accept an
+	// unverifiable download", and conflating the two would make it too easy
+	// to pass once and forget what was actually being accepted.
+	AllowUnverified bool
 }
 
 // validate reports the first problem with cfg, or nil if headless
@@ -253,6 +263,19 @@ func buildHeadlessRequest(cfg headlessConfig, catalog *discovery.Catalog, hvKind
 	primaryURL, sha, distroName, entry, isWindows, err := resolveHeadlessImage(cfg, catalog)
 	if err != nil {
 		return engine.ProvisionRequest{}, err
+	}
+
+	// Audit follow-up F13: no payload may be silently provisioned without a
+	// checksum to verify the download against. --iso-path is always
+	// unverified (there is no catalog checksum for an arbitrary local
+	// file); an --os-id catalog entry may also lack one — see
+	// docs/MANIFEST_AUDIT.md, which currently lists every entry as such.
+	if strings.TrimSpace(sha) == "" && !cfg.AllowUnverified {
+		source := cfg.OSID
+		if source == "" {
+			source = cfg.ISOPath
+		}
+		return engine.ProvisionRequest{}, fmt.Errorf("%q has no checksum to verify the download against; refusing without --allow-unverified (pass it only if you have independently confirmed this payload's integrity)", source)
 	}
 
 	mode, hostNum, targetPart := resolveHeadlessTarget(cfg.TargetDisk, activeRootDisk, activeHostNum, activeTargetPart)

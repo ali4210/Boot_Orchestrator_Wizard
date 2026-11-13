@@ -46,6 +46,7 @@ const (
 	ScreenResumeAlert
 	ScreenFolderSelect
 	ScreenOSSelect
+	ScreenUnverifiedDownloadConfirm
 	ScreenEnvironmentCheck
 	ScreenBackupPrompt
 	ScreenDisasterRecovery
@@ -1988,22 +1989,32 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				e := it.entry
 				m.selectedOS = &e
 
-				if m.isAdvancedMode {
-					m.screen = ScreenUSBTargetSelect
-					m.usbTargetCursor = 0
-					m.isScanning = true
-					return m, tea.Batch(scanUSBTargetsCmd(), m.scanSpinner.Tick)
+				// Audit follow-up F13: no catalog entry may be silently
+				// provisioned without a checksum to verify the download
+				// against. Route through an explicit confirmation screen
+				// instead of proceeding straight into disk/USB selection.
+				if strings.TrimSpace(e.SHA256) == "" {
+					m.screen = ScreenUnverifiedDownloadConfirm
+					return m, nil
 				}
-
-				m.detectedFreeBytes = m.detectAvailableDiskSpace()
-				m.isScanning = true
-				return m, tea.Batch(scanInternalDisksCmd(), m.scanSpinner.Tick)
+				return m, m.proceedAfterOSSelected()
 			}
 		}
 
 		var cmd tea.Cmd
 		m.osList, cmd = m.osList.Update(msg)
 		return m, cmd
+
+	case ScreenUnverifiedDownloadConfirm:
+		switch keyStr {
+		case "y", "enter":
+			return m, m.proceedAfterOSSelected()
+		case "n", "esc", "q":
+			m.selectedOS = nil
+			m.screen = ScreenOSSelect
+			return m, nil
+		}
+		return m, nil
 
 	case ScreenEnvironmentCheck:
 		switch keyStr {
@@ -2557,6 +2568,24 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// proceedAfterOSSelected continues the flow that previously ran inline
+// right after an OS was selected: into USB target selection for advanced
+// mode, or disk-space detection otherwise. Extracted so the audit
+// follow-up F13 unverified-download confirmation screen can share it
+// without duplicating the branch.
+func (m *Model) proceedAfterOSSelected() tea.Cmd {
+	if m.isAdvancedMode {
+		m.screen = ScreenUSBTargetSelect
+		m.usbTargetCursor = 0
+		m.isScanning = true
+		return tea.Batch(scanUSBTargetsCmd(), m.scanSpinner.Tick)
+	}
+
+	m.detectedFreeBytes = m.detectAvailableDiskSpace()
+	m.isScanning = true
+	return tea.Batch(scanInternalDisksCmd(), m.scanSpinner.Tick)
 }
 
 func (m *Model) commitDecommission(keepSlice bool) (tea.Model, tea.Cmd) {

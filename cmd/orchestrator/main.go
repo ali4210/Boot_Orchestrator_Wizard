@@ -67,6 +67,7 @@ func main() {
 	usernameFlag := flag.String("username", "", "Headless: account to create on the provisioned OS")
 	passwordFileFlag := flag.String("password-file", "", "Headless: path to a file containing the account password (plaintext passwords are never accepted as a command-line argument)")
 	yesFlag := flag.Bool("yes", false, "Headless/--revert: confirm you want to proceed; required for either to do anything")
+	allowUnverifiedFlag := flag.Bool("allow-unverified", false, "Headless: provision a payload with no checksum to verify the download against (every --iso-path, and some --os-id catalog entries — see docs/MANIFEST_AUDIT.md); pass only after independently confirming the payload's integrity")
 	revertFlag := flag.Bool("revert", false, "Run the dual-boot-to-single-boot revert non-interactively instead of launching the TUI; requires --yes")
 	keepSliceFlag := flag.Bool("keep-slice", false, "--revert: reformat the added partition as a clean staging slice instead of deleting it and growing the host partition back")
 	flag.Parse()
@@ -86,12 +87,13 @@ func main() {
 
 	if *headlessFlag {
 		cfg := headlessConfig{
-			OSID:         *osIDFlag,
-			ISOPath:      *isoPathFlag,
-			TargetDisk:   *targetDiskFlag,
-			Username:     *usernameFlag,
-			PasswordFile: *passwordFileFlag,
-			Yes:          *yesFlag,
+			OSID:            *osIDFlag,
+			ISOPath:         *isoPathFlag,
+			TargetDisk:      *targetDiskFlag,
+			Username:        *usernameFlag,
+			PasswordFile:    *passwordFileFlag,
+			Yes:             *yesFlag,
+			AllowUnverified: *allowUnverifiedFlag,
 		}
 		if err := runHeadless(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "headless provisioning failed: %v\n", err)

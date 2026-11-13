@@ -711,6 +711,55 @@ table test.
 summary delivered at this checkpoint for the full per-bug breakdown. 41 commits total on
 `fix/audit-phase-0-1` as of this checkpoint; nothing pushed.
 
+## Pre-Phase-3 follow-ups ("Slice 1", requested before starting Phase 3)
+
+- [x] F13. No catalog entry may be silently provisioned unverified; show an "UNVERIFIED
+      download" warning and require confirmation in both the TUI and headless mode. Do not
+      invent checksums — Done (commit TBD). **Checksums not backfilled**: per the explicit
+      instruction, no SHA256 was added for any entry — none of the 29 current entries could
+      be sourced from an official *signed* checksum file within this session (see
+      `docs/MANIFEST_AUDIT.md`, written in the prior session; still accurate). What *was*
+      built is the confirmation gate itself:
+      - **TUI** (`ui/model.go`): new `ScreenUnverifiedDownloadConfirm`. Selecting a catalog
+        entry with an empty `SHA256` in `ScreenOSSelect` now routes through this screen
+        instead of proceeding straight to disk/USB selection; declining clears the
+        selection and returns to the OS list, confirming proceeds via a new
+        `proceedAfterOSSelected()` helper (extracted from the inline logic both the direct
+        and confirmed paths now share). Rendered in `ui/view.go`
+        (`viewUnverifiedDownloadConfirm`).
+      - **Headless** (`cmd/orchestrator/headless.go`/`main.go`): new `--allow-unverified`
+        flag, deliberately separate from `--yes` (`--yes` confirms the target disk/OS/
+        account; this specifically confirms accepting an unverifiable download — conflating
+        them would make it too easy to pass once and forget what was actually being
+        accepted). `buildHeadlessRequest` refuses any resolved image with an empty checksum
+        — covering both `--os-id` catalog entries and `--iso-path` (which is *always*
+        unverified, since there's no catalog checksum for an arbitrary local file) — unless
+        the flag is set.
+      - **Scope note:** the TUI gate covers catalog-entry selection (`ScreenOSSelect`) —
+        literally "no catalog entry", per the task wording. The separate "Deploy payload"
+        custom-ISO/LAN-peer/staged-payload flows (`ScreenClientPanel`, `ScreenLANPeerConnect`,
+        `ScreenFilePicker`) are a different code path and were not gated here; see F16 below
+        for that investigation.
+      - Tests: `cmd/orchestrator/headless_test.go` (refuses without the flag for both
+        `--os-id` and `--iso-path`, allows with it); `ui/os_select_test.go` (Bubble Tea
+        model tests driving real key messages: unverified entry routes to the confirm
+        screen, verified entry skips it, decline returns to the OS list and clears the
+        selection, accept proceeds in both advanced and non-advanced mode, plus a render
+        smoke test).
+
+- [ ] F14. Revert: make `findActiveESPMount`/`efibootmgr` injectable, test ESP file removal
+      and boot-entry removal on the loop image; record the original swap slice (size, UUID)
+      at install time and recreate it on revert — Not started
+- [ ] F15. transient_resize.sh: partprobe + udevadm settle + bounded retry (10x1s) before
+      declaring the USB mount failed; try UUID as well as label — Not started
+- [ ] F16. ISO picker: Bubble Tea model test driving Deploy payload -> picker -> .iso
+      selection, and direct .iso path entry; wire the custom-ISO path if unwired — Not started
+- [ ] F17. Journal: tests must not touch real /var/lib or /var/tmp; test that every
+      `journal.Begin` name is in `allowedStepNames`; document where the journal lives after
+      reboot into the USB environment — Not started
+- [ ] F18. Document download-verify.yml's exact workflow_dispatch steps; record per-bug
+      (E-H) whether reproduced or only inferred — Not started
+
 ## Phase 3: OS verification matrix (branch test/os-matrix)
 - [ ] Tier 1 catalog validation — Not started
 - [ ] Tier 2 Docker container pipeline — Not started

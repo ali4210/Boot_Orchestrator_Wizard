@@ -233,6 +233,7 @@ func TestBuildHeadlessRequest_IsoPathUsesLocalFile(t *testing.T) {
 	cfg := validHeadlessConfig(t, "a-fine-password")
 	cfg.OSID = ""
 	cfg.ISOPath = isoPath
+	cfg.AllowUnverified = true // a direct --iso-path is always unverified; not what this test is about
 
 	req, err := buildHeadlessRequest(cfg, &discovery.Catalog{}, hypervisor.KindBareMetal, "", "", "")
 	if err != nil {
@@ -478,6 +479,7 @@ func TestBuildHeadlessRequest_WindowsTargetWithoutUnattendFailsLoudly(t *testing
 			Distro:      "Windows 11",
 			Family:      "windows",
 			DownloadURL: "https://example.test/win11.iso",
+			SHA256:      "deadbeef", // not what this test is about; see the unverified-checksum gate tests instead
 		},
 	}}
 
@@ -492,5 +494,62 @@ func TestBuildHeadlessRequest_WindowsTargetWithoutUnattendFailsLoudly(t *testing
 	}
 	if !strings.Contains(err.Error(), "autounattend") && !strings.Contains(err.Error(), "unattend") {
 		t.Fatalf("expected the error to mention the missing unattend file, got: %v", err)
+	}
+}
+
+// TestBuildHeadlessRequest_RefusesUnverifiedChecksumWithoutFlag is the
+// regression test for audit follow-up F13: a catalog entry with no SHA256
+// (the current state of every real manifest entry — see
+// docs/MANIFEST_AUDIT.md) must be refused in headless mode unless
+// --allow-unverified is explicitly passed.
+func TestBuildHeadlessRequest_RefusesUnverifiedChecksumWithoutFlag(t *testing.T) {
+	withFakeBlockDevice(t, "/dev/sdz")
+	cfg := validHeadlessConfig(t, "a-fine-password")
+	catalog := &discovery.Catalog{Entries: []discovery.Entry{
+		{ID: "ubuntu-24.04-amd64", Distro: "Ubuntu 24.04", DownloadURL: "https://example.test/ubuntu.iso"},
+	}}
+
+	_, err := buildHeadlessRequest(cfg, catalog, hypervisor.KindBareMetal, "", "", "")
+	if err == nil {
+		t.Fatalf("expected a checksum-less entry to be refused without --allow-unverified")
+	}
+	if !strings.Contains(err.Error(), "checksum") || !strings.Contains(err.Error(), "allow-unverified") {
+		t.Fatalf("expected the error to mention the checksum and --allow-unverified, got: %v", err)
+	}
+}
+
+// TestBuildHeadlessRequest_AllowsUnverifiedChecksumWithFlag proves the
+// opt-in actually works: the same checksum-less entry succeeds once
+// --allow-unverified is set.
+func TestBuildHeadlessRequest_AllowsUnverifiedChecksumWithFlag(t *testing.T) {
+	withFakeBlockDevice(t, "/dev/sdz")
+	cfg := validHeadlessConfig(t, "a-fine-password")
+	cfg.AllowUnverified = true
+	catalog := &discovery.Catalog{Entries: []discovery.Entry{
+		{ID: "ubuntu-24.04-amd64", Distro: "Ubuntu 24.04", DownloadURL: "https://example.test/ubuntu.iso"},
+	}}
+
+	_, err := buildHeadlessRequest(cfg, catalog, hypervisor.KindBareMetal, "", "", "")
+	if err != nil {
+		t.Fatalf("expected --allow-unverified to permit a checksum-less entry, got: %v", err)
+	}
+}
+
+// TestBuildHeadlessRequest_IsoPathRefusedWithoutAllowUnverified proves the
+// gate also covers --iso-path (which can never have a catalog checksum at
+// all), not just --os-id.
+func TestBuildHeadlessRequest_IsoPathRefusedWithoutAllowUnverified(t *testing.T) {
+	withFakeBlockDevice(t, "/dev/sdz")
+	isoPath := filepath.Join(t.TempDir(), "custom.iso")
+	if err := os.WriteFile(isoPath, []byte("fake-iso-bytes"), 0644); err != nil {
+		t.Fatalf("writing fake iso: %v", err)
+	}
+	cfg := validHeadlessConfig(t, "a-fine-password")
+	cfg.OSID = ""
+	cfg.ISOPath = isoPath
+
+	_, err := buildHeadlessRequest(cfg, &discovery.Catalog{}, hypervisor.KindBareMetal, "", "", "")
+	if err == nil {
+		t.Fatalf("expected a direct --iso-path (always unverified) to be refused without --allow-unverified")
 	}
 }

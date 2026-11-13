@@ -74,6 +74,8 @@ func (m Model) View() string {
 		body = StylePanelFocused.Render(m.folderList.View())
 	case ScreenOSSelect:
 		body = StylePanelFocused.Render(m.osList.View())
+	case ScreenUnverifiedDownloadConfirm:
+		body = m.viewUnverifiedDownloadConfirm()
 	case ScreenEnvironmentCheck:
 		body = m.viewEnvironmentCheck()
 	case ScreenBackupPrompt:
@@ -145,6 +147,8 @@ func (m Model) footerHint() string {
 		hint = "UP/DOWN: Browse Folders  |  ENTER: Open  |  ESC: Back to Hub  |  ESC: Quit"
 	case ScreenOSSelect:
 		hint = "UP/DOWN: Browse Releases  |  /: Filter  |  ENTER: Pick  |  ESC: Back  |  ESC: Quit"
+	case ScreenUnverifiedDownloadConfirm:
+		hint = "Y/ENTER: Proceed Without Verification  |  N/ESC: Back to OS List"
 	case ScreenBackupPrompt:
 		hint = "UP/DOWN: Select Drive  |  ENTER: Commit Backup  |  ESC: Back"
 	case ScreenDisasterRecovery:
@@ -1110,6 +1114,26 @@ func (m Model) viewRestoreConfirm() string {
 	fmt.Fprintf(&b, "  => Actions:         Wipe disk -> Format ext4 -> Extract snapshot -> Reinstall GRUB\n\n")
 
 	fmt.Fprintf(&b, "%s", StyleDanger.Render("=> Press Y or ENTER to begin bare-metal restore, or ESC to cancel."))
+	return StylePanel.Render(b.String())
+}
+
+// viewUnverifiedDownloadConfirm renders the audit follow-up F13 gate: no
+// catalog entry may be silently provisioned without a checksum to verify
+// the download against.
+func (m Model) viewUnverifiedDownloadConfirm() string {
+	if m.selectedOS == nil {
+		return StylePanel.Render(StyleDanger.Render("No OS selected."))
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n\n", BadgeDanger.Render(" UNVERIFIED DOWNLOAD WARNING "))
+	fmt.Fprintf(&b, "This catalog entry has no checksum on record, so the download cannot be\n")
+	fmt.Fprintf(&b, "verified for integrity or authenticity before it is written to disk:\n\n")
+	fmt.Fprintf(&b, "  => Distribution:    %s %s\n", StyleSubTitle.Render(m.selectedOS.Distro), m.selectedOS.Version)
+	fmt.Fprintf(&b, "  => Source:          %s\n", StyleMuted.Render(m.selectedOS.DownloadURL))
+	fmt.Fprintf(&b, "  => Checksum:        %s\n\n", StyleDanger.Render("NONE RECORDED"))
+
+	fmt.Fprintf(&b, "%s", StyleDanger.Render("=> Press Y or ENTER to proceed anyway, or N/ESC to choose a different OS."))
 	return StylePanel.Render(b.String())
 }
 
