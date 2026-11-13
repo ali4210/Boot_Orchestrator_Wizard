@@ -181,12 +181,55 @@ for arg in "$@"; do
     esac
 done
 
-# 5. Dependency Sync & Build — runs as the invoking user (never root), so no
-# build artifact, module cache entry, or compiled binary is ever root-owned
-# (audit 1D.9).
+# 5. Root-owned file detection (follow-up F5). Since the build below runs
+# as the invoking user, writing into a bin/ (or a journal) left root-owned
+# by a run from before item 1D.9's fix — or by someone directly invoking
+# `sudo ./autorun.sh` by hand — would otherwise fail with a bare, confusing
+# "permission denied" partway through the build. Detect it up front and
+# print the exact fix instead.
 BIN_PATH="${SCRIPT_DIR:?}/bin/boot-orchestrator"
 LOCAL_TMP="${SCRIPT_DIR:?}/.build_tmp"
+JOURNAL_PATH="${SCRIPT_DIR:?}/orchestrator_journal.json"
 
+check_root_owned_files() {
+    if [ "$EUID" -eq 0 ]; then
+        return 0
+    fi
+
+    local offenders=()
+    if [ -d "${SCRIPT_DIR:?}/bin" ]; then
+        while IFS= read -r -d '' f; do
+            offenders+=("$f")
+        done < <(find "${SCRIPT_DIR:?}/bin" -user root -print0 2>/dev/null)
+    fi
+    if [ -e "$JOURNAL_PATH" ]; then
+        local owner
+        owner=$(stat -c '%U' "$JOURNAL_PATH" 2>/dev/null || stat -f '%Su' "$JOURNAL_PATH" 2>/dev/null || echo "")
+        if [ "$owner" = "root" ]; then
+            offenders+=("$JOURNAL_PATH")
+        fi
+    fi
+
+    if [ ${#offenders[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    echo "======================================================================" >&2
+    echo " [BLOCKED] Found root-owned file(s) left over from a previous run:" >&2
+    printf '   %s\n' "${offenders[@]}" >&2
+    echo "" >&2
+    echo " This build runs as your own user and cannot write to these. Fix" >&2
+    echo " ownership, then re-run this script:" >&2
+    echo "" >&2
+    echo "   sudo chown -R \"$(id -un):$(id -gn)\" \"${SCRIPT_DIR:?}/bin\" \"$JOURNAL_PATH\"" >&2
+    echo "======================================================================" >&2
+    exit 1
+}
+check_root_owned_files
+
+# 6. Dependency Sync & Build — runs as the invoking user (never root), so no
+# build artifact, module cache entry, or compiled binary is ever root-owned
+# (audit 1D.9).
 if [ "$FORCE_REBUILD" -eq 1 ] || [ ! -f "$BIN_PATH" ]; then
     echo "======================================================================"
     echo "=> Resolving Go dependencies (go mod download; go.mod/go.sum are not"
@@ -209,7 +252,7 @@ fi
 
 chmod 755 "$BIN_PATH" 2>/dev/null || chmod +x "$BIN_PATH"
 
-# 6. Elevate only now, only to run the already-built binary (it performs
+# 7. Elevate only now, only to run the already-built binary (it performs
 # partition/bootloader operations that genuinely require root). Nothing
 # before this point ran, or needed to run, as root.
 echo "======================================================================"

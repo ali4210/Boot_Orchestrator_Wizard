@@ -60,8 +60,23 @@ Status legend: Done (commit hash + proof) / In progress / Blocked (reason) / Not
 - [ ] F4. Fill in real commit hashes in PROGRESS.md; verify every commit builds/tests green
       via a disposable rebase (not rewriting the real branch — see commit message) — Not
       started
-- [ ] F5. autorun.sh: detect root-owned files in bin/ or the journal and print the exact
-      chown command instead of a raw permission error — Not started
+- [x] F5. autorun.sh: detect root-owned files in bin/ or the journal and print the exact
+      chown command instead of a raw permission error — Done (commit TBD). Added
+      `check_root_owned_files` right before the build section: scans `bin/` with
+      `find ... -user root` and checks the journal's owner via `stat -c '%U'`; if either is
+      root-owned (e.g. left over from a run before item 1D.9's fix, or from someone
+      directly invoking `sudo ./autorun.sh`), prints the exact `sudo chown -R
+      "$(id -un):$(id -gn)" ...` command and exits, instead of failing opaquely mid-build
+      with a bare permission-denied error. Verified both branches (no offenders / offenders
+      present) against an isolated scratch directory — never the real repo — including
+      actually `sudo chown`-ing a scratch file to root to exercise the positive case for
+      real, then restoring ownership and removing the scratch fixture explicitly file-by-file
+      (no `rm -rf` on anything but a `mktemp -d` path). Incidentally confirmed this is not a
+      hypothetical: the real repo's own (gitignored, untouched, un-read per the
+      never-touch-the-journal safety rule) `orchestrator_journal.json` is itself root-owned
+      from an earlier, pre-session `sudo ./autorun.sh` run — exactly the case this check now
+      catches with a clear message instead of a confusing build failure. `bash -n` and
+      `shellcheck` both clean.
 
 ## Phase 1: Hardening and testability
 
