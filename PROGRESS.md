@@ -800,8 +800,49 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
         fields); the autonomous-installer USB-staging path's own partition-carving logic doesn't
         do swap conversion, so it needs no equivalent handling (not re-verified in this session,
         carried over from the prior session's note).
-- [ ] F15. transient_resize.sh: partprobe + udevadm settle + bounded retry (10x1s) before
-      declaring the USB mount failed; try UUID as well as label — Not started
+- [x] F15. transient_resize.sh: partprobe + udevadm settle + bounded retry (10x1s) before
+      declaring the USB mount failed; try UUID as well as label (`PENDING_HASH`)
+      - Before: transient_resize.sh's ORCH_STORAGE vault mount was exactly one
+        `mount -L ORCH_STORAGE /mnt/vault 2>/dev/null || true` attempt — no re-probe of the
+        kernel's partition table, no retry, no UUID fallback, and no check of whether it had
+        actually succeeded (the `|| true` swallowed the failure and let the script barrel
+        ahead with a non-existent payload path).
+      - Extracted the mount logic into its own Go-level function,
+        `usbStorageMountRetryBlock(vaultDir, storageUUIDVar)` in `engine/autonomous_installer_script.go`,
+        so it's independently testable rather than only checkable by reading generated text. It
+        now runs `partprobe`/`udevadm settle --timeout=5` before each of up to 10 attempts (1s
+        apart), tries `mount -L ORCH_STORAGE` then falls back to `mount -U "$STORAGE_UUID"`, and
+        explicitly fails loudly (`exit 1` with a clear message) if none of the 10 attempts
+        succeed, instead of silently continuing.
+      - `STORAGE_UUID` is a new field on `autonomousInstallerScriptParams`/the rendered script,
+        resolved host-side in `RunProvision` via `blkid -s UUID -o value "$storageDev"` (the
+        storage partition is already located by that point to stage the payload) and passed
+        through at render time.
+      - Tests (`engine/autonomous_installer_script_test.go`): per the task's "test with a fake
+        mount that succeeds on the Nth try," `runUSBStorageMountRetryBlock` actually executes
+        the generated bash fragment under real `bash` with stub `mount`/`partprobe`/`udevadm`/
+        `sleep` binaries on `$PATH` (`sleep` stubbed to a no-op so the test suite stays fast).
+        `TestUSBStorageMountRetryBlock_SucceedsOnThirdAttempt` proves a mount stub that fails
+        twice and succeeds on the 3rd call is tolerated (and that it stops retrying immediately
+        on success — exactly 3 calls, not 10). `TestUSBStorageMountRetryBlock_FailsLoudlyAfterTenAttempts`
+        proves it gives up after exactly 10 attempts with a clear error.
+        `TestUSBStorageMountRetryBlock_FallsBackToUUID` proves the LABEL-fails/UUID-succeeds
+        path. `TestRenderAutonomousInstallerScript_EmbedsUSBStorageMountRetryBlock` proves the
+        full rendered script actually wires the block in (declares `STORAGE_UUID`, embeds the
+        10-attempt loop, the partprobe/settle calls, and the UUID fallback) rather than the
+        fragment and the rendered script silently drifting apart.
+      - Reproduce-first verified empirically: with `engine/autonomous_installer_script.go` and
+        `engine/orchestrator.go`'s changes stashed (`git stash push`), `go vet ./engine/...`
+        fails outright — `undefined: usbStorageMountRetryBlock` — since the pre-fix code had no
+        such function at all for the new tests to exercise; restoring the fix (`git stash pop`)
+        made `go build`/`go vet`/`go test ./...` pass clean again.
+      - Not covered by this item (a different artifact, not transient_resize.sh, so out of
+        scope per the task's literal wording): `engine/usb_manager.go`'s GRUB menu entry kernel
+        cmdline (`search --no-floppy --set=storage_part --label ORCH_STORAGE` /
+        `systemd.run="... for i in $(seq 1 30); do mount -L ORCH_STORAGE ..."`) — this is the
+        mechanism that locates and launches transient_resize.sh in the first place, on first
+        boot into the live USB image; it already has its own 30x1s retry but no partprobe/
+        udevadm settle/UUID fallback. Left as-is.
 - [ ] F16. ISO picker: Bubble Tea model test driving Deploy payload -> picker -> .iso
       selection, and direct .iso path entry; wire the custom-ISO path if unwired — Not started
 - [ ] F17. Journal: tests must not touch real /var/lib or /var/tmp; test that every

@@ -21,6 +21,46 @@ type autonomousInstallerScriptParams struct {
 	Username      string
 	PasswordHash  string
 	RootCmd       string
+
+	// StorageUUID is the ORCH_STORAGE partition's filesystem UUID, known
+	// at script-render time (the host already resolved storageDev to
+	// stage the payload). Used as a fallback to mount by UUID when the
+	// LABEL hasn't been scanned yet (follow-up F15) — may be empty if it
+	// couldn't be read, in which case the retry loop just tries LABEL
+	// repeatedly.
+	StorageUUID string
+}
+
+// usbStorageMountRetryBlock returns the bash fragment that mounts the
+// ORCH_STORAGE USB partition into vaultDir. Extracted into its own
+// function (rather than inlined into renderAutonomousInstallerScript's
+// Sprintf) so it is independently testable by running it under bash with
+// stubbed mount/partprobe/udevadm binaries (follow-up F15): before this
+// fix, transient_resize.sh made exactly one `mount -L ORCH_STORAGE ... ||
+// true` attempt and never checked whether it had actually succeeded — no
+// re-probe of the kernel's partition table, no retry, and no UUID
+// fallback when the LABEL hadn't been scanned yet, all of which are common
+// in the first second or two after rebooting into a live USB environment.
+func usbStorageMountRetryBlock(vaultDir, storageUUIDVar string) string {
+	return fmt.Sprintf(`mkdir -p %[1]s
+MOUNTED=""
+for i in $(seq 1 10); do
+    partprobe >/dev/null 2>&1 || true
+    udevadm settle --timeout=5 >/dev/null 2>&1 || true
+    if mount -L ORCH_STORAGE %[1]s 2>/dev/null; then
+        MOUNTED=1
+        break
+    fi
+    if [ -n "$%[2]s" ] && mount -U "$%[2]s" %[1]s 2>/dev/null; then
+        MOUNTED=1
+        break
+    fi
+    sleep 1
+done
+if [ -z "$MOUNTED" ]; then
+    echo "ERROR: failed to mount ORCH_STORAGE (tried LABEL and UUID=$%[2]s) after 10 attempts" >&2
+    exit 1
+fi`, vaultDir, storageUUIDVar)
 }
 
 // renderAutonomousInstallerScript builds the body of transient_resize.sh: the
@@ -55,6 +95,7 @@ HOST_PART_NUM="%[5]s"
 TARGET_PART_NUM="%[6]s"
 DISTRO_LABEL="%[7]s"
 ORCH_USER="%[8]s"
+STORAGE_UUID="%[11]s"
 
 swapoff -a || true
 e2fsck -fy "$HOST_PART" || true
@@ -73,8 +114,7 @@ mount "$TARGET_PART" /mnt/target
 
 PAYLOAD_PATH=$(find / -name "os_image.payload" 2>/dev/null | head -n 1)
 if [ -z "$PAYLOAD_PATH" ] || [ ! -f "$PAYLOAD_PATH" ]; then
-    mkdir -p /mnt/vault
-    mount -L ORCH_STORAGE /mnt/vault 2>/dev/null || true
+%[12]s
     PAYLOAD_PATH="/mnt/vault/os_image.payload"
 fi
 mount -o loop,ro "$PAYLOAD_PATH" /mnt/source
@@ -165,7 +205,7 @@ umount /mnt/source 2>/dev/null || true
 umount /mnt/target 2>/dev/null || true
 sleep 2
 reboot -f
-`, p.Disk, p.HostPartDev, p.TargetPartDev, p.HostESP, p.HostPartNum, p.TargetPartNum, p.DistroLabel, p.Username, p.PasswordHash, p.RootCmd)
+`, p.Disk, p.HostPartDev, p.TargetPartDev, p.HostESP, p.HostPartNum, p.TargetPartNum, p.DistroLabel, p.Username, p.PasswordHash, p.RootCmd, p.StorageUUID, usbStorageMountRetryBlock("/mnt/vault", "STORAGE_UUID"))
 }
 
 // transientScriptMode is the permission transient_resize.sh is written with.

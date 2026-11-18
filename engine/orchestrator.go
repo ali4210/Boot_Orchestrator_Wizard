@@ -1091,6 +1091,13 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 				workerRootCmd = `echo "root:$HASH" | chpasswd -e`
 			}
 
+			// Follow-up F15: resolve ORCH_STORAGE's filesystem UUID here,
+			// while storageDev is already known, so transient_resize.sh's
+			// mount-retry loop can fall back to mounting by UUID (not just
+			// LABEL) if the label hasn't been scanned yet on reboot.
+			storageUUIDOut, _ := exec.Command("blkid", "-s", "UUID", "-o", "value", storageDev).Output()
+			storageUUID := strings.TrimSpace(string(storageUUIDOut))
+
 			workerScript := renderAutonomousInstallerScript(autonomousInstallerScriptParams{
 				Disk:          req.TargetDiskPath,
 				HostPartDev:   hostPartDev,
@@ -1102,6 +1109,7 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 				Username:      req.Credentials.Username,
 				PasswordHash:  passHash,
 				RootCmd:       workerRootCmd,
+				StorageUUID:   storageUUID,
 			})
 
 			scriptPath := filepath.Join(usbStorageDir, "transient_resize.sh")

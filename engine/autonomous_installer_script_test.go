@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -103,6 +105,192 @@ func TestRenderAutonomousInstallerScript_CleansUpOnExit(t *testing.T) {
 	firstRiskyCmd := strings.Index(script, "swapoff -a")
 	if trapIdx == -1 || firstRiskyCmd == -1 || trapIdx > firstRiskyCmd {
 		t.Fatalf("expected the cleanup trap to be installed before the first command that can fail")
+	}
+}
+
+// writeStubBin writes an executable shell script named name into dir,
+// containing body as its script body.
+func writeStubBin(t *testing.T, dir, name, body string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	content := "#!/usr/bin/env bash\n" + body + "\n"
+	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
+		t.Fatalf("writing stub %s: %v", name, err)
+	}
+}
+
+// runUSBStorageMountRetryBlock executes usbStorageMountRetryBlock's actual
+// bash output for real under bash, with stub partprobe/udevadm/sleep
+// binaries (always succeed, no real delay — these tests exercise retry
+// COUNT, not wall-clock timing) and a caller-supplied mount stub, returning
+// combined stdout+stderr and the process's exit error (nil on success).
+// This is follow-up F15's "test with a fake mount that succeeds on the Nth
+// try": rather than only asserting on the generated script's text, it
+// actually runs the retry logic under a real shell against a fake mount
+// command, so a logic bug in the loop (off-by-one, wrong exit status
+// check, ...) would make the test fail for real, not just look right on
+// inspection.
+func runUSBStorageMountRetryBlock(t *testing.T, mountStubBody string, extraEnv ...string) (string, error) {
+	t.Helper()
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available, skipping")
+	}
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeStubBin(t, binDir, "partprobe", "exit 0")
+	writeStubBin(t, binDir, "udevadm", "exit 0")
+	writeStubBin(t, binDir, "sleep", "exit 0") // no real delay in tests
+	writeStubBin(t, binDir, "mount", mountStubBody)
+
+	vaultDir := filepath.Join(dir, "vault")
+	scriptPath := filepath.Join(dir, "run.sh")
+	script := fmt.Sprintf("#!/usr/bin/env bash\nset -u\n%s\necho \"MOUNTED_RESULT=$MOUNTED\"\n",
+		usbStorageMountRetryBlock(vaultDir, "STORAGE_UUID"))
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("writing script: %v", err)
+	}
+
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Env = append(append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"), "STORAGE_UUID="), extraEnv...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// TestUSBStorageMountRetryBlock_SucceedsOnThirdAttempt is the reproduction
+// for the bug half of follow-up F15: before this fix, transient_resize.sh
+// made exactly one mount attempt with no retry at all, so a USB storage
+// partition that wasn't yet visible to the kernel (a very common timing
+// window right after rebooting into a live USB environment) permanently
+// failed the install. With the fix, a mount stub that fails twice and
+// succeeds on its third call must be tolerated by the retry loop.
+func TestUSBStorageMountRetryBlock_SucceedsOnThirdAttempt(t *testing.T) {
+	dir := t.TempDir()
+	counterFile := filepath.Join(dir, "mount_calls")
+	mountStub := `
+COUNT=0
+[ -f "` + counterFile + `" ] && COUNT=$(cat "` + counterFile + `")
+COUNT=$((COUNT+1))
+echo "$COUNT" > "` + counterFile + `"
+if [ "$COUNT" -ge 3 ]; then
+    exit 0
+fi
+exit 1
+`
+	out, err := runUSBStorageMountRetryBlock(t, mountStub)
+	if err != nil {
+		t.Fatalf("expected the retry loop to eventually succeed, got error %v\noutput:\n%s", err, out)
+	}
+	if !strings.Contains(out, "MOUNTED_RESULT=1") {
+		t.Fatalf("expected MOUNTED to be set after the retry succeeded, got:\n%s", out)
+	}
+	callsOut, readErr := os.ReadFile(counterFile)
+	if readErr != nil {
+		t.Fatalf("reading mount-call counter: %v", readErr)
+	}
+	if strings.TrimSpace(string(callsOut)) != "3" {
+		t.Errorf("expected exactly 3 mount attempts (stopping as soon as it succeeded), got %s", strings.TrimSpace(string(callsOut)))
+	}
+}
+
+// TestUSBStorageMountRetryBlock_FailsLoudlyAfterTenAttempts proves the
+// loop gives up after exactly 10 attempts (not forever, and not silently
+// like the pre-fix single `|| true` attempt) and reports a clear error
+// instead of letting the caller script silently proceed with a
+// non-existent payload path.
+func TestUSBStorageMountRetryBlock_FailsLoudlyAfterTenAttempts(t *testing.T) {
+	dir := t.TempDir()
+	counterFile := filepath.Join(dir, "mount_calls")
+	mountStub := `
+COUNT=0
+[ -f "` + counterFile + `" ] && COUNT=$(cat "` + counterFile + `")
+COUNT=$((COUNT+1))
+echo "$COUNT" > "` + counterFile + `"
+exit 1
+`
+	out, err := runUSBStorageMountRetryBlock(t, mountStub)
+	if err == nil {
+		t.Fatalf("expected the retry loop to fail when mount never succeeds, got success:\n%s", out)
+	}
+	if !strings.Contains(out, "after 10 attempts") {
+		t.Errorf("expected a clear 'after 10 attempts' error message, got:\n%s", out)
+	}
+	callsOut, readErr := os.ReadFile(counterFile)
+	if readErr != nil {
+		t.Fatalf("reading mount-call counter: %v", readErr)
+	}
+	if strings.TrimSpace(string(callsOut)) != "10" {
+		t.Errorf("expected exactly 10 mount attempts, got %s", strings.TrimSpace(string(callsOut)))
+	}
+}
+
+// TestUSBStorageMountRetryBlock_FallsBackToUUID proves the LABEL-fails/
+// UUID-succeeds fallback path actually works: mount -L always fails, but
+// mount -U with the expected UUID succeeds.
+func TestUSBStorageMountRetryBlock_FallsBackToUUID(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available, skipping")
+	}
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeStubBin(t, binDir, "partprobe", "exit 0")
+	writeStubBin(t, binDir, "udevadm", "exit 0")
+	writeStubBin(t, binDir, "sleep", "exit 0")
+	writeStubBin(t, binDir, "mount", `
+if [ "$1" = "-L" ]; then
+    exit 1
+fi
+if [ "$1" = "-U" ] && [ "$2" = "deadbeef-uuid" ]; then
+    exit 0
+fi
+exit 1
+`)
+
+	vaultDir := filepath.Join(dir, "vault")
+	scriptPath := filepath.Join(dir, "run.sh")
+	script := fmt.Sprintf("#!/usr/bin/env bash\nset -u\n%s\necho \"MOUNTED_RESULT=$MOUNTED\"\n",
+		usbStorageMountRetryBlock(vaultDir, "STORAGE_UUID"))
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("writing script: %v", err)
+	}
+
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"), "STORAGE_UUID=deadbeef-uuid")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("expected the UUID fallback to succeed, got error %v\noutput:\n%s", err, string(out))
+	}
+	if !strings.Contains(string(out), "MOUNTED_RESULT=1") {
+		t.Fatalf("expected MOUNTED to be set after the UUID fallback succeeded, got:\n%s", string(out))
+	}
+}
+
+// TestRenderAutonomousInstallerScript_EmbedsUSBStorageMountRetryBlock
+// proves the full script actually wires in usbStorageMountRetryBlock
+// (rather than, say, forgetting to substitute it, or the fragment and the
+// rendered script silently drifting apart) and declares STORAGE_UUID from
+// the params.
+func TestRenderAutonomousInstallerScript_EmbedsUSBStorageMountRetryBlock(t *testing.T) {
+	p := sampleScriptParams()
+	p.StorageUUID = "11112222-3333-4444-5555-666677778888"
+	script := renderAutonomousInstallerScript(p)
+
+	if !strings.Contains(script, `STORAGE_UUID="11112222-3333-4444-5555-666677778888"`) {
+		t.Fatalf("expected STORAGE_UUID to be declared from params, got:\n%s", script)
+	}
+	if !strings.Contains(script, "for i in $(seq 1 10)") {
+		t.Fatalf("expected the bounded 10-attempt retry loop to be embedded, got:\n%s", script)
+	}
+	if !strings.Contains(script, "partprobe") || !strings.Contains(script, "udevadm settle") {
+		t.Fatalf("expected partprobe and udevadm settle before each mount attempt, got:\n%s", script)
+	}
+	if !strings.Contains(script, `mount -U "$STORAGE_UUID"`) {
+		t.Fatalf("expected a UUID fallback mount attempt, got:\n%s", script)
 	}
 }
 
