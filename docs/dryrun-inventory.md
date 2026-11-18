@@ -22,6 +22,15 @@ counts are a little higher now, consistent with this remediation effort's own wo
 added legitimate new operations (F14's swap recreation, F15's retry logic, items 25-27's
 fixes) over the same period.
 
+**Caveat found while building item 33's ratchet test**: the `grep` counts above are a
+close, honest approximation, but naive text matching also counts a mention of
+`"exec.Command("` inside a doc *comment* as if it were real code — `engine/runner.go`'s own
+two doc comments literally use `exec.Command(...)` as example text, so grep says 4 there
+while the actual code has 2. Item 33's guard test parses real Go syntax (`go/ast`) instead,
+so its enforced baseline is the precise count, not this document's approximate one; where
+they'd disagree (confirmed: only `runner.go`, by exactly 2), trust the ratchet test's
+baseline in `engine/call_site_ratchet_test.go`, not this narrative total.
+
 ## Why 73 already-`cmdRunner`-routed sites matter
 
 `engine.Runner` (`engine/runner.go`) is an interface already used for exactly the testing
