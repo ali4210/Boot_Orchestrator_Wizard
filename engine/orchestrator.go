@@ -63,9 +63,28 @@ type ProvisionResult struct {
 	RollbackError error
 }
 
+// RollbackImageDeploy is registered against the "image-deploy" journal
+// step (audit item 2.12). There is deliberately nothing destructive — or
+// anything at all — for it to undo: by the time image-deploy begins, the
+// target partition has already been mkfs'd (its prior contents are gone,
+// not recoverable) and the step then streams the new OS's files onto it.
+// If deployment fails partway, there is no "prior filesystem state" to
+// restore to; the partition is simply left with however much of the new
+// OS's files had been written when it failed. Before this handler
+// existed, a failed image-deploy would make RollbackAll report a generic
+// "no rollback handler registered for \"image-deploy\"" — true, but it
+// reads like an oversight rather than the documented, inherent limitation
+// it actually is. fail() (below) emits a specific, user-facing message
+// explaining this at the moment image-deploy fails, rather than leaving
+// it to this handler's own silence to explain nothing at all.
+func RollbackImageDeploy(_ json.RawMessage) error {
+	return nil
+}
+
 func rollbackHandlers(grubDefaultPath string) map[string]safety.RollbackFunc {
 	return map[string]safety.RollbackFunc{
 		"partition-shrink":    RollbackPartitionShrink,
+		"image-deploy":        RollbackImageDeploy,
 		"docker-isolation":    RollbackDockerIsolation,
 		"uefi-set-boot-next":  RollbackSetBootNext,
 		"uefi-set-boot-order": RollbackSetBootOrder,
@@ -838,6 +857,10 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 		}
 
 		onUpdate(StepUpdate{StepName: stepName, Done: true, Err: cause})
+		if stepName == "image-deploy" {
+			// Audit item 2.12: documented, not silent — see RollbackImageDeploy.
+			onUpdate(StepUpdate{StepName: "=> [NOTE] image-deploy cannot be rolled back: the target partition was already formatted before deployment began, so there is no prior filesystem state to restore. If a host partition was shrunk for this install, that WILL still be restored below.", Done: false})
+		}
 		rbErr := journal.RollbackAll(handlers)
 		return ProvisionResult{
 			Success:       false,

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -63,5 +64,62 @@ func TestConfigureBootloaderStep_LinuxBranchFailurePropagates(t *testing.T) {
 	}
 	if journal.Steps[0].Status != safety.StepFailed {
 		t.Fatalf("expected journal step status=%q, got %q", safety.StepFailed, journal.Steps[0].Status)
+	}
+}
+
+// TestRollbackImageDeploy_AlwaysSucceeds documents audit item 2.12's
+// actual contract: there is nothing for this handler to undo (the target
+// partition was already mkfs'd before deployment began, destroying its
+// prior contents — there is no "prior state" left to restore), so it
+// always reports success rather than a spurious failure.
+func TestRollbackImageDeploy_AlwaysSucceeds(t *testing.T) {
+	if err := RollbackImageDeploy(nil); err != nil {
+		t.Fatalf("expected RollbackImageDeploy to always return nil, got: %v", err)
+	}
+	if err := RollbackImageDeploy(json.RawMessage(`{"anything":"at all"}`)); err != nil {
+		t.Fatalf("expected RollbackImageDeploy to ignore its input and always return nil, got: %v", err)
+	}
+}
+
+// TestRollbackHandlers_RegistersImageDeploy is the regression test for
+// audit item 2.12's actual bug: "image-deploy" had no entry in
+// rollbackHandlers at all.
+func TestRollbackHandlers_RegistersImageDeploy(t *testing.T) {
+	handlers := rollbackHandlers("/etc/default/grub")
+	if _, ok := handlers["image-deploy"]; !ok {
+		t.Fatalf("expected rollbackHandlers to register a handler for \"image-deploy\", got none (keys: %v)", keysOf(handlers))
+	}
+}
+
+func keysOf(m map[string]safety.RollbackFunc) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// TestRollbackAll_ImageDeployStepRollsBackWithoutError is the end-to-end
+// regression test: before this fix, a journal containing a failed
+// "image-deploy" step made journal.RollbackAll report
+// `no rollback handler registered for "image-deploy"` — true, but
+// indistinguishable from an actual oversight rather than a documented,
+// inherent limitation. With the fix, rolling back a journal whose only
+// step is a failed "image-deploy" must complete with no error at all.
+func TestRollbackAll_ImageDeployStepRollsBackWithoutError(t *testing.T) {
+	journalPath := filepath.Join(t.TempDir(), "journal.json")
+	journal, err := safety.NewJournal(journalPath, "test-txn")
+	if err != nil {
+		t.Fatalf("NewJournal: %v", err)
+	}
+
+	step, err := journal.Begin("image-deploy", nil)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	journal.Fail(step, errors.New("simulated deploy failure mid-write"))
+
+	if err := journal.RollbackAll(rollbackHandlers("/etc/default/grub")); err != nil {
+		t.Fatalf("expected RollbackAll to complete without error for a failed image-deploy step, got: %v", err)
 	}
 }

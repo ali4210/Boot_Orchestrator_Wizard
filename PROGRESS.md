@@ -1060,7 +1060,24 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       signature from a key not in the keyring (the "attacker signs their own tampered
       payload" scenario) is rejected; corrupt signature bytes and a corrupt keyring both
       fail cleanly rather than panicking or silently passing.
-- [ ] 21. Image-deploy rollback handler or documented limitation — Not started
+- [x] 21. Image-deploy rollback handler or documented limitation — Done (`PENDING_HASH`).
+      Audit 2.12: `rollbackHandlers` had no entry at all for `"image-deploy"`, so a failed
+      deploy made `journal.RollbackAll` report a generic `no rollback handler registered for
+      "image-deploy"` — true, but indistinguishable from an oversight rather than the
+      documented, inherent limitation it actually is (by the time image-deploy begins, the
+      target partition has already been `mkfs`'d — there is no prior filesystem state left
+      to restore to, full stop; the audit's own suggested fix was "document this explicitly,"
+      not attempt a snapshot/restore that nothing in this tool currently supports). New
+      `RollbackImageDeploy` (always returns nil — there's genuinely nothing to undo) is now
+      registered for this step name, and `fail()` in `RunProvision` emits a specific
+      `[NOTE]` message explaining the limitation (and that a shrunk host partition's own
+      rollback is unaffected) at the moment image-deploy fails, rather than leaving a bare
+      "rolled back successfully" with no context. Tests (`engine/orchestrator_test.go`):
+      `RollbackImageDeploy` always succeeds regardless of input;
+      `rollbackHandlers` registers a handler for `"image-deploy"`;
+      **the real regression** — `journal.RollbackAll` against a journal whose only step is a
+      failed `"image-deploy"` now completes with zero errors (verified failing with the exact
+      pre-fix message by temporarily removing the registration and re-running, then restored).
 - [ ] 22. Windows XP entry removed/flagged — Not started
 - [ ] 23. env-check opt-in + pre-flight gate — Not started
 - [ ] 24. Windows launcher dedup + orphaned scripts moved — Not started
