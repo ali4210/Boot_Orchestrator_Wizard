@@ -1230,7 +1230,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       decision than this item's scope, and it has its own passing tests) — flagged here for
       a deliberate future cleanup decision rather than silently left for someone to discover
       by surprise.
-- [x] 27. Windows Panther plaintext password verification — Done (`PENDING_HASH`). The
+- [x] 27. Windows Panther plaintext password verification — Done (`a10a5cf`). The
       well-known Windows deployment issue: `engine/wim_deployer.go`'s `injectAutounattend`
       writes the answer file (containing the account password in plaintext — Windows'
       unattend mechanism has no hashed-password option for local account creation, so this
