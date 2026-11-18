@@ -1154,7 +1154,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       pointing at this project's actual maintained equivalents
       (`cmd/catalog-verify`/`cmd/download-verify`/`discovery.Catalog.Audit()`) instead.
 - [x] 25. Silent-error audit (`|| true`, `2>/dev/null`, `_ = exec.Command`) — Done
-      (`PENDING_HASH`). Full survey in `docs/SILENT_ERROR_AUDIT.md` (~195 discarded
+      (`9e7c9e2`). Full survey in `docs/SILENT_ERROR_AUDIT.md` (~195 discarded
       `exec.Command`/`.Run()` results in Go, ~52 more `|| true`/`2>/dev/null` embedded in
       Go-generated shell, plus the standalone launchers — most are legitimate best-effort
       cleanup, triaged by actual risk rather than mechanically rewritten). `assertDefaultCredentials`
