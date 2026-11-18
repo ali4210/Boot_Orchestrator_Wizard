@@ -1416,7 +1416,7 @@ item's entry above). Nothing pushed; branch `test/os-matrix` (Phase 3) remains u
       failed too. Both reverted via `git checkout` after confirming the failure, then
       re-confirmed passing clean.
 - [ ] 33. Guard test + allowlist — Not started
-- [x] 34. Real --dry-run implementation — Done (`PENDING_HASH`), **and the honest
+- [x] 34. Real --dry-run implementation — Done (`d9d9b95`), **and the honest
       conclusion is that a full, real --dry-run is not safe to offer yet** — this is the
       deliverable, not a placeholder for one. Per the scope agreed before starting Phase 5,
       a real dry-run was only ever going to be attempted if coverage was complete enough to
