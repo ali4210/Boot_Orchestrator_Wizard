@@ -1277,7 +1277,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       doesn't match what was actually signed (the compromised-mirror scenario this whole
       feature exists to catch) fails; an unreachable/404 signature URL fails rather than
       being silently treated as "nothing to check."
-- [x] 29. README/CONTRIBUTING/CI; LICENSE — ask user first — Done (`PENDING_HASH`).
+- [x] 29. README/CONTRIBUTING/CI; LICENSE — ask user first — Done (`d8256da`).
       **LICENSE: asked first, as instructed.** User chose MIT; added `LICENSE` (copyright
       `ali4210`, matching this repo's own git commit identity).
       **README.md rewritten.** The previous version described a pre-alpha snapshot from
