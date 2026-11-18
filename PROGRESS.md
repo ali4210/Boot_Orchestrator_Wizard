@@ -749,7 +749,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
 
 - [x] F14. Revert: make `findActiveESPMount`/`efibootmgr` injectable, test ESP file removal
       and boot-entry removal on the loop image; record the original swap slice (size, UUID)
-      at install time and recreate it on revert (`PENDING_HASH`)
+      at install time and recreate it on revert (`2db7f6a`)
       - `findActiveESPMount` and the `efibootmgr -b <num> -B` NVRAM-removal call are now
         injectable package vars (`findActiveESPMountFunc`, `efibootmgrRemoveFunc`), alongside
         a new `isUEFIModeFunc` (the UEFI-mode gate itself needed to be injectable too, so a
