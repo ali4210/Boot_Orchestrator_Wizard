@@ -38,4 +38,13 @@ type RealRevertParams struct {
 	ShrunkPartUUID    string `json:"shrunk_part_uuid,omitempty"`
 	ExpectedFSType    string `json:"expected_fs_type,omitempty"`
 	ExpectedSizeBytes int64  `json:"expected_size_bytes,omitempty"`
+
+	// OriginalSwapSizeBytes/OriginalSwapUUID (follow-up F14): if
+	// install-time partitioning converted a trailing swap slice into the
+	// partition being reverted, ExecuteDecommissionWithOptions uses this
+	// to recreate an equivalent swap partition instead of permanently
+	// losing the host's swap space. Zero/empty means no swap was
+	// converted at install time.
+	OriginalSwapSizeBytes int64  `json:"original_swap_size_bytes,omitempty"`
+	OriginalSwapUUID      string `json:"original_swap_uuid,omitempty"`
 }

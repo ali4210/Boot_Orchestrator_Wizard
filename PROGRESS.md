@@ -747,9 +747,59 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
         selection, accept proceeds in both advanced and non-advanced mode, plus a render
         smoke test).
 
-- [ ] F14. Revert: make `findActiveESPMount`/`efibootmgr` injectable, test ESP file removal
+- [x] F14. Revert: make `findActiveESPMount`/`efibootmgr` injectable, test ESP file removal
       and boot-entry removal on the loop image; record the original swap slice (size, UUID)
-      at install time and recreate it on revert — Not started
+      at install time and recreate it on revert (`PENDING_HASH`)
+      - `findActiveESPMount` and the `efibootmgr -b <num> -B` NVRAM-removal call are now
+        injectable package vars (`findActiveESPMountFunc`, `efibootmgrRemoveFunc`), alongside
+        a new `isUEFIModeFunc` (the UEFI-mode gate itself needed to be injectable too, so a
+        test can force it on without real EFI firmware under the test process).
+      - Install time: `CarveHardwarePartitionAtBoundary`'s trailing-swap-conversion branch now
+        captures the swap slice's size and PARTUUID (via `blkid`) before deleting it, returned
+        on `PartitionResult` and persisted into `safety.SessionState.OriginalSwapSizeBytes`/
+        `OriginalSwapUUID` by `RunProvision`.
+      - Revert time: `DetectedGuestOS` carries those two fields from the journal (only the
+        journal-sourced guest entry can know them — os-prober/lsblk discovery has no way to
+        know what a partition used to be before install), threaded into `RealRevertParams` at
+        both real call sites (`cmd/orchestrator/revert.go`'s `runHeadlessRevert`, `ui/model.go`'s
+        `triggerTargetedRevertCmd`). When `OriginalSwapSizeBytes > 0`, `ExecuteDecommissionWithOptions`
+        skips `growpart` (which has no "stop short" mode) and instead resizes the host partition
+        to leave exactly that much trailing free space, then `recreateSwapPartition` carves a new
+        swap partition there, restores its original GPT PARTUUID via `sgdisk -u`, formats it with
+        `mkswap`, and `ensureSwapFstabEntry` adds a `PARTUUID=... none swap sw 0 0` fstab line if
+        one isn't already present.
+      - Real bug hit and fixed during this work, not just a design choice: both the host-resize
+        boundary and the swap `mkpart` call were first computed by hand from `blockdev --getss`/
+        `--getsz` (raw sector count). That failed for real on the loop-image test — GPT reserves
+        a trailing region (backup header + partition array, ~33-34 sectors) that raw sector count
+        includes but parted's script mode will never let a partition use; pinning both a
+        hand-computed start AND end made parted refuse rather than auto-round. Fixed by reading
+        the disk's own free-space region via `parted -m unit s print free` (new
+        `trailingFreeSectorRange` helper) and handing those exact boundaries back to `mkpart`/
+        `resizepart`, instead of computing them independently.
+      - Tests (`engine/revert_linux_loopimage_test.go`, real loop-device, root-gated):
+        `withScratchRevertPaths` now also redirects `findActiveESPMountFunc`/
+        `efibootmgrRemoveFunc`/`isUEFIModeFunc`, so
+        `TestExecuteDecommission_RestoresHostAndRemovesNewOSPartition` was extended to pass real
+        (non-empty) `EFIDirNameToPurge`/`EFIBootEntryNum` and assert the scratch ESP payload
+        directory is actually removed and the spy records the boot-entry number — closing the
+        gap this file's own comment used to document ("does NOT redirect findActiveESPMount or
+        efibootmgr ... tests must pass an empty EFIDirNameToPurge/EFIBootEntryNum"). New
+        `TestExecuteDecommission_RecreatesOriginalSwapPartition` reproduces the swap-loss bug
+        (fixture's "new OS" partition stands in for a swap-converted partition) and asserts the
+        host partition stops short of 100%, a swap partition is recreated at the same number,
+        same size (±16MiB), restored PARTUUID, and a working fstab entry — verified failing
+        before the `trailingFreeSectorRange` fix (real `blkid`/`parted` error from the
+        hand-computed-sector-math bug above) and passing after. All three
+        `TestExecuteDecommission_*` tests plus the full `go test ./...` and `go vet ./...` run
+        clean; the root-gated tests were run for real via
+        `sudo -E $(which go) test ./engine/... -run TestExecuteDecommission -v`.
+      - Not covered by this item (pre-existing gaps, unchanged): `ui/provision.go`'s
+        `runRealRevert` (dead code — no caller — still takes individual disk/partNum/hostPart/
+        efiDir/bootEntry args rather than a `DetectedGuestOS`, so it was not threaded with swap
+        fields); the autonomous-installer USB-staging path's own partition-carving logic doesn't
+        do swap conversion, so it needs no equivalent handling (not re-verified in this session,
+        carried over from the prior session's note).
 - [ ] F15. transient_resize.sh: partprobe + udevadm settle + bounded retry (10x1s) before
       declaring the USB mount failed; try UUID as well as label — Not started
 - [ ] F16. ISO picker: Bubble Tea model test driving Deploy payload -> picker -> .iso

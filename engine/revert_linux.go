@@ -24,6 +24,15 @@ type DetectedGuestOS struct {
 	EFIDirName     string `json:"efi_dir_name"`     // e.g. "Microsoft", "parrot"
 	TopologyMode   string `json:"topology_mode"`    // "dual-boot", "triple-boot"
 	IsContiguous   bool   `json:"is_contiguous"`
+
+	// OriginalSwapSizeBytes/OriginalSwapUUID (follow-up F14): populated
+	// from the journal when install-time partitioning converted a
+	// trailing swap slice into this guest's partition, so a revert can
+	// recreate an equivalent swap partition. Only ever known for the
+	// journal-sourced guest entry (os-prober/lsblk discovery has no way to
+	// know what a partition used to be before install).
+	OriginalSwapSizeBytes int64  `json:"original_swap_size_bytes,omitempty"`
+	OriginalSwapUUID      string `json:"original_swap_uuid,omitempty"`
 }
 
 // DiscoverSecondaryOSes dynamically scans journal state, os-prober, and raw block devices.
@@ -76,13 +85,15 @@ func DiscoverSecondaryOSes() ([]DetectedGuestOS, error) {
 				}
 
 				guests = append(guests, DetectedGuestOS{
-					DevicePath:     targetDev,
-					DiskPath:       targetDisk,
-					PartNum:        targetNum,
-					RestorePartNum: hostRestoreNum,
-					Name:           fmt.Sprintf("%s (from Journal)", distroName),
-					EFIDirName:     sess.EFIDirName,
-					IsContiguous:   hostRestoreNum != "",
+					DevicePath:            targetDev,
+					DiskPath:              targetDisk,
+					PartNum:               targetNum,
+					RestorePartNum:        hostRestoreNum,
+					Name:                  fmt.Sprintf("%s (from Journal)", distroName),
+					EFIDirName:            sess.EFIDirName,
+					IsContiguous:          hostRestoreNum != "",
+					OriginalSwapSizeBytes: sess.OriginalSwapSizeBytes,
+					OriginalSwapUUID:      sess.OriginalSwapUUID,
 				})
 				seenDevices[targetDev] = true
 			}
@@ -247,7 +258,7 @@ func findPrecedingPartition(disk, currentPartNum string) string {
 
 func inferEFIDir(osName string) string {
 	lower := strings.ToLower(osName)
-	espMount := findActiveESPMount()
+	espMount := findActiveESPMountFunc()
 
 	candidates := []string{}
 	switch {
@@ -293,8 +304,7 @@ func ExecuteRealReversionWithProgress(p RealRevertParams, logFn func(string), pr
 // steps to a scratch directory instead of the real /etc/grub.d,
 // /etc/default/grub.d, and /etc/fstab. Bug F's investigation found this
 // function had NO testability isolation at all — every real-system side
-// effect (these, plus findActiveESPMount and efibootmgr, which remain
-// hardcoded) was a literal system path, making it unsafe to exercise
+// effect was a literal system path, making it unsafe to exercise
 // end-to-end in an automated test without this.
 var grubCustomPath = "/etc/grub.d/40_custom"
 var grubDropinPaths = []string{
@@ -303,6 +313,31 @@ var grubDropinPaths = []string{
 }
 var updateGrubFunc = func() error { return exec.Command("update-grub").Run() }
 var fstabPath = "/etc/fstab"
+
+// findActiveESPMountFunc and efibootmgrRemoveFunc complete that isolation
+// for the two remaining real-system side effects bug F's investigation
+// flagged as still hardcoded (follow-up F14): ESP-directory discovery and
+// UEFI NVRAM boot-entry removal. A test points findActiveESPMountFunc at a
+// scratch directory standing in for the ESP and replaces
+// efibootmgrRemoveFunc with a spy to assert the boot entry number it would
+// have removed, without ever touching the real ESP or real NVRAM.
+var findActiveESPMountFunc = func() string {
+	candidates := []string{"/boot/efi", "/efi", "/boot"}
+	for _, c := range candidates {
+		out, err := exec.Command("findmnt", "-n", "-o", "FSTYPE", c).Output()
+		if err == nil {
+			fstype := strings.TrimSpace(string(out))
+			if fstype == "vfat" || fstype == "msdos" {
+				return c
+			}
+		}
+	}
+	return "/boot/efi"
+}
+
+var efibootmgrRemoveFunc = func(bootNum string) error {
+	return exec.Command("efibootmgr", "-b", bootNum, "-B").Run()
+}
 
 func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn func(string), progressFn func(step string, percent float64)) error {
 	if logFn == nil {
@@ -357,18 +392,20 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 	_ = exec.Command("wipefs", "-a", "-f", targetDev).Run()
 
 	// 3. UEFI NVRAM Cleanup
-	if isUEFIMode() && p.EFIBootEntryNum != "" {
+	if isUEFIModeFunc() && p.EFIBootEntryNum != "" {
 		progressFn("=> [REVERT 25%] Purging UEFI NVRAM boot entry...", 0.25)
 		cleanNum := strings.TrimPrefix(p.EFIBootEntryNum, "Boot")
 		cleanNum = strings.TrimSpace(cleanNum)
 		logFn(fmt.Sprintf("=> Removing UEFI NVRAM entry: Boot%s...", cleanNum))
-		_ = exec.Command("efibootmgr", "-b", cleanNum, "-B").Run()
+		if err := efibootmgrRemoveFunc(cleanNum); err != nil {
+			logFn(fmt.Sprintf("=> [WARNING] efibootmgr removal note: %v", err))
+		}
 	}
 
 	// 4. ESP Directory Cleanup
-	if isUEFIMode() && p.EFIDirNameToPurge != "" {
+	if isUEFIModeFunc() && p.EFIDirNameToPurge != "" {
 		progressFn(fmt.Sprintf("=> [REVERT 35%%] Purging /EFI/%s from ESP...", p.EFIDirNameToPurge), 0.35)
-		espBase := findActiveESPMount()
+		espBase := findActiveESPMountFunc()
 		targetEFIDir := filepath.Join(espBase, "EFI", strings.TrimSpace(p.EFIDirNameToPurge))
 		if _, err := os.Stat(targetEFIDir); err == nil {
 			_ = os.RemoveAll(targetEFIDir)
@@ -416,17 +453,37 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 			progressFn(fmt.Sprintf("=> [REVERT 70%%] Expanding partition %s to 100%% of %s...", p.HostPartNum, p.DiskDevice), 0.70)
 			logFn(fmt.Sprintf("=> Expanding boundary of partition %s on disk %s...", p.HostPartNum, p.DiskDevice))
 
-			growWorked := false
-			if _, err := exec.LookPath("growpart"); err == nil {
-				if out, gErr := exec.Command("growpart", p.DiskDevice, p.HostPartNum).CombinedOutput(); gErr == nil {
-					growWorked = true
+			// Follow-up F14: if install-time partitioning converted a
+			// trailing swap slice into the partition just removed, the host
+			// must NOT grow all the way to 100% — that would consume the
+			// space needed to recreate an equivalent swap partition below.
+			// growpart always grows to use all following free space (it has
+			// no "stop short" mode), so it is skipped entirely in that case
+			// in favor of parted resizepart with an explicit end.
+			hostResizeEnd := "100%"
+			leaveSwapRoom := p.OriginalSwapSizeBytes > 0
+			if leaveSwapRoom {
+				if end, ok := hostResizeEndLeavingSwap(p.DiskDevice, p.OriginalSwapSizeBytes); ok {
+					hostResizeEnd = end
 				} else {
-					logFn(fmt.Sprintf("=> growpart note: %s", strings.TrimSpace(string(out))))
+					logFn("=> [WARNING] could not determine disk geometry to leave room for the original swap slice; host will reclaim that space instead")
+					leaveSwapRoom = false
+				}
+			}
+
+			growWorked := false
+			if !leaveSwapRoom {
+				if _, err := exec.LookPath("growpart"); err == nil {
+					if out, gErr := exec.Command("growpart", p.DiskDevice, p.HostPartNum).CombinedOutput(); gErr == nil {
+						growWorked = true
+					} else {
+						logFn(fmt.Sprintf("=> growpart note: %s", strings.TrimSpace(string(out))))
+					}
 				}
 			}
 
 			if !growWorked {
-				if out, err := exec.Command("parted", "-s", p.DiskDevice, "resizepart", p.HostPartNum, "100%").CombinedOutput(); err != nil {
+				if out, err := exec.Command("parted", "-s", p.DiskDevice, "resizepart", p.HostPartNum, hostResizeEnd).CombinedOutput(); err != nil {
 					logFn(fmt.Sprintf("=> parted resizepart failed: %s", strings.TrimSpace(string(out))))
 				}
 			}
@@ -452,6 +509,13 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 					logFn(fmt.Sprintf("=> resize2fs note: %s", strings.TrimSpace(string(out))))
 				} else {
 					logFn("=> Host filesystem successfully expanded to fill partition.")
+				}
+			}
+
+			if leaveSwapRoom {
+				progressFn("=> [REVERT 78%] Recreating the original swap partition...", 0.78)
+				if swapErr := recreateSwapPartition(p.DiskDevice, p.HostPartNum, p.OriginalSwapSizeBytes, p.OriginalSwapUUID, logFn); swapErr != nil {
+					logFn(fmt.Sprintf("=> [WARNING] swap recreation failed: %v (the host's original swap space was NOT restored)", swapErr))
 				}
 			}
 		}
@@ -508,6 +572,177 @@ exec tail -n +3 $0
 	logFn("=> [SUCCESS] Decommissioning transaction completed cleanly.")
 	time.Sleep(500 * time.Millisecond)
 	return nil
+}
+
+// trailingFreeSectorRange runs `parted -m unit s print free` against
+// diskDevice and returns the start/end sectors (inclusive) of the LAST
+// "free;" region it reports — the trailing free space immediately after
+// the current final partition. Used instead of hand-computed sector math
+// so the boundaries handed to mkpart are always ones parted itself already
+// considers valid (avoiding the GPT-backup-area off-by-a-few-sectors
+// mismatch a manual "total sectors - N" calculation can produce).
+func trailingFreeSectorRange(diskDevice string) (startSector, endSector int64, err error) {
+	out, err := exec.Command("parted", "-s", "-m", diskDevice, "unit", "s", "print", "free").Output()
+	if err != nil {
+		return 0, 0, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var lastStart, lastEnd int64
+	found := false
+	for _, line := range lines {
+		fields := strings.Split(line, ":")
+		if len(fields) < 5 || fields[len(fields)-1] != "free;" {
+			continue
+		}
+		start, startErr := strconv.ParseInt(strings.TrimSuffix(fields[1], "s"), 10, 64)
+		end, endErr := strconv.ParseInt(strings.TrimSuffix(fields[2], "s"), 10, 64)
+		if startErr != nil || endErr != nil {
+			continue
+		}
+		lastStart, lastEnd = start, end
+		found = true
+	}
+	if !found {
+		return 0, 0, fmt.Errorf("no free space reported on %s", diskDevice)
+	}
+	return lastStart, lastEnd, nil
+}
+
+// hostResizeEndLeavingSwap computes a parted resizepart END expression (in
+// sectors) that stops the host partition swapSizeBytes short of the actual
+// end of diskDevice's free space, leaving exactly that much trailing free
+// space for recreateSwapPartition to carve a replacement swap slice from
+// (follow-up F14). It anchors on parted's own reported usable last sector
+// (via trailingFreeSectorRange) rather than the disk's raw sector count
+// from blockdev, since GPT reserves a trailing region (its backup header
+// and partition array) that raw sector count includes but parted will
+// never actually let a partition use — subtracting swap sectors from the
+// raw count instead would leave slightly LESS free space than
+// swapSizeBytes, causing recreateSwapPartition to reject it as
+// undersized. Returns ok=false if the disk's geometry can't be read or the
+// swap size doesn't sanely fit, in which case the caller falls back to
+// growing to 100% rather than blocking the whole revert on it.
+func hostResizeEndLeavingSwap(diskDevice string, swapSizeBytes int64) (string, bool) {
+	_, usableLastSector, freeErr := trailingFreeSectorRange(diskDevice)
+	if freeErr != nil {
+		return "", false
+	}
+	sectorSizeOut, err := exec.Command("blockdev", "--getss", diskDevice).Output()
+	if err != nil {
+		return "", false
+	}
+	sectorSize, err := strconv.ParseInt(strings.TrimSpace(string(sectorSizeOut)), 10, 64)
+	if err != nil || sectorSize <= 0 {
+		return "", false
+	}
+	// Round the sector count up (not down) so the trailing free space left
+	// behind is never smaller than swapSizeBytes even when it isn't an
+	// exact multiple of the sector size.
+	swapSectors := (swapSizeBytes + sectorSize - 1) / sectorSize
+	if swapSectors <= 0 || swapSectors >= usableLastSector {
+		return "", false
+	}
+	return fmt.Sprintf("%ds", usableLastSector-swapSectors), true
+}
+
+// recreateSwapPartition carves a new trailing swap partition of
+// swapSizeBytes immediately after hostPartNum — which must already have
+// been resized (via hostResizeEndLeavingSwap) to leave exactly this much
+// trailing free space — restores its original GPT PARTUUID when known (so
+// an /etc/fstab entry referencing it by PARTUUID keeps working across the
+// revert), and formats it with mkswap. This restores the swap space that
+// install-time partition conversion consumed (follow-up F14) instead of
+// leaving the host permanently short that space after a revert.
+func recreateSwapPartition(diskDevice, hostPartNum string, swapSizeBytes int64, originalPartUUID string, logFn func(string)) error {
+	// Find the exact trailing free region parted itself reports, rather
+	// than computing sector boundaries by hand from blockdev's raw sector
+	// count: GPT reserves a tail region for its backup header/partition
+	// array (commonly 33-34 sectors, but the exact count is not a
+	// constant this code should hardcode), so a hand-computed "100%"/"-1s"
+	// endpoint lands past parted's actual usable last sector and parted's
+	// script mode refuses to auto-round a doubly-pinned start+end rather
+	// than silently shrinking the request. Reading the boundary parted
+	// already computed sidesteps that entirely.
+	startSector, endSector, freeErr := trailingFreeSectorRange(diskDevice)
+	if freeErr != nil {
+		return fmt.Errorf("finding free space on %s: %w", diskDevice, freeErr)
+	}
+	sectorSizeOut, err := exec.Command("blockdev", "--getss", diskDevice).Output()
+	if err != nil {
+		return fmt.Errorf("reading sector size of %s: %w", diskDevice, err)
+	}
+	sectorSize, err := strconv.ParseInt(strings.TrimSpace(string(sectorSizeOut)), 10, 64)
+	if err != nil || sectorSize <= 0 {
+		return fmt.Errorf("could not parse sector size of %s: %q", diskDevice, strings.TrimSpace(string(sectorSizeOut)))
+	}
+	if freeBytes := (endSector - startSector + 1) * sectorSize; freeBytes < swapSizeBytes {
+		return fmt.Errorf("trailing free space on %s (%d bytes) is smaller than the recorded swap size (%d bytes)", diskDevice, freeBytes, swapSizeBytes)
+	}
+
+	hostPartNumInt, err := strconv.Atoi(hostPartNum)
+	if err != nil {
+		return fmt.Errorf("invalid host partition number %q: %w", hostPartNum, err)
+	}
+	newSwapPartNum := strconv.Itoa(hostPartNumInt + 1)
+
+	if out, err := exec.Command("parted", "-s", "-a", "none", diskDevice, "mkpart", "primary", "linux-swap",
+		fmt.Sprintf("%ds", startSector), fmt.Sprintf("%ds", endSector)).CombinedOutput(); err != nil {
+		return fmt.Errorf("creating swap partition: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	_ = exec.Command("partprobe", diskDevice).Run()
+	_ = exec.Command("udevadm", "settle", "--timeout=5").Run()
+	time.Sleep(300 * time.Millisecond)
+
+	if strings.TrimSpace(originalPartUUID) != "" {
+		if out, err := exec.Command("sgdisk", "-u", newSwapPartNum+":"+strings.TrimSpace(originalPartUUID), diskDevice).CombinedOutput(); err != nil {
+			logFn(fmt.Sprintf("=> [WARNING] could not restore original swap PARTUUID: %s", strings.TrimSpace(string(out))))
+		}
+		_ = exec.Command("partprobe", diskDevice).Run()
+		_ = exec.Command("udevadm", "settle", "--timeout=5").Run()
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	swapDev := JoinDiskAndPartition(diskDevice, newSwapPartNum)
+	if out, err := exec.Command("mkswap", swapDev).CombinedOutput(); err != nil {
+		return fmt.Errorf("mkswap %s: %s: %w", swapDev, strings.TrimSpace(string(out)), err)
+	}
+	logFn(fmt.Sprintf("=> Recreated swap partition %s and formatted it with mkswap.", swapDev))
+
+	if err := ensureSwapFstabEntry(fstabPath, originalPartUUID); err != nil {
+		logFn(fmt.Sprintf("=> [WARNING] could not add swap entry to fstab: %v", err))
+	}
+	return nil
+}
+
+// ensureSwapFstabEntry appends a "PARTUUID=... none swap sw 0 0" line to
+// path if one referencing partUUID isn't already present, so the recreated
+// swap partition is actually used on the next boot rather than sitting
+// unused because nothing references it. A no-op if partUUID is empty (the
+// original swap slice's PARTUUID wasn't recorded) or the file can't be
+// read, since fstab is an optional nicety here, not a safety gate.
+func ensureSwapFstabEntry(path, partUUID string) error {
+	partUUID = strings.TrimSpace(partUUID)
+	if partUUID == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			data = nil
+		} else {
+			return err
+		}
+	}
+	if strings.Contains(strings.ToLower(string(data)), strings.ToLower(partUUID)) {
+		return nil
+	}
+	line := fmt.Sprintf("PARTUUID=%s none swap sw 0 0\n", partUUID)
+	out := string(data)
+	if out != "" && !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	out += line
+	return os.WriteFile(path, []byte(out), 0644)
 }
 
 // partitionExists checks for the partition's /sys/class/block entry. Audit
@@ -638,23 +873,13 @@ func verifyLinuxTargetBeforeDestruction(devicePath, expectedFSType string, expec
 	return nil
 }
 
-func isUEFIMode() bool {
+// isUEFIModeFunc is injectable (follow-up F14) so a test can force the
+// UEFI-mode gate on without needing real EFI firmware underneath the test
+// process (a loop-image test runs on whatever hardware/VM hosts it, which
+// may itself be BIOS-booted).
+var isUEFIModeFunc = func() bool {
 	_, err := os.Stat("/sys/firmware/efi")
 	return err == nil
-}
-
-func findActiveESPMount() string {
-	candidates := []string{"/boot/efi", "/efi", "/boot"}
-	for _, c := range candidates {
-		out, err := exec.Command("findmnt", "-n", "-o", "FSTYPE", c).Output()
-		if err == nil {
-			fstype := strings.TrimSpace(string(out))
-			if fstype == "vfat" || fstype == "msdos" {
-				return c
-			}
-		}
-	}
-	return "/boot/efi"
 }
 
 func RollbackRevertHandler(rollbackData json.RawMessage) error {

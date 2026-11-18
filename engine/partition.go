@@ -51,6 +51,15 @@ type PartitionSpec struct {
 type PartitionResult struct {
 	NewPartitionPath string
 	NewPartNum       string
+
+	// ConvertedSwapSizeBytes/ConvertedSwapUUID are populated only when the
+	// new partition was carved by converting a confirmed trailing swap
+	// slice (follow-up F14): the caller persists these into the journal
+	// session so a later revert can recreate an equivalent swap partition,
+	// rather than permanently losing the host's swap space. Zero/empty
+	// when the new partition came from free space or a shrink instead.
+	ConvertedSwapSizeBytes int64
+	ConvertedSwapUUID      string
 }
 
 var ext4UsageRe = regexp.MustCompile(`(?m)^Block count:\s+(\d+)`)
@@ -324,6 +333,15 @@ func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint6
 			return nil, fmt.Errorf("insufficient contiguous space (available trailing slice: %.1f GiB, required: %.1f GiB). Boot Live USB to shrink active root partition", float64(swapBytes)/(1024*1024*1024), float64(targetBytes)/(1024*1024*1024))
 		}
 
+		// Follow-up F14: capture the swap slice's identity (size, PARTUUID)
+		// BEFORE it is deleted below, so the caller can persist it into the
+		// journal session and a later revert can recreate an equivalent
+		// swap partition instead of permanently losing the host's swap
+		// space.
+		swapDevBeforeDelete := JoinDiskAndPartition(diskPath, fmt.Sprintf("%d", swapPartNum))
+		swapUUIDOut, _ := cmdRunner.RunStdout("blkid", "-s", "PARTUUID", "-o", "value", swapDevBeforeDelete)
+		swapUUID := strings.TrimSpace(string(swapUUIDOut))
+
 		logFn(fmt.Sprintf("=> [HARDWARE PARTITION] Converting trailing slice %d (%.1f GiB) to primary ext4...", swapPartNum, float64(swapBytes)/(1024*1024*1024)))
 		// Confirmed swap (type, via isConfirmedSwapPartition above) and large
 		// enough (size, via the swapBytes check above) — only now is it
@@ -351,8 +369,10 @@ func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint6
 		}
 
 		return &PartitionResult{
-			NewPartitionPath: newDevPath,
-			NewPartNum:       fmt.Sprintf("%d", swapPartNum),
+			NewPartitionPath:       newDevPath,
+			NewPartNum:             fmt.Sprintf("%d", swapPartNum),
+			ConvertedSwapSizeBytes: int64(swapBytes),
+			ConvertedSwapUUID:      swapUUID,
 		}, nil
 	}
 

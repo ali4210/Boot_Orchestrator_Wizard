@@ -320,11 +320,13 @@ func triggerTargetedRevertCmd(guest engine.DetectedGuestOS, keepSlice bool, ch c
 		nvramEntry := engine.ResolveBootEntryByEFIDir(guest.EFIDirName)
 
 		params := engine.RealRevertParams{
-			DiskDevice:        guest.DiskPath,
-			PartitionNum:      guest.PartNum,
-			HostPartNum:       guest.RestorePartNum,
-			EFIDirNameToPurge: guest.EFIDirName,
-			EFIBootEntryNum:   nvramEntry,
+			DiskDevice:            guest.DiskPath,
+			PartitionNum:          guest.PartNum,
+			HostPartNum:           guest.RestorePartNum,
+			EFIDirNameToPurge:     guest.EFIDirName,
+			EFIBootEntryNum:       nvramEntry,
+			OriginalSwapSizeBytes: guest.OriginalSwapSizeBytes,
+			OriginalSwapUUID:      guest.OriginalSwapUUID,
 		}
 
 		revertErr := engine.ExecuteDecommissionWithOptions(params, keepSlice, func(msg string) {

@@ -39,6 +39,16 @@ type SessionState struct {
 	ShrunkPartUUID  string `json:"shrunk_part_uuid,omitempty"`  // stable fingerprint of the host partition being expanded back
 	ShrunkFSType    string `json:"shrunk_fs_type,omitempty"`    // "ext4", "ntfs", "btrfs"
 	EFIDirName      string `json:"efi_dir_name,omitempty"`      // e.g. "Microsoft", "parrot"
+
+	// OriginalSwapSizeBytes/OriginalSwapUUID record a trailing swap slice
+	// that install-time partitioning converted into the target OS
+	// partition (follow-up F14), so revert can recreate an equivalent swap
+	// partition instead of permanently losing the host's swap space. Zero/
+	// empty when no swap was converted (the common case: carved from free
+	// space, or a plain shrink).
+	OriginalSwapSizeBytes int64  `json:"original_swap_size_bytes,omitempty"`
+	OriginalSwapUUID      string `json:"original_swap_uuid,omitempty"`
+
 	DownloadURL     string `json:"download_url,omitempty"`
 	BytesDownloaded int64  `json:"bytes_downloaded,omitempty"`
 	TotalBytes      int64  `json:"total_bytes,omitempty"`

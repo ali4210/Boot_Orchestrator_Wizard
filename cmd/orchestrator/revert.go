@@ -55,11 +55,13 @@ func runHeadlessRevert(yes bool, keepSlice bool) error {
 
 	nvramEntry := engine.ResolveBootEntryByEFIDir(guest.EFIDirName)
 	params := engine.RealRevertParams{
-		DiskDevice:        guest.DiskPath,
-		PartitionNum:      guest.PartNum,
-		HostPartNum:       guest.RestorePartNum,
-		EFIDirNameToPurge: guest.EFIDirName,
-		EFIBootEntryNum:   nvramEntry,
+		DiskDevice:            guest.DiskPath,
+		PartitionNum:          guest.PartNum,
+		HostPartNum:           guest.RestorePartNum,
+		EFIDirNameToPurge:     guest.EFIDirName,
+		EFIBootEntryNum:       nvramEntry,
+		OriginalSwapSizeBytes: guest.OriginalSwapSizeBytes,
+		OriginalSwapUUID:      guest.OriginalSwapUUID,
 	}
 
 	err = engine.ExecuteDecommissionWithOptions(params, keepSlice, func(msg string) {

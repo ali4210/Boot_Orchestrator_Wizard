@@ -783,6 +783,13 @@ func configureBootloaderStep(
 }
 
 func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath string, onUpdate func(StepUpdate)) ProvisionResult {
+	// Follow-up F14: populated only if CarveHardwarePartitionAtBoundary
+	// converted a confirmed trailing swap slice into the target partition;
+	// persisted into the journal session further below so a later revert
+	// can recreate an equivalent swap partition.
+	var convertedSwapSizeBytes int64
+	var convertedSwapUUID string
+
 	journal, err := safety.LoadJournal(req.JournalPath)
 	if err != nil {
 		journal, err = safety.NewJournal(req.JournalPath, generateTxnID())
@@ -1180,6 +1187,8 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 
 		if carveErr == nil && res != nil && res.NewPartitionPath != "" {
 			req.TargetPartition = res.NewPartitionPath
+			convertedSwapSizeBytes = res.ConvertedSwapSizeBytes
+			convertedSwapUUID = res.ConvertedSwapUUID
 			onUpdate(StepUpdate{StepName: fmt.Sprintf("physical dual-boot partition carved: %s", req.TargetPartition), Done: true})
 			journal.Commit(step)
 			onUpdate(StepUpdate{StepName: "partition-shrink", Done: true})
@@ -1315,6 +1324,8 @@ deployPhase:
 	sessState.ShrunkPartNum = req.HostPartNum
 	sessState.ShrunkPartUUID = shrunkPartUUID
 	sessState.EFIDirName = req.BootLabel
+	sessState.OriginalSwapSizeBytes = convertedSwapSizeBytes
+	sessState.OriginalSwapUUID = convertedSwapUUID
 	_ = journal.SetSessionState(sessState)
 
 	revStep, _ := journal.Begin("revert-engine", nil)
