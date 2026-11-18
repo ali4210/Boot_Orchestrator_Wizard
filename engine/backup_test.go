@@ -2,6 +2,7 @@ package engine
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -118,5 +119,35 @@ func TestDetectBackupTargets_ExcludesLiveUSBBootDiskEvenOnOverlayRoot(t *testing
 	}
 	if !found {
 		t.Fatalf("expected the other, genuinely pluggable USB disk 'sdy' to still be offered as a backup target, got: %+v", targets)
+	}
+}
+
+// TestRestoreHostFromBackup_AbortsOnPartitionTableFailure is the
+// regression test for audit item 25 (silent-error audit): every
+// parted/mkfs call that sets up the disaster-recovery target disk used to
+// discard its error entirely. A nonexistent target disk makes parted's
+// very first call (mklabel) fail immediately and harmlessly — no loop
+// device or root privileges needed, since parted errors out before
+// touching anything — and RestoreHostFromBackup must propagate that
+// failure instead of sailing on to mkfs/mount/extract against partitions
+// that were never actually created. Exercises both the UEFI (GPT) and
+// BIOS (MBR) branches, since isUEFIBooted() depends on the real test
+// machine's own firmware mode and this bug was identical in both.
+func TestRestoreHostFromBackup_AbortsOnPartitionTableFailure(t *testing.T) {
+	if _, err := exec.LookPath("parted"); err != nil {
+		t.Skip("parted not available, skipping")
+	}
+
+	const bogusDisk = "/dev/orch-test-nonexistent-disk-for-backup-test-xyz"
+	if _, statErr := os.Stat(bogusDisk); statErr == nil {
+		t.Skipf("unexpectedly found a real device at %s, refusing to risk touching it", bogusDisk)
+	}
+
+	err := RestoreHostFromBackup("/nonexistent/archive-for-test.tar", bogusDisk, nil)
+	if err == nil {
+		t.Fatalf("expected RestoreHostFromBackup to fail when parted cannot create a partition table on a nonexistent disk, got nil error")
+	}
+	if !strings.Contains(err.Error(), "partition table") {
+		t.Errorf("expected a partition-table-creation error message, got: %v", err)
 	}
 }

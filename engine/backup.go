@@ -431,12 +431,38 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 
 	var espPart, rootPart string
 
+	// Audit item 25 (silent-error audit): every parted/mkfs call in this
+	// block used to discard its error. If, say, "mklabel gpt" silently
+	// failed (disk busy, permission denied, device vanished), every
+	// subsequent mkpart/mkfs call below it would operate against a disk
+	// that was never actually relabeled — some would then also fail
+	// silently, others might succeed against a stale/unexpected existing
+	// layout, and the function would sail on to mount whatever espPart/
+	// rootPart happened to compute to. A full failure (no partition at
+	// all) does eventually surface at the mkfs.ext4/mount calls further
+	// down, which already correctly checked their errors — but a PARTIAL
+	// failure (e.g. the ESP mkpart/mkfs failing while the root partition
+	// succeeds) would not: the ESP mount below silently creates an empty
+	// directory instead of a real mount, extraction proceeds anyway, and
+	// disaster recovery finishes "successfully" having produced an
+	// unbootable UEFI system with no real ESP content. Every call that
+	// actually changes the disk's structure now checks its error and
+	// aborts loudly; partprobe (a kernel re-read nudge, not a state
+	// change) is left as best-effort.
 	if isUEFI {
 		logFn(fmt.Sprintf("=> [UEFI DETECTED] Partitioning %s with GPT layout...", targetDisk))
-		_ = exec.Command("parted", "-s", targetDisk, "mklabel", "gpt").Run()
-		_ = exec.Command("parted", "-s", targetDisk, "mkpart", "ESP", "fat32", "1MiB", "1025MiB").Run()
-		_ = exec.Command("parted", "-s", targetDisk, "set", "1", "esp", "on").Run()
-		_ = exec.Command("parted", "-s", targetDisk, "mkpart", "primary", "ext4", "1025MiB", "100%").Run()
+		if out, err := exec.Command("parted", "-s", targetDisk, "mklabel", "gpt").CombinedOutput(); err != nil {
+			return fmt.Errorf("creating GPT partition table on %s: %w (%s)", targetDisk, err, out)
+		}
+		if out, err := exec.Command("parted", "-s", targetDisk, "mkpart", "ESP", "fat32", "1MiB", "1025MiB").CombinedOutput(); err != nil {
+			return fmt.Errorf("creating ESP partition on %s: %w (%s)", targetDisk, err, out)
+		}
+		if out, err := exec.Command("parted", "-s", targetDisk, "set", "1", "esp", "on").CombinedOutput(); err != nil {
+			return fmt.Errorf("marking ESP flag on %s partition 1: %w (%s)", targetDisk, err, out)
+		}
+		if out, err := exec.Command("parted", "-s", targetDisk, "mkpart", "primary", "ext4", "1025MiB", "100%").CombinedOutput(); err != nil {
+			return fmt.Errorf("creating root partition on %s: %w (%s)", targetDisk, err, out)
+		}
 		_ = exec.Command("partprobe", targetDisk).Run()
 		time.Sleep(1 * time.Second)
 
@@ -444,12 +470,20 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 		rootPart = fmt.Sprintf("/dev/%s%s2", baseDisk, sep)
 
 		logFn(fmt.Sprintf("=> Formatting EFI system partition %s...", espPart))
-		_ = exec.Command("mkfs.vfat", "-F32", "-n", "BOOT", espPart).Run()
+		if out, err := exec.Command("mkfs.vfat", "-F32", "-n", "BOOT", espPart).CombinedOutput(); err != nil {
+			return fmt.Errorf("formatting ESP %s: %w (%s)", espPart, err, out)
+		}
 	} else {
 		logFn(fmt.Sprintf("=> [LEGACY BIOS DETECTED] Partitioning %s with MBR layout...", targetDisk))
-		_ = exec.Command("parted", "-s", targetDisk, "mklabel", "msdos").Run()
-		_ = exec.Command("parted", "-s", targetDisk, "mkpart", "primary", "ext4", "1MiB", "100%").Run()
-		_ = exec.Command("parted", "-s", targetDisk, "set", "1", "boot", "on").Run()
+		if out, err := exec.Command("parted", "-s", targetDisk, "mklabel", "msdos").CombinedOutput(); err != nil {
+			return fmt.Errorf("creating MBR partition table on %s: %w (%s)", targetDisk, err, out)
+		}
+		if out, err := exec.Command("parted", "-s", targetDisk, "mkpart", "primary", "ext4", "1MiB", "100%").CombinedOutput(); err != nil {
+			return fmt.Errorf("creating root partition on %s: %w (%s)", targetDisk, err, out)
+		}
+		if out, err := exec.Command("parted", "-s", targetDisk, "set", "1", "boot", "on").CombinedOutput(); err != nil {
+			return fmt.Errorf("marking boot flag on %s partition 1: %w (%s)", targetDisk, err, out)
+		}
 		_ = exec.Command("partprobe", targetDisk).Run()
 		time.Sleep(1 * time.Second)
 
@@ -478,7 +512,9 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 	if isUEFI {
 		efiDir := filepath.Join(stageDir, "boot", "efi")
 		_ = os.MkdirAll(efiDir, 0755)
-		_ = exec.Command("mount", espPart, efiDir).Run()
+		if out, err := exec.Command("mount", espPart, efiDir).CombinedOutput(); err != nil {
+			return fmt.Errorf("mounting ESP %s at %s: %w (%s)", espPart, efiDir, err, out)
+		}
 		defer func() {
 			_ = exec.Command("umount", "-l", efiDir).Run()
 		}()

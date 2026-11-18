@@ -1153,7 +1153,36 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       `win11-workstation-amd64` — direct evidence they're stale snapshots, not live tooling),
       pointing at this project's actual maintained equivalents
       (`cmd/catalog-verify`/`cmd/download-verify`/`discovery.Catalog.Audit()`) instead.
-- [ ] 25. Silent-error audit (`|| true`, `2>/dev/null`, `_ = exec.Command`) — Not started
+- [x] 25. Silent-error audit (`|| true`, `2>/dev/null`, `_ = exec.Command`) — Done
+      (`PENDING_HASH`). Full survey in `docs/SILENT_ERROR_AUDIT.md` (~195 discarded
+      `exec.Command`/`.Run()` results in Go, ~52 more `|| true`/`2>/dev/null` embedded in
+      Go-generated shell, plus the standalone launchers — most are legitimate best-effort
+      cleanup, triaged by actual risk rather than mechanically rewritten). `assertDefaultCredentials`
+      (audit 1A.3, already fixed in an earlier session) is the reference example of hard-
+      failing correctly: checked, confirmed still correct, cited as the pattern template —
+      not re-fixed, since it was never broken in this pass.
+      **Real bug found and fixed:** `engine/backup.go`'s `RestoreHostFromBackup` (disaster
+      recovery) discarded every `parted`/`mkfs.vfat` error while setting up the target disk.
+      A partial failure (e.g. the ESP-specific mkpart/mkfs failing while the root partition
+      succeeded) would silently mount nothing at the ESP mountpoint, extract the backup
+      anyway, and report success having produced an **unbootable UEFI system with no real
+      ESP content**. Fixed: every structurally-changing call (`mklabel`, `mkpart`, `set ...
+      on`, `mkfs.vfat`, the ESP mount) now checks its result and aborts with a specific
+      error naming the failed step. Test (`engine/backup_test.go`'s
+      `TestRestoreHostFromBackup_AbortsOnPartitionTableFailure`): points at a nonexistent
+      disk (parted fails immediately and harmlessly, no loop device or root needed);
+      verified failing before the fix with the predicted symptom — the real failure
+      (discarded `mklabel`) was masked and a much later, confusing `mkfs.ext4` error
+      surfaced instead — and passing with a specific, immediate error after.
+      **Surveyed and deliberately left as-is** (with reasons documented in the doc, not
+      silently skipped): `usb_manager.go`'s ESP/boot flag-setting (already-correct mkpart/
+      mkfs calls, only the advisory flags are discarded); the USB-storage mount fallbacks in
+      `orchestrator.go` (bug G's own pattern — discard-then-verify-the-end-state, which is
+      correct here); `autonomous_installer_script.go`'s generated shell (one borderline case
+      noted, lower severity — still fails loudly a line later under `set -e`, just less
+      legibly); the widespread chroot bind-mount discard pattern (cross-file, real risk of
+      regressing currently-working paths, out of scope); macOS/Windows-specific files
+      (can't verify a fix for real from this Linux session).
 - [ ] 26. Generated-script check (bash -n, shellcheck, no fmt verbs/saleem) — Not started
 - [ ] 27. Windows Panther plaintext password verification — Not started
 - [ ] 28. Wire signature check into downloader — Not started
