@@ -1129,7 +1129,12 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
         safe `t.TempDir()`. `cmd/orchestrator/preflight_test.go`: `runPreflightGate`'s three
         real decision paths — no blocking issue (no-op), a blocking issue refuses by
         default, `--skip-preflight` overrides the refusal but still surfaces the reason.
-- [x] 24. Windows launcher dedup + orphaned scripts moved — Done (`5b9d316`).
+- [x] 24. Windows launcher dedup + orphaned scripts moved — Done (`5b9d316`, with the
+      `autorun.bat` dead-check removal actually landing in a follow-up `e4debf4` — a
+      multi-pathspec `git add -A --` silently staged nothing when one pathspec in the list
+      (`autorun.cmd`) no longer matched any file after its deletion was staged separately,
+      so that one file's edit missed the original commit despite being correct in the
+      working tree the whole time; committed separately rather than amending history).
       Audit 2.16: `autorun.bat` and `autorun.cmd` were ~95% identical, both delegating to
       `autorun.ps1`; `.bat`'s `net session` admin pre-check only ever logged a notice and
       never gated anything on its result (confirmed `autorun.ps1` itself unconditionally
