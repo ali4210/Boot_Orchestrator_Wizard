@@ -1277,7 +1277,52 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       doesn't match what was actually signed (the compromised-mirror scenario this whole
       feature exists to catch) fails; an unreachable/404 signature URL fails rather than
       being silently treated as "nothing to check."
-- [ ] 29. README/CONTRIBUTING/CI; LICENSE — ask user first — Not started
+- [x] 29. README/CONTRIBUTING/CI; LICENSE — ask user first — Done (`PENDING_HASH`).
+      **LICENSE: asked first, as instructed.** User chose MIT; added `LICENSE` (copyright
+      `ali4210`, matching this repo's own git commit identity).
+      **README.md rewritten.** The previous version described a pre-alpha snapshot from
+      well before this whole audit remediation effort (claimed a "39-entry catalog," said
+      wiring the TUI to real provisioning was "intentionally left to you," told the reader
+      to hand-edit `cmd/env-check`'s `main()` to set a target path) — none of that matches
+      the real, current state of the repo after Phases 1-4. Replaced with an accurate
+      description of what's actually implemented (TUI, headless mode, revert, the
+      pre-flight gate, verification tooling), real flag documentation matching
+      `cmd/orchestrator/main.go`'s actual flag set, the real catalog count (28, with a note
+      that it drifts), and a platform-support table grounded in what Tier 4 of
+      `OS_STATUS_MATRIX.md` actually proves rather than speculation.
+      **`CONTRIBUTING.md` added**, codifying the rules this whole engagement was actually
+      run under (never touch a real disk/journal in a test, never fabricate
+      checksums/signatures, reproduce-first for every bug fix, the build/vet/test gate,
+      one commit per item, no history rewrites) plus how to run the root-gated and
+      verification tooling safely.
+      **CI added — this was audit 2.19's actual, still-open gap**
+      (`.github/workflows/ci.yml`): `go build && go vet && go test` on every push/PR,
+      across a 3-OS matrix (`ubuntu-latest`/`windows-latest`/`macos-latest`) — distinct from
+      `download-verify.yml`/`os-matrix.yml`, which stay `workflow_dispatch`-only since they
+      make real downloads/boots.
+      **Real bugs found and fixed while proving the new CI matrix would actually pass**
+      (ran `GOOS=windows`/`GOOS=darwin` builds locally before trusting the new workflow):
+      1. `ui/model.go` reads `guest.OriginalSwapSizeBytes`/`OriginalSwapUUID`
+         unconditionally (no build tag), but F14 (this same remediation effort, Slice 1)
+         only added those fields to `engine.DetectedGuestOS` in `revert_linux.go` — the
+         Windows and macOS builds of that struct (`revert_windows.go`/`revert_darwin.go`)
+         never got them, so **every single non-Linux build of this entire project has been
+         broken since F14's commit**, never caught because `go build`/`go vet`/`go test`
+         had only ever been run on Linux throughout this whole engagement. Fixed by adding
+         the matching (always-zero/empty, documented as such) fields to both other
+         platforms' struct definitions.
+      2. `ui/disk_linux.go` carried an explicit `//go:build !windows` tag (intending
+         "any non-Windows platform"), but Go ANDs that with the **filename-based** implicit
+         constraint `_linux.go` already applies — so despite the comment's intent, the file
+         was actually Linux-only all along, and macOS had no `getFreeDiskSpace`
+         implementation at all. A pre-existing bug, not introduced by this session. Fixed
+         by renaming it to `disk_unix.go` (dropping the GOOS-specific filename suffix so
+         only the explicit tag applies), which needs no code changes since Darwin's
+         `syscall.Statfs_t` has the same `Bavail`/`Bsize` fields Linux's does.
+      Both confirmed fixed by actually running `GOOS=windows GOARCH=amd64 go build ./...`
+      and `GOOS=darwin GOARCH=arm64 go build ./...` locally (clean exit) — not just
+      reasoned about — plus the full native `go build && go vet && go test ./...` gate
+      staying green throughout.
 - [ ] 30. docs/ROADMAP.md — Not started
 
 **CHECKPOINT 4:** not reached

@@ -23,6 +23,15 @@ type DetectedGuestOS struct {
 	EFIDirName     string `json:"efi_dir_name"`     // e.g. "parrot", "ubuntu"
 	TopologyMode   string `json:"topology_mode"`    // "dual-boot", "triple-boot"
 	IsContiguous   bool   `json:"is_contiguous"`
+
+	// OriginalSwapSizeBytes/OriginalSwapUUID (follow-up F14, Linux-only
+	// feature): kept here only so this struct's shape matches
+	// revert_linux.go's across platforms — ui/model.go has no build tag
+	// and reads these fields unconditionally. Windows has no swap
+	// partition concept to convert/restore, so these are always zero/
+	// empty here.
+	OriginalSwapSizeBytes int64  `json:"original_swap_size_bytes,omitempty"`
+	OriginalSwapUUID      string `json:"original_swap_uuid,omitempty"`
 }
 
 // DiscoverSecondaryOSes dynamically checks journals, BCD records, and partition GUIDs.

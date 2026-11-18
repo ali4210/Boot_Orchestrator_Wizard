@@ -1,0 +1,35 @@
+name: CI
+
+# Audit 2.19: "no CI — go build/go vet/go test aren't even run automatically
+# today, so regressions can land silently." This is the baseline fix:
+# build + vet + test on every push and pull request, on every platform
+# this tool ships for. Deliberately does NOT run cmd/download-verify or
+# the OS Status Matrix workflow here — those make real, multi-gigabyte
+# downloads and (for the matrix) real emulated boots, and belong on
+# workflow_dispatch only (see .github/workflows/download-verify.yml and
+# os-matrix.yml), never on every commit.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-vet-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
