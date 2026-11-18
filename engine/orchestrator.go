@@ -955,6 +955,27 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 			return fail("checksum-verification", fmt.Errorf("corrupted payload abort: %w", err))
 		}
 	}
+
+	// Audit 2.7/item 28: a checksum alone doesn't protect against a
+	// compromised mirror serving a tampered file alongside a tampered
+	// checksum of its own. A no-op for every current catalog entry (none
+	// has a SignatureURL/SigningKeyURL yet — see discovery/catalog.go's
+	// doc comment on those fields), but wired in for real for the day one
+	// does, with the same fail-hard-and-discard-the-file severity as a
+	// checksum mismatch above.
+	if req.SelectedEntry != nil && req.SelectedEntry.SignatureURL != "" {
+		onUpdate(StepUpdate{StepName: "verifying OpenPGP signature...", Done: false})
+		signer, sigErr := verifyEntrySignature(streamResult.DestPath, req.SelectedEntry)
+		if sigErr != nil {
+			if !strings.HasPrefix(streamResult.MirrorUsed, "local://") {
+				_ = os.Remove(streamResult.DestPath)
+			}
+			journal.Fail(dlStep, sigErr)
+			return fail("signature-verification", fmt.Errorf("unsigned or tampered payload abort: %w", sigErr))
+		}
+		onUpdate(StepUpdate{StepName: fmt.Sprintf("signature verified, signed by: %s", signer), Done: false})
+	}
+
 	journal.Commit(dlStep)
 	onUpdate(StepUpdate{StepName: "image-download", Done: true})
 

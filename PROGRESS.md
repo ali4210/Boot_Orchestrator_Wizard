@@ -1257,7 +1257,26 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       contains the cleanup command and parses as valid XML afterward. Verified failing
       before the fix (temporarily reverted just the manifest XML via `git stash`, confirmed
       `TestInjectAutounattend_PantherCleanupSurvivesSubstitution` fails) and passing after.
-- [ ] 28. Wire signature check into downloader — Not started
+- [x] 28. Wire signature check into downloader — Done (`PENDING_HASH`). Completes item
+      20's primitive: `discovery.Entry` gets two new optional fields, `SignatureURL` and
+      `SigningKeyURL` (both empty for every current catalog entry — inventing real values
+      would mean fabricating a trust relationship this tool cannot actually verify
+      out-of-band, same "cannot invent checksums" precedent as item 13). New
+      `engine.verifyEntrySignature(destPath, entry)` is a no-op (not an error) when either
+      field is empty; when both are set, fetches the signature and keyring over HTTP(S) and
+      verifies the already-downloaded file against them. Wired into `RunProvision`
+      (`engine/orchestrator.go`) immediately after checksum verification, with the same
+      fail-hard-and-discard-the-file severity: a failure removes the downloaded file,
+      fails the journal step, and aborts with `signature-verification` as the failed step
+      name — a mismatch here is exactly as serious as a checksum mismatch, not a soft
+      warning.
+      Tests (`engine/signature_test.go`, extending item 20's real-OpenPGP-keypair pattern):
+      nil entry / empty fields are a no-op; **a real signature served over a real
+      `httptest` HTTP server verifies successfully** (not an in-process mock — genuine HTTP
+      fetch + genuine OpenPGP check) and reports the signer's identity; a payload that
+      doesn't match what was actually signed (the compromised-mirror scenario this whole
+      feature exists to catch) fails; an unreachable/404 signature URL fails rather than
+      being silently treated as "nothing to check."
 - [ ] 29. README/CONTRIBUTING/CI; LICENSE — ask user first — Not started
 - [ ] 30. docs/ROADMAP.md — Not started
 

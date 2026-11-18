@@ -64,6 +64,20 @@ type Entry struct {
 	DownloadURL     string   `json:"download_url,omitempty"`
 	Mirrors         []string `json:"mirrors,omitempty"`
 	SHA256          string   `json:"sha256,omitempty"`
+
+	// SignatureURL/SigningKeyURL (audit 2.7/item 28) point at a detached
+	// OpenPGP signature (armored or binary) over the download and an
+	// ASCII-armored public keyring to verify it against, respectively.
+	// A SHA256 checksum alone doesn't protect against a compromised
+	// mirror serving a tampered file alongside a tampered checksum of
+	// its own, obtained from that same mirror — a signature made by the
+	// distro's own key, fetched independently, closes that gap. Both
+	// empty (the case for every current catalog entry — see item 20/28's
+	// notes in PROGRESS.md on why real values aren't invented here) means
+	// no signature check runs for that entry, exactly like SHA256 being
+	// empty today.
+	SignatureURL  string `json:"signature_url,omitempty"`
+	SigningKeyURL string `json:"signing_key_url,omitempty"`
 	ApproxSizeBytes uint64   `json:"approx_size_bytes,omitempty"`
 	RequiresLicense bool     `json:"requires_license,omitempty"`
 	MinDiskGB       int      `json:"min_disk_gb"`

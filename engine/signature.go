@@ -4,8 +4,13 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
+	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
+
+	"boot-orchestrator/discovery"
 )
 
 // VerifyDetachedSignature checks that signatureData is a valid OpenPGP
@@ -53,6 +58,59 @@ func VerifyDetachedSignature(signedContent io.Reader, signatureData []byte, armo
 		}
 	}
 	return fmt.Sprintf("key %X (no self-reported identity)", signer.PrimaryKey.Fingerprint), nil
+}
+
+// signatureFetchTimeout bounds each of the two HTTP fetches
+// verifyEntrySignature makes (signature, then keyring) — a var so a test
+// can shrink it instead of waiting out a real timeout against an
+// unreachable httptest server.
+var signatureFetchTimeout = 30 * time.Second
+
+// verifyEntrySignature is item 28's wiring of VerifyDetachedSignature
+// into the real download flow (engine/orchestrator.go, right after
+// checksum verification). A no-op — not an error — if entry is nil or
+// either URL is empty: exactly like an empty SHA256 today, no current
+// catalog entry has real values for these fields (inventing a
+// SignatureURL/SigningKeyURL would mean fabricating a trust relationship
+// this tool cannot actually verify out-of-band; see PROGRESS.md item 28).
+// When both ARE set, fetches the signature and keyring over HTTP(S) and
+// verifies the already-downloaded file at destPath against them,
+// returning the signer identity on success for the caller to log.
+func verifyEntrySignature(destPath string, entry *discovery.Entry) (signerIdentity string, err error) {
+	if entry == nil || entry.SignatureURL == "" || entry.SigningKeyURL == "" {
+		return "", nil
+	}
+
+	client := &http.Client{Timeout: signatureFetchTimeout}
+
+	sigData, err := fetchURL(client, entry.SignatureURL)
+	if err != nil {
+		return "", fmt.Errorf("fetching signature from %s: %w", entry.SignatureURL, err)
+	}
+	keyData, err := fetchURL(client, entry.SigningKeyURL)
+	if err != nil {
+		return "", fmt.Errorf("fetching signing key from %s: %w", entry.SigningKeyURL, err)
+	}
+
+	f, err := os.Open(destPath)
+	if err != nil {
+		return "", fmt.Errorf("opening downloaded payload %s for signature verification: %w", destPath, err)
+	}
+	defer f.Close()
+
+	return VerifyDetachedSignature(f, sigData, keyData)
+}
+
+func fetchURL(client *http.Client, url string) ([]byte, error) {
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
 }
 
 // looksArmored reports whether data appears to be ASCII-armored OpenPGP
