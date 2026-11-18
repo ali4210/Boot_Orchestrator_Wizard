@@ -906,7 +906,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
         were not touched.
 - [x] F17. Journal: tests must not touch real /var/lib or /var/tmp; test that every
       `journal.Begin` name is in `allowedStepNames`; document where the journal lives after
-      reboot into the USB environment (`PENDING_HASH`)
+      reboot into the USB environment (`7310c43`)
       - **Real bug found and fixed, wider than just this package's own tests:**
         `ui.NewModel()` unconditionally calls `safety.LoadJournal(safety.DefaultJournalPath())`
         on every construction (to pick up any unfinished session), and `DefaultJournalPath()`
