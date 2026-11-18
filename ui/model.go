@@ -73,6 +73,31 @@ func detectPayloadFamily(pathOrName string) discovery.Family {
 	}
 }
 
+// selectLocalPayload points the deploy flow at a local payload file path —
+// a staged payload, one picked via ScreenFilePicker, or one supplied
+// directly via --iso (follow-up F16) — building a synthetic
+// discovery.Entry for it exactly like the pre-existing staged-payload
+// branches of ScreenClientPanel, and advancing to
+// ScreenCustomBootModeSelect. Extracted so all three sources share one
+// implementation instead of drifting apart.
+func (m *Model) selectLocalPayload(path string, sizeBytes int64, versionLabel string) {
+	m.overridePayloadURL = path
+	fam := detectPayloadFamily(path)
+	m.selectedOS = &discovery.Entry{
+		Distro:          filepath.Base(path),
+		Version:         versionLabel,
+		Family:          fam,
+		Flavor:          "gui",
+		Arch:            "amd64",
+		DownloadURL:     path,
+		Mirrors:         []string{path},
+		ApproxSizeBytes: uint64(sizeBytes),
+		MinDiskGB:       25,
+	}
+	m.customBootCursor = 0
+	m.screen = ScreenCustomBootModeSelect
+}
+
 type categoryItem struct {
 	category discovery.Category
 	count    int
@@ -416,6 +441,20 @@ type Model struct {
 	pickerIsDirMode  bool
 	pickerShowAll    bool
 
+	// pickerForClientDeploy (follow-up F16) distinguishes "picking a local
+	// payload file to provision as THIS client" (ScreenClientPanel's
+	// "Deploy from Local Payload" option, when no staged payload was
+	// auto-detected) from the two other ScreenFilePicker launch sites,
+	// which pick a file to SERVE (seeder dashboard / SCP push). Before
+	// this field existed, ScreenFilePicker's selection handler only ever
+	// recognized those two server-role destinations — a file picked from
+	// the client-deploy launch site silently landed on
+	// ScreenSeederDashboard (the wrong screen, server role) instead of
+	// continuing the client deploy flow, so the "pick an ISO from this
+	// machine and deploy it" path never actually reached a
+	// ProvisionRequest.
+	pickerForClientDeploy bool
+
 	hasStagedPayload  bool
 	stagedPayloadSize int64
 	stagedPayloadPath string
@@ -494,7 +533,7 @@ type Model struct {
 	fatalErr error
 }
 
-func NewModel() Model {
+func NewModel(customISOPath string) Model {
 	cat, err := discovery.LoadEmbedded()
 
 	delegate := list.NewDefaultDelegate()
@@ -621,7 +660,7 @@ func NewModel() Model {
 	hv, _ := hypervisor.Detect()
 	isVM := hv.Kind != hypervisor.KindBareMetal
 
-	return Model{
+	m := Model{
 		screen:                   ScreenModeSelect,
 		isAdvancedMode:           false,
 		modeCursor:               0,
@@ -672,6 +711,26 @@ func NewModel() Model {
 		journal:                  jrn,
 		fatalErr:                 err,
 	}
+
+	// Follow-up F16: --iso was a dead CustomISOPath variable in main.go
+	// that nothing ever read — ui.NewModel() took no arguments at all, so
+	// no key sequence could ever cause it to reach a ProvisionRequest.
+	// Wire it the same way a direct --iso-path flows into headless mode's
+	// request: skip catalog/role selection entirely and land straight on
+	// the custom-boot-mode flow with this file as the payload. A path
+	// that doesn't exist or isn't a regular file is reported as a visible
+	// fatal error instead of being silently ignored.
+	if customISOPath != "" {
+		if fi, statErr := os.Stat(customISOPath); statErr != nil {
+			m.fatalErr = fmt.Errorf("--iso %q: %w", customISOPath, statErr)
+		} else if fi.IsDir() {
+			m.fatalErr = fmt.Errorf("--iso %q is a directory, not a file", customISOPath)
+		} else {
+			m.selectLocalPayload(customISOPath, fi.Size(), "Direct ISO Path (--iso)")
+		}
+	}
+
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
@@ -1251,25 +1310,12 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "2":
 			m.clientCursor = 1
 			if m.hasStagedPayload {
-				m.overridePayloadURL = m.stagedPayloadPath
-				fam := detectPayloadFamily(m.stagedPayloadPath)
-				m.selectedOS = &discovery.Entry{
-					Distro:          filepath.Base(m.stagedPayloadPath),
-					Version:         "Physical Scratch (/var/tmp)",
-					Family:          fam,
-					Flavor:          "gui",
-					Arch:            "amd64",
-					DownloadURL:     m.stagedPayloadPath,
-					Mirrors:         []string{m.stagedPayloadPath},
-					ApproxSizeBytes: uint64(m.stagedPayloadSize),
-					MinDiskGB:       25,
-				}
-				m.customBootCursor = 0
-				m.screen = ScreenCustomBootModeSelect
+				m.selectLocalPayload(m.stagedPayloadPath, m.stagedPayloadSize, "Physical Scratch (/var/tmp)")
 				return m, nil
 			}
 			m.screen = ScreenFilePicker
 			m.pickerForSCP = false
+			m.pickerForClientDeploy = true
 			m.pickerIsDirMode = false
 			m.pickerCurrentDir = "/var/tmp"
 			return m, loadDirCmd("/var/tmp", true)
@@ -1294,25 +1340,12 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(scanPeersCmd(), m.scanSpinner.Tick)
 			case 1:
 				if m.hasStagedPayload {
-					m.overridePayloadURL = m.stagedPayloadPath
-					fam := detectPayloadFamily(m.stagedPayloadPath)
-					m.selectedOS = &discovery.Entry{
-						Distro:          filepath.Base(m.stagedPayloadPath),
-						Version:         "Physical Scratch (/var/tmp)",
-						Family:          fam,
-						Flavor:          "gui",
-						Arch:            "amd64",
-						DownloadURL:     m.stagedPayloadPath,
-						Mirrors:         []string{m.stagedPayloadPath},
-						ApproxSizeBytes: uint64(m.stagedPayloadSize),
-						MinDiskGB:       25,
-					}
-					m.customBootCursor = 0
-					m.screen = ScreenCustomBootModeSelect
+					m.selectLocalPayload(m.stagedPayloadPath, m.stagedPayloadSize, "Physical Scratch (/var/tmp)")
 					return m, nil
 				}
 				m.screen = ScreenFilePicker
 				m.pickerForSCP = false
+				m.pickerForClientDeploy = true
 				m.pickerIsDirMode = false
 				m.pickerCurrentDir = "/var/tmp"
 				return m, loadDirCmd("/var/tmp", true)
@@ -1402,6 +1435,7 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.screen = ScreenFilePicker
 				m.pickerForSCP = false
+				m.pickerForClientDeploy = false
 				m.pickerIsDirMode = false
 				m.pickerCurrentDir = engine.GetRealUserHome()
 				return m, loadDirCmd(m.pickerCurrentDir, m.pickerShowAll)
@@ -1413,6 +1447,7 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.screen = ScreenFilePicker
 				m.pickerForSCP = false
+				m.pickerForClientDeploy = false
 				m.pickerIsDirMode = true
 				m.pickerCurrentDir = engine.GetRealUserHome()
 				return m, loadDirCmd(m.pickerCurrentDir, m.pickerShowAll)
@@ -1468,6 +1503,7 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.screen = ScreenFilePicker
 				m.pickerForSCP = true
+				m.pickerForClientDeploy = false
 				m.pickerIsDirMode = false
 				m.pickerCurrentDir = engine.GetRealUserHome()
 				return m, loadDirCmd(m.pickerCurrentDir, m.pickerShowAll)
@@ -1516,9 +1552,12 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case ScreenFilePicker:
 		switch keyStr {
 		case "esc":
-			if m.pickerForSCP {
+			switch {
+			case m.pickerForClientDeploy:
+				m.screen = ScreenClientPanel
+			case m.pickerForSCP:
 				m.screen = ScreenSCPPush
-			} else {
+			default:
 				m.screen = ScreenSeederDashboard
 			}
 			return m, nil
@@ -1541,10 +1580,25 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if item.IsDir {
 				return m, loadDirCmd(item.Path, m.pickerShowAll)
 			}
-			if m.pickerForSCP {
+			switch {
+			case m.pickerForClientDeploy:
+				// Follow-up F16: before this branch existed, picking a file
+				// here (launched from ScreenClientPanel's "Deploy from
+				// Local Payload" option) fell through to the "else" below
+				// and landed on ScreenSeederDashboard — the wrong screen
+				// entirely (server role) — so the picked file never reached
+				// a ProvisionRequest. Route it through the same
+				// selectLocalPayload path the staged-payload shortcut uses
+				// instead.
+				sizeBytes := int64(0)
+				if fi, statErr := os.Stat(item.Path); statErr == nil {
+					sizeBytes = fi.Size()
+				}
+				m.selectLocalPayload(item.Path, sizeBytes, "Local File (Picked)")
+			case m.pickerForSCP:
 				m.scpPayloadInput.SetValue(item.Path)
 				m.screen = ScreenSCPPush
-			} else {
+			default:
 				m.seederFilePath = item.Path
 				m.seederFileInput.SetValue(item.Path)
 				m.screen = ScreenSeederDashboard

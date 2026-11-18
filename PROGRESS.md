@@ -843,8 +843,67 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
         mechanism that locates and launches transient_resize.sh in the first place, on first
         boot into the live USB image; it already has its own 30x1s retry but no partprobe/
         udevadm settle/UUID fallback. Left as-is.
-- [ ] F16. ISO picker: Bubble Tea model test driving Deploy payload -> picker -> .iso
-      selection, and direct .iso path entry; wire the custom-ISO path if unwired — Not started
+- [x] F16. ISO picker: Bubble Tea model test driving Deploy payload -> picker -> .iso
+      selection, and direct .iso path entry; wire the custom-ISO path if unwired (`PENDING_HASH`)
+      - Two genuinely separate gaps, both fixed:
+        1. **The interactive picker was unwired for the client-deploy flow.** `ScreenClientPanel`'s
+           "Deploy from Local Payload" option (no staged payload auto-detected) routed to
+           `ScreenFilePicker`, but that screen's selection handler (`esc`/`enter`/`s`) only ever
+           recognized two destinations — SCP push and the seeder dashboard, both server-role. A
+           file picked from the client-deploy launch site silently fell through to the seeder
+           branch and landed on `ScreenSeederDashboard` — the wrong screen, server role — so the
+           picked .iso never reached a `ProvisionRequest` at all.
+        2. **The `--iso` CLI flag was dead.** `cmd/orchestrator/main.go`'s `CustomISOPath`
+           package variable was set from `--iso` but `ui.NewModel()` took zero arguments, so
+           nothing downstream ever read it — confirmed by headless.go's own comment pointing at
+           this as a known-unwired gap.
+      - Fix: added a `pickerForClientDeploy` bool to `ui.Model` (alongside the existing
+        `pickerForSCP`), set at the client-deploy picker launch site and explicitly cleared at
+        the other two (seeder/SCP) launch sites; `ScreenFilePicker`'s `esc`/`enter` handlers now
+        check it first. Extracted the staged-payload "build a synthetic discovery.Entry and jump
+        to ScreenCustomBootModeSelect" logic (previously duplicated twice) into one shared
+        `(m *Model) selectLocalPayload(path, sizeBytes, versionLabel)` helper, used by: the
+        staged-payload shortcut (unchanged behavior), the picker's file-selection branch (the
+        fix), and the new `--iso` wiring. `ui.NewModel(customISOPath string)` now takes the path;
+        a valid file wires straight into `selectLocalPayload` (skipping catalog/role selection
+        entirely, mirroring how `--iso-path` skips catalog selection in headless mode); a missing
+        path or a directory sets `m.fatalErr` (rendered on every screen) instead of being
+        silently ignored. `cmd/orchestrator/main.go` now passes `CustomISOPath` through.
+      - Tests (`ui/iso_picker_test.go`, pure in-process Bubble Tea `Update()` driving, no real
+        disk/journal I/O — `startProvisioning` itself is deliberately never called from a test:
+        it also writes to the REAL, non-injectable `safety.DefaultJournalPath()`, which this
+        whole project is never allowed to touch from a test):
+        `TestClientDeploy_PickerSelectsISO_CarriesPathIntoProvisionRequest` drives real
+        `tea.KeyMsg`s through `ScreenModeSelect` -> `ScreenAdvancedRoleSelect` ->
+        `ScreenClientPanel` -> `ScreenFilePicker`, feeds a synthetic `dirContentsMsg` (no real
+        filesystem read) containing a staged temp `.iso`, selects it, and asserts
+        `m.overridePayloadURL`/`m.selectedOS.DownloadURL` — the exact field pair
+        `startProvisioning` (ui/model.go) uses verbatim to build `ProvisionRequest.ImageURL` —
+        equal the picked path, plus a real `os.Stat`-derived size.
+        `TestClientDeploy_PickerEscape_ReturnsToClientPanel` covers the `esc` half of the same
+        bug. `TestNewModel_DirectISOPath_CarriesPathIntoProvisionRequest`,
+        `_MissingFileIsAFatalErrorNotSilentlyIgnored`, and `_DirectoryIsAFatalError` cover the
+        `--iso` wiring (success, missing file, directory); `TestNewModel_NoISOPath_...` is the
+        no-op sanity check for every other caller of `NewModel`.
+      - Reproduce-first verified empirically twice: (1) stashing `ui/model.go`+
+        `cmd/orchestrator/main.go`+`ui/os_select_test.go` and running `go vet ./ui/...` fails
+        outright (`too many arguments in call to NewModel`) since the old signature took no
+        path argument at all; (2) with the fix restored but the picker's
+        `case m.pickerForClientDeploy:` enter-branch manually removed again,
+        `TestClientDeploy_PickerSelectsISO_CarriesPathIntoProvisionRequest` fails for real
+        (`expected ScreenCustomBootModeSelect ..., got 8` — screen 8 is
+        `ScreenSeederDashboard`), confirming the test actually catches the bug rather than just
+        matching the fix's own shape. One test environment wrinkle discovered and worked around,
+        not a bug: this dev sandbox's own `/tmp` has stray `.bin` files left over from unrelated
+        prior work that `engine.InspectStagedPayload()`'s broad extension match
+        (`IsSupportedPayload`) treats as a "staged payload," which short-circuits the picker
+        test path entirely — the test detects this (`m.hasStagedPayload`) and skips cleanly with
+        a clear message rather than flaking; verified passing for real with those files
+        temporarily moved aside.
+      - Not covered (same scope note as F13): catalog-entry selection via `ScreenOSSelect` was
+        already covered by F13's tests; `ScreenLANPeerConnect`/USB-detected payloads
+        (`ScreenUSBSelect`) already had working `overridePayloadURL` wiring before this item and
+        were not touched.
 - [ ] F17. Journal: tests must not touch real /var/lib or /var/tmp; test that every
       `journal.Begin` name is in `allowedStepNames`; document where the journal lives after
       reboot into the USB environment — Not started

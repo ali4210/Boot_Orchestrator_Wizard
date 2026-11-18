@@ -38,7 +38,7 @@ func sendKey(t *testing.T, m Model, key string) Model {
 // no SHA256 checksum must route through ScreenUnverifiedDownloadConfirm
 // instead of proceeding straight into disk/USB selection.
 func TestOSSelect_UnverifiedChecksumEntry_RoutesThroughConfirmScreen(t *testing.T) {
-	m := NewModel()
+	m := NewModel("")
 	m.screen = ScreenOSSelect
 	m.isAdvancedMode = false
 	m.osList.SetItems([]list.Item{
@@ -58,7 +58,7 @@ func TestOSSelect_UnverifiedChecksumEntry_RoutesThroughConfirmScreen(t *testing.
 // TestOSSelect_VerifiedChecksumEntry_SkipsConfirmScreen proves an entry
 // that DOES have a checksum proceeds directly, with no extra prompt.
 func TestOSSelect_VerifiedChecksumEntry_SkipsConfirmScreen(t *testing.T) {
-	m := NewModel()
+	m := NewModel("")
 	m.screen = ScreenOSSelect
 	m.isAdvancedMode = false
 	m.osList.SetItems([]list.Item{
@@ -79,7 +79,7 @@ func TestOSSelect_VerifiedChecksumEntry_SkipsConfirmScreen(t *testing.T) {
 // ("n"/"esc") goes back to OS selection and clears the pending selection,
 // rather than leaving a half-confirmed state the user could stumble past.
 func TestUnverifiedDownloadConfirm_DeclineReturnsToOSSelect(t *testing.T) {
-	m := NewModel()
+	m := NewModel("")
 	m.screen = ScreenUnverifiedDownloadConfirm
 	entry := discovery.Entry{ID: "no-checksum", Distro: "TestOS"}
 	m.selectedOS = &entry
@@ -101,7 +101,7 @@ func TestUnverifiedDownloadConfirm_DeclineReturnsToOSSelect(t *testing.T) {
 // in Update() is what eventually moves the screen on, matching the
 // pre-existing behavior this was refactored from).
 func TestUnverifiedDownloadConfirm_AcceptProceeds(t *testing.T) {
-	m := NewModel()
+	m := NewModel("")
 	m.screen = ScreenUnverifiedDownloadConfirm
 	m.isAdvancedMode = false
 	entry := discovery.Entry{ID: "no-checksum", Distro: "TestOS"}
@@ -121,7 +121,7 @@ func TestUnverifiedDownloadConfirm_AcceptProceeds(t *testing.T) {
 // other branch of proceedAfterOSSelected, where confirming DOES change
 // m.screen (to ScreenUSBTargetSelect).
 func TestUnverifiedDownloadConfirm_AcceptProceeds_AdvancedMode(t *testing.T) {
-	m := NewModel()
+	m := NewModel("")
 	m.screen = ScreenUnverifiedDownloadConfirm
 	m.isAdvancedMode = true
 	entry := discovery.Entry{ID: "no-checksum", Distro: "TestOS"}
@@ -137,7 +137,7 @@ func TestUnverifiedDownloadConfirm_AcceptProceeds_AdvancedMode(t *testing.T) {
 // TestViewUnverifiedDownloadConfirm_RendersWithoutPanic is a basic render
 // smoke test for the new screen's View() path.
 func TestViewUnverifiedDownloadConfirm_RendersWithoutPanic(t *testing.T) {
-	m := NewModel()
+	m := NewModel("")
 	m.screen = ScreenUnverifiedDownloadConfirm
 	e := discovery.Entry{Distro: "TestOS", Version: "1.0", DownloadURL: "https://example.test/x.iso"}
 	m.selectedOS = &e

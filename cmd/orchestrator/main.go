@@ -108,7 +108,7 @@ func main() {
 
 	// Initialize TUI with Alternate Screen buffer and Mouse Cell Motion support
 	p := tea.NewProgram(
-		ui.NewModel(),
+		ui.NewModel(CustomISOPath),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
