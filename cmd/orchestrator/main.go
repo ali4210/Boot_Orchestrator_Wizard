@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"boot-orchestrator/preflight"
 	"boot-orchestrator/ui"
 )
 
@@ -56,6 +57,27 @@ func checkDryRun(requested bool) (refuse bool, message string) {
 	return true, dryRunRefusalMessage
 }
 
+// runPreflightGate decides whether to refuse to continue given an already-
+// run preflight.Report, separately from main() so this decision is
+// unit-testable without needing real hypervisor/firmware/disk detection
+// (audit 2.15). message is non-empty whenever there was anything to tell
+// the user, whether or not skip ends up overriding refuse.
+func runPreflightGate(report preflight.Report, skip bool) (refuse bool, message string) {
+	if len(report.Blocking) == 0 {
+		return false, ""
+	}
+	msg := "Pre-flight check found blocking issue(s):\n"
+	for _, b := range report.Blocking {
+		msg += "  - " + b + "\n"
+	}
+	if skip {
+		msg += "Continuing anyway because --skip-preflight was passed.\n"
+		return false, msg
+	}
+	msg += "Refusing to start. Pass --skip-preflight to continue anyway (not recommended).\n"
+	return true, msg
+}
+
 func main() {
 	isoFlag := flag.String("iso", "", "Direct local path to an ISO or raw disk image")
 	dryRunFlag := flag.Bool("dry-run", false, "Refuse to start (see --help); full dry-run simulation is not implemented yet")
@@ -70,6 +92,8 @@ func main() {
 	allowUnverifiedFlag := flag.Bool("allow-unverified", false, "Headless: provision a payload with no checksum to verify the download against (every --iso-path, and some --os-id catalog entries — see docs/MANIFEST_AUDIT.md); pass only after independently confirming the payload's integrity")
 	revertFlag := flag.Bool("revert", false, "Run the dual-boot-to-single-boot revert non-interactively instead of launching the TUI; requires --yes")
 	keepSliceFlag := flag.Bool("keep-slice", false, "--revert: reformat the added partition as a clean staging slice instead of deleting it and growing the host partition back")
+	skipPreflightFlag := flag.Bool("skip-preflight", false, "Continue even if the pre-flight check (disk headroom, catalog load) finds a blocking issue; not recommended")
+	preflightTargetFlag := flag.String("preflight-target-path", ".", "Path to check disk headroom against during the pre-flight check")
 	flag.Parse()
 
 	if refuse, message := checkDryRun(*dryRunFlag); refuse {
@@ -83,6 +107,30 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+
+	// Audit 2.15: the pre-flight checks (hypervisor, firmware, disk
+	// headroom, catalog load) used to live only in cmd/env-check, a
+	// standalone diagnostic that nothing ever invoked — a genuinely
+	// useful check that protected zero actual users. Now runs before
+	// either real entry point that's about to provision something
+	// (headless or the TUI) gets going. --revert and --dry-run already
+	// returned above by this point if requested, and don't need this
+	// check anyway (revert doesn't download/write a new OS; --dry-run
+	// exits before doing anything regardless).
+	{
+		report, pfErr := preflight.Run(*preflightTargetFlag)
+		if pfErr != nil {
+			fmt.Fprintf(os.Stderr, "pre-flight check failed to run: %v\n", pfErr)
+			os.Exit(1)
+		}
+		refuse, message := runPreflightGate(report, *skipPreflightFlag)
+		if message != "" {
+			fmt.Fprint(os.Stderr, message)
+		}
+		if refuse {
+			os.Exit(1)
+		}
 	}
 
 	if *headlessFlag {

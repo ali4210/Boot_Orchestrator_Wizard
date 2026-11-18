@@ -1097,7 +1097,38 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       (`discovery/audit_test.go`'s `TestEmbeddedCatalog_DoesNotContainWindowsXP`): asserts no
       catalog entry has this ID or distro name; verified failing by temporarily re-adding a
       synthetic XP entry and re-running, then restored.
-- [ ] 23. env-check opt-in + pre-flight gate — Not started
+- [x] 23. env-check opt-in + pre-flight gate — Done (`PENDING_HASH`). Audit 2.14: `cmd/env-check`
+      made an unconditional live network call to `archive.ubuntu.com` as part of what's
+      otherwise a local, offline-safe diagnostic — broke airgapped use, surprising for a
+      "diagnostic" tool. Audit 2.15: the checks (hypervisor/firmware/disk-headroom/catalog)
+      were real and working but nothing ever invoked `cmd/env-check` — a genuinely useful
+      pre-flight check protecting zero actual users.
+      - Extracted the composable checks into a new `preflight` package (`preflight.Run`):
+        hypervisor detection, firmware mode, disk/power headroom (against a flat 25GB
+        baseline margin, deliberately not tied to any specific OS size since none is chosen
+        yet at this point — the real, size-specific check still runs later via
+        `engine.PreflightStorageSafetyCheck` and the download-time free-space check), and
+        catalog load sanity. Separate `preflight.RunLiveSuiteCheck()` wraps the live
+        Ubuntu-suite scrape — never called by `Run` itself, only by `cmd/env-check`'s new
+        `--live-scrape` flag (default off, satisfying 2.14).
+      - `cmd/env-check` rewritten to call `preflight.Run` + the opt-in live check, same
+        human-readable output as before, now also prints Warnings/Blocking sections and
+        exits nonzero on a blocking issue. Also fixed a pre-existing bug found while
+        touching this file: it hardcoded `safety.CheckGuards("/home/claude", ...)` — a
+        leftover developer-machine path that made the disk-headroom check meaningless on
+        any other machine; now takes `--target-path` (default `.`).
+      - `cmd/orchestrator/main.go` now calls `preflight.Run` + a new `runPreflightGate`
+        helper before either real entry point that provisions something (headless or the
+        TUI) — not before `--revert`/`--dry-run`, which don't need it. A blocking issue
+        refuses to start by default; new `--skip-preflight` overrides (still prints what it
+        overrode, not silently). This is the actual 2.15 fix: the exact same checks that
+        used to sit inert in `cmd/env-check` now gate the real entry points a user actually
+        runs.
+      - Tests: `preflight/preflight_test.go`'s `TestRun_SucceedsAgainstARealTempDir` runs
+        the real function (real hypervisor/firmware/disk detection, no mocking) against a
+        safe `t.TempDir()`. `cmd/orchestrator/preflight_test.go`: `runPreflightGate`'s three
+        real decision paths — no blocking issue (no-op), a blocking issue refuses by
+        default, `--skip-preflight` overrides the refusal but still surfaces the reason.
 - [ ] 24. Windows launcher dedup + orphaned scripts moved — Not started
 - [ ] 25. Silent-error audit (`|| true`, `2>/dev/null`, `_ = exec.Command`) — Not started
 - [ ] 26. Generated-script check (bash -n, shellcheck, no fmt verbs/saleem) — Not started
