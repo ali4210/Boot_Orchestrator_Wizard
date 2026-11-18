@@ -1184,7 +1184,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       regressing currently-working paths, out of scope); macOS/Windows-specific files
       (can't verify a fix for real from this Linux session).
 - [x] 26. Generated-script check (bash -n, shellcheck, no fmt verbs/saleem) — Done
-      (`PENDING_HASH`). New `engine/generated_script_check_test.go`'s `checkGeneratedScript`
+      (`b203503`). New `engine/generated_script_check_test.go`'s `checkGeneratedScript`
       runs, against every script-rendering function this engine has
       (`renderAccountProvisioningScript`, `renderAutonomousInstallerScript`, and the new
       `renderCalamaresCleanupScript` below): `bash -n` (syntax only, never executed),
