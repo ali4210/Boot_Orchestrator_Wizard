@@ -1040,7 +1040,26 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
 **CHECKPOINT 3:** not reached
 
 ## Phase 4: Remaining audit items + open-source readiness
-- [ ] 20. GPG/signature verification — Not started
+- [x] 20. GPG/signature verification — Done (`PENDING_HASH`). Audit 2.7: a SHA256 checksum
+      alone doesn't protect against a compromised mirror serving a tampered file alongside a
+      tampered checksum of its own. New `engine/signature.go`'s `VerifyDetachedSignature`
+      verifies an OpenPGP detached signature (armored `.asc` or raw binary `.sig`/`.gpg` —
+      format auto-detected, since distros aren't consistent about which they publish)
+      against a provided ASCII-armored keyring. Uses `github.com/ProtonMail/go-crypto/openpgp`
+      — deliberately NOT the standard `golang.org/x/crypto/openpgp` already in this module's
+      dependency tree, since upstream has marked that package deprecated and "unsafe by
+      design" and names this fork as the maintained replacement; using the deprecated one
+      for a new security control would be the wrong call. This item is the verification
+      *primitive* only — wiring it into the real download flow is item 28 below (split
+      because no catalog entry currently has a signature URL/key to verify against; see
+      that item for why, mirroring item 13's "cannot invent checksums" precedent for keys).
+      Tests (`engine/signature_test.go`, real OpenPGP operations — a real keypair is
+      generated per test, not mocked): valid armored signature verifies and reports the
+      signer's identity; valid binary signature verifies; **the actual security property**
+      — a signature valid for the original content fails against tampered content; a
+      signature from a key not in the keyring (the "attacker signs their own tampered
+      payload" scenario) is rejected; corrupt signature bytes and a corrupt keyring both
+      fail cleanly rather than panicking or silently passing.
 - [ ] 21. Image-deploy rollback handler or documented limitation — Not started
 - [ ] 22. Windows XP entry removed/flagged — Not started
 - [ ] 23. env-check opt-in + pre-flight gate — Not started
