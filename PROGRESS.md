@@ -1338,7 +1338,7 @@ found and fixed two real, previously-undetected Windows/macOS build breakages �
 item's entry above). Nothing pushed; branch `test/os-matrix` (Phase 3) remains unmerged.
 
 ## Phase 5: Real dry-run (audit 2.4, full)
-- [x] 31. docs/dryrun-inventory.md — Done (`PENDING_HASH`). Real counts (re-run the
+- [x] 31. docs/dryrun-inventory.md — Done (`6392277`). Real counts (re-run the
       `grep`s in the doc to regenerate, not hand-estimated): **367** raw `exec.Command` call
       sites and **149** filesystem-write call sites across `engine`/`ui` (the original
       audit's "~350"/"~140" estimates, a bit higher now from this remediation effort's own
