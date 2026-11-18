@@ -1323,7 +1323,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       and `GOOS=darwin GOARCH=arm64 go build ./...` locally (clean exit) — not just
       reasoned about — plus the full native `go build && go vet && go test ./...` gate
       staying green throughout.
-- [x] 30. docs/ROADMAP.md — Done (`PENDING_HASH`). What's done (pointing at `PROGRESS.md`/
+- [x] 30. docs/ROADMAP.md — Done (`d77508f`). What's done (pointing at `PROGRESS.md`/
       `AUDIT_REPORT.md`/`OS_STATUS_MATRIX.md` for detail rather than duplicating it), what's
       next (Phase 5 real dry-run, Phase 6 ARM64, merging `test/os-matrix`, the final
       deliverables), and the known structural gaps worth a deliberate decision rather than
