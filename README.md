@@ -46,7 +46,7 @@ discovery mode.
   margin, and power status (AC or >50% battery) before allowing risky work.
 - `discovery/catalog.go` — 39-entry embedded catalog spanning the full
   blueprint spectrum (Ubuntu/Debian/Kali/Parrot/RHEL/CentOS Stream/
-  Rocky/Alma/Arch/Alpine, and Windows XP–11 + Server 2003–2025), with
+  Rocky/Alma/Arch/Alpine, and Windows 10–11 + Server 2022), with
   family/flavor/arch filtering and fuzzy search.
 - `discovery/scraper.go` — **live** scraper against `archive.ubuntu.com`
   that enumerates currently-published Ubuntu suite codenames in real time,

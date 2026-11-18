@@ -1,6 +1,9 @@
 package discovery
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestAuditEntry_FlagsEachMissingProperty(t *testing.T) {
 	cases := []struct {
@@ -71,7 +74,7 @@ func TestCatalog_Audit_FindsOnlyBrokenEntries(t *testing.T) {
 // docs/MANIFEST_AUDIT.md for the full list and why this isn't fixed here:
 // a real checksum can only come from actually downloading each,
 // multi-gigabyte, OS image, which this session cannot safely or
-// practically do for 29 entries). This test exists so the real catalog's
+// practically do for 28 entries). This test exists so the real catalog's
 // audit state is visible in test output (`go test -v`) without silently
 // failing the suite over a data-completeness gap that isn't a code bug.
 func TestRealEmbeddedCatalog_AuditReport(t *testing.T) {
@@ -83,5 +86,27 @@ func TestRealEmbeddedCatalog_AuditReport(t *testing.T) {
 	t.Logf("catalog audit: %d/%d entries broken", len(broken), len(cat.Entries))
 	for _, b := range broken {
 		t.Logf("  BROKEN %s (%s): %s", b.Entry.ID, b.Entry.Distro, b.BrokenReason)
+	}
+}
+
+// TestEmbeddedCatalog_DoesNotContainWindowsXP is the regression test for
+// audit item 2.13: Windows XP predates WIM-based installation, but its
+// manifest entry routed through the same deployWindowsPayload/WIM path as
+// Windows 10/11, which searches for sources/install.wim or install.esd —
+// neither of which exists on XP media (it uses a pre-WIM, i386/txtsetup.sif
+// layout). Selecting it would always fail, late, after a ~600MB download,
+// with a confusing "cannot locate install.wim or install.esd" error.
+// Building a real XP installation path was judged low-value by the audit
+// (XP long EOL, no security updates); the entry was removed from
+// discovery/manifests/windows.json rather than left to fail at runtime.
+func TestEmbeddedCatalog_DoesNotContainWindowsXP(t *testing.T) {
+	cat, err := LoadEmbedded()
+	if err != nil {
+		t.Fatalf("LoadEmbedded: %v", err)
+	}
+	for _, e := range cat.Entries {
+		if e.ID == "winxp-pro-i386" || strings.Contains(strings.ToLower(e.Distro), "windows xp") {
+			t.Fatalf("expected no Windows XP entry in the catalog (audit 2.13: no viable WIM-based install path), found %+v", e)
+		}
 	}
 }

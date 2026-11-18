@@ -8,8 +8,12 @@ the current manifests.
 
 ## Finding
 
-**29 of 29 catalog entries (100%) are missing a SHA256 checksum.** All 29
+**28 of 28 catalog entries (100%) are missing a SHA256 checksum.** All 28
 do have at least one download URL. No entry is missing both.
+
+(Was 29 of 29 as of the previous audit pass — `winxp-pro-i386` has since
+been removed from the catalog entirely; see audit item 2.13 / Phase 4
+item 22 in `PROGRESS.md`, unrelated to checksums.)
 
 This is a systemic, severe gap: with no checksum, nothing in the download
 pipeline (see `engine/streamer.go` and its `TestStreamDownload_*` tests)
@@ -23,7 +27,6 @@ unnoticed until the provisioning step fails later, deep in the pipeline.
 | win11-workstation-amd64 | Windows 11 Workstation (Pro/Enterprise) | SHA256 |
 | win10-workstation-amd64 | Windows 10 Workstation (Pro/Enterprise) | SHA256 |
 | winsrv2022-server-amd64 | Windows Server | SHA256 |
-| winxp-pro-i386 | Windows XP Professional | SHA256 |
 | kali-gui-amd64 | Kali Linux | SHA256 |
 | kali-netinst-amd64 | Kali Linux | SHA256 |
 | parrot-security-gui-amd64 | Parrot Security Edition (MATE) | SHA256 |
@@ -57,7 +60,7 @@ distro's own published checksum file (preferred — most Linux distros
 publish one, e.g. `SHA256SUMS`), or computing it from an actual full
 download of the image. This session:
 
-- Cannot safely download 29 separate, multi-gigabyte OS images to compute
+- Cannot safely download 28 separate, multi-gigabyte OS images to compute
   checksums directly (bandwidth, time, and this task's own rule against
   downloading full ISOs outside a controlled, scheduled CI job).
 - Does not have a mechanism to verify a checksum pasted from an external
@@ -87,7 +90,7 @@ the real, intended source.
 
 ## Not done in this change (explicitly out of scope here)
 
-- Backfilling the actual 29 checksum values.
+- Backfilling the actual 28 checksum values.
 - UI-level visual flagging of broken entries in the TUI catalog browser
   (`ui/model.go`'s `GetEntriesByCategory`-driven selection list). The
   detection function above is ready to be wired in; the UI change itself

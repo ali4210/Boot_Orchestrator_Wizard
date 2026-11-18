@@ -1078,7 +1078,25 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       **the real regression** — `journal.RollbackAll` against a journal whose only step is a
       failed `"image-deploy"` now completes with zero errors (verified failing with the exact
       pre-fix message by temporarily removing the registration and re-running, then restored).
-- [ ] 22. Windows XP entry removed/flagged — Not started
+- [x] 22. Windows XP entry removed/flagged — Done (`PENDING_HASH`). Audit 2.13: Windows XP
+      predates WIM-based installation, but its manifest entry (`winxp-pro-i386`) routed
+      through the exact same `deployWindowsPayload` path as Windows 10/11, which
+      unconditionally searches for `sources/install.wim`/`install.esd` — neither exists on
+      XP media (pre-WIM, `i386`/`txtsetup.sif` layout). The existing `eol: true` flag was
+      purely decorative: confirmed by grep that `Catalog.Filter`'s EOL-exclusion logic is
+      never called by the TUI (`ui/model.go` iterates `ListCategories`/`GetEntriesByCategory`
+      directly) or by headless mode — only the already-disconnected `cmd/env-check` (itself
+      audit items 2.14/2.15, see item 23) calls `Filter` at all. So the entry was still fully
+      selectable and would always fail late, after a ~600MB download, with a confusing
+      "cannot locate install.wim or install.esd" error. Per the audit's own fixability
+      note ("not fixable without a wholly different pre-WIM installation path — low value to
+      build"), removed the entry from `discovery/manifests/windows.json` entirely rather than
+      leaving it to fail at runtime. Updated `docs/MANIFEST_AUDIT.md` (28/28 now, was 29/29;
+      re-ran `TestRealEmbeddedCatalog_AuditReport` for real to confirm the new count rather
+      than hand-computing it) and `README.md`'s catalog description. Test
+      (`discovery/audit_test.go`'s `TestEmbeddedCatalog_DoesNotContainWindowsXP`): asserts no
+      catalog entry has this ID or distro name; verified failing by temporarily re-adding a
+      synthetic XP entry and re-running, then restored.
 - [ ] 23. env-check opt-in + pre-flight gate — Not started
 - [ ] 24. Windows launcher dedup + orphaned scripts moved — Not started
 - [ ] 25. Silent-error audit (`|| true`, `2>/dev/null`, `_ = exec.Command`) — Not started

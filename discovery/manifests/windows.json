@@ -46,22 +46,5 @@
       "https://software-static.download.prss.microsoft.com/sg/download/888969d5-f34g-4e03-ac9d-1f9786c66749/SERVER_EVAL_x64FRE_en-us.iso"
     ],
     "notes": "Official Microsoft permanent evaluation server media."
-  },
-  {
-    "id": "winxp-pro-i386",
-    "category": "Windows Family",
-    "family": "windows",
-    "distro": "Windows XP Professional",
-    "version": "SP3 Original MSDN",
-    "flavor": "gui",
-    "arch": "i386",
-    "min_disk_gb": 4,
-    "approx_size_bytes": 618659840,
-    "requires_license": true,
-    "eol": true,
-    "mirrors": [
-      "https://archive.org/download/WinXPProSP3x86/en_windows_xp_professional_with_service_pack_3_x86_cd_vl_x14-73974.iso"
-    ],
-    "notes": "Legacy i386 target for testing, vintage hardware, and virtualization."
   }
 ]
