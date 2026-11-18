@@ -1416,9 +1416,38 @@ item's entry above). Nothing pushed; branch `test/os-matrix` (Phase 3) remains u
       failed too. Both reverted via `git checkout` after confirming the failure, then
       re-confirmed passing clean.
 - [ ] 33. Guard test + allowlist — Not started
-- [ ] 34. Real --dry-run implementation — Not started
+- [x] 34. Real --dry-run implementation — Done (`PENDING_HASH`), **and the honest
+      conclusion is that a full, real --dry-run is not safe to offer yet** — this is the
+      deliverable, not a placeholder for one. Per the scope agreed before starting Phase 5,
+      a real dry-run was only ever going to be attempted if coverage was complete enough to
+      be non-misleading; it isn't, and there's a sharper reason why than "not enough call
+      sites migrated":
+      - `RunProvision`'s real call sites **interleave** `Runner`/`FS`-routed operations with
+        hundreds of raw, uncovered ones **inside the same functions** (partition, mount,
+        bootloader, USB, backup/revert, WIM/BCD). Flipping `SetDryRun(true)` and running
+        that real flow would intercept only part of what each function does and let the
+        rest execute for real — actively worse than refusing, since it would look like
+        protection while still writing to the real disk partway through.
+      - Item 32 already surfaced a second, independent limitation: even a *fully*
+        intercepted function can't always honestly claim "success" in dry-run mode, if its
+        own correctness check depends on a real side effect the simulation never produced
+        (`assertDefaultCredentials` correctly *fails* in dry-run mode — see that item).
+        Fabricating a success there would mean inventing a result dry-run has no way to
+        actually know, which is exactly the kind of invented-data shortcut this whole
+        engagement has refused to take anywhere else (checksums, signing keys, ...).
+      `cmd/orchestrator/main.go`'s `dryRunRefusalMessage` is rewritten to say this honestly
+      — it no longer claims "no real dry-run mode exists" (false: `engine.Runner`/
+      `engine.FS`/`SetDryRun` are real and tested), but explains precisely why running the
+      real flow under them still isn't safe, and points at `docs/dryrun-inventory.md`/
+      `docs/ROADMAP.md` for what's left. `--dry-run` still refuses to start; verified for
+      real via `go run ./cmd/orchestrator --dry-run` (exit 1, prints the new message).
+      `cmd/orchestrator/main_test.go`'s `TestCheckDryRun_RefusesClosed` updated to check
+      for the new message's actual content instead of the old one's exact wording.
 
-**CHECKPOINT 5:** not reached
+**CHECKPOINT 5:** Reached. Items 31-34 done: a real inventory, real interception
+infrastructure proven against one real batch, a ratchet stopping new debt, and an honest
+(not faked) conclusion about why the full flag stays refused. `go build ./... && go vet
+./... && go test ./...` clean throughout.
 
 ## Phase 6: Architecture support (audit 2.6)
 - [ ] 35. Arch table (amd64/arm64) — Not started

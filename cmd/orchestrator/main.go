@@ -14,35 +14,48 @@ import (
 // CustomISOPath holds any direct image path provided via the command line
 var CustomISOPath string
 
-// dryRunRefusalMessage is printed by --dry-run instead of a simulation.
+// dryRunRefusalMessage is printed by --dry-run instead of running the real
+// provisioning flow in a simulated mode.
 //
-// There is no real dry-run/simulation mode implemented: a repo-wide audit
-// (2026) found roughly 350 direct exec.Command calls and 140 direct
-// os.WriteFile/Symlink/Remove/RemoveAll/MkdirAll calls across ~28 files in
-// engine/ and ui/ (partition, bootloader, USB, backup/revert, WIM/BCD,
-// firmware/UEFI logic) that bypass the one Runner interception point
-// (engine.Runner) added so far. Intercepting all of them so a dry run could
-// safely log every would-be command/write instead of executing it is a
-// large, repo-wide refactor — not something to half-do. Per the audit's own
-// finding: a dry-run that only covers some of several hundred write paths
-// is actively misleading (it would create false confidence while real
-// commands still ran through the uncovered ones), so --dry-run refuses to
-// start at all until that refactor is done, rather than simulate partially.
-const dryRunRefusalMessage = `--dry-run requested, but refusing to start: no real dry-run mode exists yet.
+// Phase 5 (items 31-34) built real interception infrastructure —
+// engine.Runner (pre-existing) plus the new engine.FS, both switchable via
+// engine.SetDryRun(true) — and migrated one real batch onto it (see
+// docs/dryrun-inventory.md, PROGRESS.md items 32/33). That is genuine
+// progress, not nothing. It is still not safe to let --dry-run run the real
+// RunProvision flow, for a reason more specific than "not enough call sites
+// migrated yet": RunProvision's actual code path interleaves
+// Runner/FS-routed calls with hundreds of raw, uncovered exec.Command/os.*
+// calls throughout the SAME functions (partition, mount, bootloader, USB,
+// backup/revert, WIM/BCD). Flipping SetDryRun(true) and then running that
+// path for real would intercept only some of what each function does and
+// let the rest execute for real — worse than refusing outright, because it
+// would look like protection while still writing to the real disk partway
+// through. A second, independent limitation surfaced while testing item
+// 32's own migrated batch: a dry-run can't always even claim "success" for
+// a fully-intercepted function, if that function's own correctness check
+// depends on a real side effect the simulation never produced (see
+// assertDefaultCredentials's documented dry-run behavior in
+// engine/dryrun_test.go — it correctly returns an error in dry-run mode,
+// not a fabricated success). Faking that away would mean inventing a
+// result dry-run has no way to actually know. Until enough of the
+// genuinely destructive call sites are migrated that running the real flow
+// under SetDryRun(true) is accurate start-to-finish (not just "doesn't
+// crash"), --dry-run keeps refusing rather than offer partial, misleading
+// protection. See docs/ROADMAP.md's Phase 5 section for what's left.
+const dryRunRefusalMessage = `--dry-run requested, but refusing to start: a full, honest dry-run isn't safe to offer yet.
 
-This binary has ~350 direct exec.Command call sites and ~140 direct
-filesystem-write call sites (os.WriteFile/Symlink/Remove/RemoveAll/MkdirAll)
-across engine/ and ui/ that are NOT routed through any interception layer.
-Only a small subset (engine.Runner, in engine/partition.go and
-engine/bootloader.go) is currently mockable/interceptable.
+Real interception infrastructure now exists (engine.Runner, engine.FS,
+engine.SetDryRun — see docs/dryrun-inventory.md) and covers one real batch
+end-to-end. It does NOT cover the hundreds of remaining partition,
+bootloader, USB, backup/revert, and WIM/BCD call sites, and those are
+interleaved with the covered ones inside the same functions RunProvision
+calls — so running the real flow under dry-run today would intercept only
+part of what happens and let the rest execute for real. That is worse than
+refusing: it would look like protection while still touching the real disk.
 
-Running with --dry-run today would NOT be safe: most partition, bootloader,
-USB, backup/revert, and WIM/BCD operations would execute for real regardless
-of this flag. Rather than simulate only part of what the tool does (which
-would be misleading, not safer), this flag currently just refuses to start.
-
-To get a real dry-run, the remaining call sites need to be routed through
-engine.Runner (or an equivalent) first. Until then, test this tool only in a
+Until enough of the remaining call sites are migrated that the real flow is
+accurate under simulation from start to finish, this flag refuses to start
+rather than offer partial, misleading protection. Test this tool only in a
 disposable VM against a virtual disk you are prepared to lose.
 `
 
