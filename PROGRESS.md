@@ -1352,7 +1352,7 @@ item's entry above). Nothing pushed; branch `test/os-matrix` (Phase 3) remains u
       ~88, bootloader/NVRAM ~28, package install ~21, payload write ~18 — these must be
       intercepted for a real dry-run; read-only queries ~36 and udev/kernel re-read nudges
       ~17 are already safe to run for real and don't need migration at all).
-- [x] 32. FS interface + migration batches — Done (`PENDING_HASH`). Per the scope agreed
+- [x] 32. FS interface + migration batches — Done (`f6d2efc`). Per the scope agreed
       before starting Phase 5 (see the chat summary at this checkpoint): inventory +
       interface + guard test + **one** real migration batch, not an attempt at all ~500
       call sites in one pass.
@@ -1394,7 +1394,7 @@ item's entry above). Nothing pushed; branch `test/os-matrix` (Phase 3) remains u
         (proven to not leak a secret-length argument, with the pre-fix version confirmed to
         leak it); `assertDefaultCredentials` in dry-run mode does not touch the real
         filesystem (and is documented to correctly return an error, per above).
-- [x] 33. Guard test + allowlist — Done (`PENDING_HASH`). A ratchet, not a fix — see
+- [x] 33. Guard test + allowlist — Done (`ea9f021`). A ratchet, not a fix — see
       `engine/call_site_ratchet_test.go`'s own doc comment for the full reasoning. Parses
       every `.go` file in `engine/`/`ui/` via `go/ast` (deliberately not `grep` — see
       below) and counts raw `exec.Command`/filesystem-write call sites per file, failing if
