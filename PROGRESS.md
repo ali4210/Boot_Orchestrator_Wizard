@@ -1040,7 +1040,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
 **CHECKPOINT 3:** not reached
 
 ## Phase 4: Remaining audit items + open-source readiness
-- [x] 20. GPG/signature verification — Done (`PENDING_HASH`). Audit 2.7: a SHA256 checksum
+- [x] 20. GPG/signature verification — Done (`c35b452`). Audit 2.7: a SHA256 checksum
       alone doesn't protect against a compromised mirror serving a tampered file alongside a
       tampered checksum of its own. New `engine/signature.go`'s `VerifyDetachedSignature`
       verifies an OpenPGP detached signature (armored `.asc` or raw binary `.sig`/`.gpg` —
