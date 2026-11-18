@@ -3,16 +3,12 @@ setlocal EnableDelayedExpansion
 title Universal Boot Orchestrator Launcher
 cd /d "%~dp0"
 
-:: 1. Check for Administrative Privileges
-net session >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo ======================================================================
-    echo  [SECURITY NOTICE] Hardware block operations require Administrator rights.
-    echo  Invoking elevated PowerShell session...
-    echo ======================================================================
-)
-
-:: 2. Forward directly through PowerShell launcher with argument preservation
+:: Forward directly through PowerShell launcher with argument preservation.
+:: autorun.ps1 itself unconditionally self-elevates via UAC (Start-Process
+:: -Verb RunAs) before doing anything privileged, so there is nothing for
+:: this script to check or act on beforehand (audit item 2.16 — the
+:: former "net session" admin pre-check here only ever logged a notice and
+:: never gated anything on its result).
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0autorun.ps1" %*
 
 set "EXIT_CODE=%ERRORLEVEL%"
