@@ -1078,7 +1078,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       **the real regression** — `journal.RollbackAll` against a journal whose only step is a
       failed `"image-deploy"` now completes with zero errors (verified failing with the exact
       pre-fix message by temporarily removing the registration and re-running, then restored).
-- [x] 22. Windows XP entry removed/flagged — Done (`PENDING_HASH`). Audit 2.13: Windows XP
+- [x] 22. Windows XP entry removed/flagged — Done (`7d2a107`). Audit 2.13: Windows XP
       predates WIM-based installation, but its manifest entry (`winxp-pro-i386`) routed
       through the exact same `deployWindowsPayload` path as Windows 10/11, which
       unconditionally searches for `sources/install.wim`/`install.esd` — neither exists on
