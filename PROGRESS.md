@@ -1230,7 +1230,33 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       decision than this item's scope, and it has its own passing tests) — flagged here for
       a deliberate future cleanup decision rather than silently left for someone to discover
       by surprise.
-- [ ] 27. Windows Panther plaintext password verification — Not started
+- [x] 27. Windows Panther plaintext password verification — Done (`PENDING_HASH`). The
+      well-known Windows deployment issue: `engine/wim_deployer.go`'s `injectAutounattend`
+      writes the answer file (containing the account password in plaintext — Windows'
+      unattend mechanism has no hashed-password option for local account creation, so this
+      is inherent to the format, not a choice made here) to
+      `C:\Windows\Panther\unattend.xml` on the target volume. Windows Setup itself consumes
+      this file automatically on first boot (required for the unattend to take effect at
+      all — this tool runs entirely from the Linux side, before Windows ever boots, so it
+      has no way to "wait for setup to finish, then delete it" from outside), but nothing
+      previously cleaned it up afterward: it would sit on disk, plaintext, readable by any
+      local user/process, indefinitely after setup completed.
+      **Fix:** `discovery/manifests/autounattend.xml`'s `FirstLogonCommands` now has a new,
+      first-to-run (`Order` 1, ahead of the two pre-existing commands) `SynchronousCommand`
+      that deletes `%WINDIR%\Panther\unattend.xml`,
+      `%WINDIR%\Panther\unattend\unattend.xml` (a second location Windows Setup sometimes
+      archives a copy to), and `%WINDIR%\System32\Sysprep\unattend.xml`, each independently
+      (`>nul 2>&1` + `&`, not `&&`, so a path that doesn't exist on a given deployment
+      doesn't abort the rest). Runs synchronously during the one-time auto-logon
+      (`AutoLogon`/`LogonCount` is already 1) — i.e. before an interactive desktop session
+      is ever reachable by anyone — so the real exposure window shrinks to the setup
+      process itself, not ongoing use of the machine.
+      Tests (`engine/wim_deployer_test.go`): the checked-in template references all three
+      cleanup paths and the cleanup command is genuinely `Order` 1 (runs first);
+      `injectAutounattend`'s real placeholder substitution (not a synthetic fixture) still
+      contains the cleanup command and parses as valid XML afterward. Verified failing
+      before the fix (temporarily reverted just the manifest XML via `git stash`, confirmed
+      `TestInjectAutounattend_PantherCleanupSurvivesSubstitution` fails) and passing after.
 - [ ] 28. Wire signature check into downloader — Not started
 - [ ] 29. README/CONTRIBUTING/CI; LICENSE — ask user first — Not started
 - [ ] 30. docs/ROADMAP.md — Not started

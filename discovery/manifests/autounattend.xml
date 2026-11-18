@@ -96,13 +96,37 @@
             </AutoLogon>
 
             <FirstLogonCommands>
+                <!-- Audit item 27: the answer file above (injected by
+                     injectAutounattend, engine/wim_deployer.go) carries the
+                     account password in plaintext at
+                     C:\Windows\Panther\unattend.xml — inherent to the
+                     unattend format, which has no hashed-password option
+                     for local account creation. Windows Setup itself may
+                     also leave a second copy under
+                     C:\Windows\Panther\unattend\ and, in some deployment
+                     paths, C:\Windows\System32\Sysprep\unattend.xml. Left
+                     alone, the plaintext password sits readable on disk
+                     indefinitely after setup completes. This runs FIRST,
+                     synchronously, during the one-time auto-logon
+                     (AutoLogon/LogonCount above is 1) — before an
+                     interactive desktop session is ever reachable — so the
+                     exposure window is only the setup process itself, not
+                     ongoing use of the machine. ">nul 2>&1" on each delete
+                     means a path that doesn't exist (not every deployment
+                     creates all three) doesn't abort the remaining
+                     cleanup commands. -->
                 <SynchronousCommand wcm:action="add">
                     <Order>1</Order>
+                    <CommandLine>cmd /c del /f /q "%WINDIR%\Panther\unattend.xml" &gt;nul 2&gt;&amp;1 &amp; del /f /q "%WINDIR%\Panther\unattend\unattend.xml" &gt;nul 2&gt;&amp;1 &amp; del /f /q "%WINDIR%\System32\Sysprep\unattend.xml" &gt;nul 2&gt;&amp;1</CommandLine>
+                    <Description>Remove plaintext-password answer file copies from disk after setup consumes them</Description>
+                </SynchronousCommand>
+                <SynchronousCommand wcm:action="add">
+                    <Order>2</Order>
                     <CommandLine>reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\OOBE" /v DisablePrivacyExperience /t REG_DWORD /d 1 /f</CommandLine>
                     <Description>Suppress residual privacy dialog</Description>
                 </SynchronousCommand>
                 <SynchronousCommand wcm:action="add">
-                    <Order>2</Order>
+                    <Order>3</Order>
                     <CommandLine>reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE" /v DisableVoice /t REG_DWORD /d 1 /f</CommandLine>
                     <Description>Suppress Cortana voice setup</Description>
                 </SynchronousCommand>
