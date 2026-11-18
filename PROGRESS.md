@@ -1129,7 +1129,25 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
         safe `t.TempDir()`. `cmd/orchestrator/preflight_test.go`: `runPreflightGate`'s three
         real decision paths — no blocking issue (no-op), a blocking issue refuses by
         default, `--skip-preflight` overrides the refusal but still surfaces the reason.
-- [ ] 24. Windows launcher dedup + orphaned scripts moved — Not started
+- [x] 24. Windows launcher dedup + orphaned scripts moved — Done (`5b9d316`).
+      Audit 2.16: `autorun.bat` and `autorun.cmd` were ~95% identical, both delegating to
+      `autorun.ps1`; `.bat`'s `net session` admin pre-check only ever logged a notice and
+      never gated anything on its result (confirmed `autorun.ps1` itself unconditionally
+      self-elevates via `Start-Process -Verb RunAs`, independent of whatever that check
+      found). Deleted `autorun.cmd` (kept `.bat`, since that's the one `README.md` already
+      documents as the Windows entry point) and removed the dead admin pre-check block from
+      `autorun.bat`, leaving one Windows entry point that just forwards to `autorun.ps1`.
+      Audit 2.17: `audit_and_fix_all.py`, `audit_non_linux.py`, `fix_linux_ids.py`,
+      `generate_perfect_linux.py`, `test_manifest_mirrors.py`, `test_win_mac_mirrors.py`,
+      `update_macos_manifest.py`, `update_manifest.py`, `update_windows_manifest.py` — a
+      repo-wide grep confirmed (again) zero references from any launcher or Go source.
+      Moved (not deleted — may still be useful reference) to `tools/maintenance/`, with a
+      new `tools/maintenance/README.md` documenting what each one was for and flagging them
+      as historical/unmaintained (several already embed catalog entry IDs that no longer
+      match the current manifests, e.g. `win11-gui-amd64` vs. today's
+      `win11-workstation-amd64` — direct evidence they're stale snapshots, not live tooling),
+      pointing at this project's actual maintained equivalents
+      (`cmd/catalog-verify`/`cmd/download-verify`/`discovery.Catalog.Audit()`) instead.
 - [ ] 25. Silent-error audit (`|| true`, `2>/dev/null`, `_ = exec.Command`) — Not started
 - [ ] 26. Generated-script check (bash -n, shellcheck, no fmt verbs/saleem) — Not started
 - [ ] 27. Windows Panther plaintext password verification — Not started
