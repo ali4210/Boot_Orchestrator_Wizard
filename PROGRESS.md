@@ -1031,7 +1031,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       end-to-end repro.
 
 ## Phase 3: OS verification matrix (branch test/os-matrix)
-- [x] Tier 1 catalog validation — Done (`PENDING_HASH`). New `cmd/catalog-verify`: HTTP HEAD
+- [x] Tier 1 catalog validation — Done (`62f4f1c`). New `cmd/catalog-verify`: HTTP HEAD
       (falling back to a 1-byte ranged GET for mirrors that reject HEAD) against every
       catalog mirror — cheap and safe enough to run every time, unlike `cmd/download-verify`'s
       full downloads. **Run for real against the full 29-entry catalog** (not just built —
@@ -1042,7 +1042,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       network): HEAD success, HEAD-rejected-falls-back-to-ranged-GET, 404 reported
       unreachable, gross size mismatch flagged, multi-mirror any-reachable semantics (both
       directions). Full report: `testing/reports/tier1-catalog-report-2026-11-18.json`.
-- [x] Tier 2 Docker container pipeline — Done (`PENDING_HASH`). New
+- [x] Tier 2 Docker container pipeline — Done (`62f4f1c`). New
       `testing/docker/iso-structure-verify` (pinned `debian:12.7-slim` + `xorriso` +
       `squashfs-tools`): reads an ISO's directory tree directly (no loop-mount, no privileged
       container) and checks it against the EXACT search logic
@@ -1055,7 +1055,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       would not produce a bootable installed system. Remaining 28 entries: pipeline built,
       run via the `OS Status Matrix` GitHub Actions workflow's `entry_ids` input when wanted
       — not run blind against all of them in this pass (bandwidth/time).
-- [x] Tier 3 QEMU boot matrix — Done (`PENDING_HASH`). New `testing/qemu/boot-and-verify.sh`:
+- [x] Tier 3 QEMU boot matrix — Done (`62f4f1c`). New `testing/qemu/boot-and-verify.sh`:
       boots a real ISO under QEMU with OVMF UEFI firmware, watching its serial console for a
       caller-supplied success pattern within a bounded timeout. Deliberately uses
       `-accel tcg` (software emulation), confirmed necessary by checking this sandbox first:
@@ -1066,7 +1066,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       records this as the one VERIFIED per-entry pattern; every other entry gets a generic,
       explicitly-labeled-unverified fallback pattern rather than a guessed one presented as
       confirmed.
-- [x] Tier 4 Windows/macOS runners — Done (`PENDING_HASH`), defined but not executable from
+- [x] Tier 4 Windows/macOS runners — Done (`62f4f1c`), defined but not executable from
       this session (no access to GitHub-hosted Windows/macOS runners from here). A matrix job
       in `.github/workflows/os-matrix.yml` runs `go build ./... && go vet ./... && go test ./...`
       natively on `windows-latest` and `macos-latest` — the only way the Windows-specific
@@ -1074,7 +1074,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       unit-tested on its real target OS. **This tier never boots a macOS (or Windows) guest
       image** — it's native CI on GitHub's own runner hardware building this repo's Go code,
       satisfying "never boot macOS" by construction, not by omission.
-- [x] OS_STATUS_MATRIX.md — Done (`PENDING_HASH`). Full 29-entry table (all 4 tiers per
+- [x] OS_STATUS_MATRIX.md — Done (`62f4f1c`). Full 29-entry table (all 4 tiers per
       entry), the 4 real findings above with root-cause detail, raw JSON evidence for every
       tier actually run, and exact `gh workflow run`/`gh run watch`/`gh run download` steps
       for running the rest of the matrix later.
