@@ -1097,7 +1097,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       (`discovery/audit_test.go`'s `TestEmbeddedCatalog_DoesNotContainWindowsXP`): asserts no
       catalog entry has this ID or distro name; verified failing by temporarily re-adding a
       synthetic XP entry and re-running, then restored.
-- [x] 23. env-check opt-in + pre-flight gate — Done (`PENDING_HASH`). Audit 2.14: `cmd/env-check`
+- [x] 23. env-check opt-in + pre-flight gate — Done (`8b629ba`). Audit 2.14: `cmd/env-check`
       made an unconditional live network call to `archive.ubuntu.com` as part of what's
       otherwise a local, offline-safe diagnostic — broke airgapped use, surprising for a
       "diagnostic" tool. Audit 2.15: the checks (hypervisor/firmware/disk-headroom/catalog)
