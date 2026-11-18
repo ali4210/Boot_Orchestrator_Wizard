@@ -1338,7 +1338,20 @@ found and fixed two real, previously-undetected Windows/macOS build breakages �
 item's entry above). Nothing pushed; branch `test/os-matrix` (Phase 3) remains unmerged.
 
 ## Phase 5: Real dry-run (audit 2.4, full)
-- [ ] 31. docs/dryrun-inventory.md — Not started
+- [x] 31. docs/dryrun-inventory.md — Done (`PENDING_HASH`). Real counts (re-run the
+      `grep`s in the doc to regenerate, not hand-estimated): **367** raw `exec.Command` call
+      sites and **149** filesystem-write call sites across `engine`/`ui` (the original
+      audit's "~350"/"~140" estimates, a bit higher now from this remediation effort's own
+      legitimate additions). **73** of the 367 already go through the injectable
+      `engine.Runner` (`cmdRunner`) — identified as the highest-value, lowest-risk migration
+      batch for item 32, since a dry-run `Runner` implementation covers all 73 with zero
+      call-site changes. Per-file breakdown table (`engine/orchestrator.go` 93,
+      `engine/rootfs.go` 47 — **excluded from priority, confirmed dead code per item 26** —
+      `engine/revert_linux.go` 41, `engine/usb_manager.go` 40, `engine/backup.go` 38, the
+      rest smaller) and a rough category breakdown (partition/format ~63, mount/unmount
+      ~88, bootloader/NVRAM ~28, package install ~21, payload write ~18 — these must be
+      intercepted for a real dry-run; read-only queries ~36 and udev/kernel re-read nudges
+      ~17 are already safe to run for real and don't need migration at all).
 - [ ] 32. FS interface + migration batches — Not started
 - [ ] 33. Guard test + allowlist — Not started
 - [ ] 34. Real --dry-run implementation — Not started
