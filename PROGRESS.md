@@ -801,7 +801,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
         do swap conversion, so it needs no equivalent handling (not re-verified in this session,
         carried over from the prior session's note).
 - [x] F15. transient_resize.sh: partprobe + udevadm settle + bounded retry (10x1s) before
-      declaring the USB mount failed; try UUID as well as label (`PENDING_HASH`)
+      declaring the USB mount failed; try UUID as well as label (`8257aa6`)
       - Before: transient_resize.sh's ORCH_STORAGE vault mount was exactly one
         `mount -L ORCH_STORAGE /mnt/vault 2>/dev/null || true` attempt — no re-probe of the
         kernel's partition table, no retry, no UUID fallback, and no check of whether it had
