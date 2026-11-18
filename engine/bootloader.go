@@ -505,6 +505,25 @@ fi
 `, rootCmd, username, credLine)
 }
 
+// renderCalamaresCleanupScript builds the /bin/bash script that removes
+// leftover Calamares/live-installer desktop shortcuts and purges the
+// Calamares package itself from a freshly-deployed rootfs. Kept as its
+// own pure function (used by both engine/orchestrator.go's
+// extractLiveRootFS and, historically, the near-identical inline script
+// it used to duplicate) so it can be syntax/shellcheck-verified directly
+// (audit item 26) without needing a real chroot. Deliberately best-effort
+// end to end — Calamares may simply not be installed on a given image,
+// which is not an error.
+func renderCalamaresCleanupScript(username string) string {
+	return fmt.Sprintf(`
+rm -rf /home/%[1]s/Desktop/install* /home/%[1]s/Desktop/calamares* /home/%[1]s/Desktop/README*
+rm -rf /etc/skel/Desktop/install* /etc/skel/Desktop/calamares* /etc/skel/Desktop/README*
+rm -rf /root/Desktop/install* /root/Desktop/calamares* /root/Desktop/README*
+apt-get purge -y calamares calamares-settings-debian calamares-settings-parrot 2>/dev/null || true
+systemctl disable calamares.service 2>/dev/null || true
+`, username)
+}
+
 func queryFilesystemType(targetPartition string) string {
 	out, err := cmdRunner.RunStdout("blkid", "-s", "TYPE", "-o", "value", targetPartition)
 	if err != nil {

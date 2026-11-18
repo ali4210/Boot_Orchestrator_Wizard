@@ -1183,7 +1183,53 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       legibly); the widespread chroot bind-mount discard pattern (cross-file, real risk of
       regressing currently-working paths, out of scope); macOS/Windows-specific files
       (can't verify a fix for real from this Linux session).
-- [ ] 26. Generated-script check (bash -n, shellcheck, no fmt verbs/saleem) — Not started
+- [x] 26. Generated-script check (bash -n, shellcheck, no fmt verbs/saleem) — Done
+      (`PENDING_HASH`). New `engine/generated_script_check_test.go`'s `checkGeneratedScript`
+      runs, against every script-rendering function this engine has
+      (`renderAccountProvisioningScript`, `renderAutonomousInstallerScript`, and the new
+      `renderCalamaresCleanupScript` below): `bash -n` (syntax only, never executed),
+      `shellcheck --severity=error` (best-effort — skipped if not installed; only
+      ERROR-severity findings fail, so shellcheck's style opinions don't make this brittle),
+      a check for Go's own `%!` fmt-argument-mismatch marker (the reliable way to catch a
+      forgotten/extra `fmt.Sprintf` verb — a correctly-matched verb is consumed during
+      formatting and can never appear literally in the output, so this has no false
+      positives the way grepping for a raw `%s` would), and a check for the hardcoded
+      `"saleem"` dev-account leftover (audit 2.3). A meta-test
+      (`TestCheckGeneratedScript_CatchesABadScript`) proves the checker itself actually
+      catches a real syntax error, a real leaked fmt-verb marker, and a real `"saleem"`
+      string, via a `recordingT` wrapper that observes the checker's own failures without
+      failing the outer test.
+      **Real bug found while surveying script generators for this item, fixed as part of
+      it:** `engine/orchestrator.go`'s `extractLiveRootFS` (the generic Linux rootfs deploy
+      path — used for every non-Windows, non-macOS catalog entry) had its **own**, separate,
+      unverified inline account-creation script, bypassing `assertDefaultCredentials`
+      (`bootloader.go`, audit 1A.3) entirely. It hardcoded `useradd -m -s /bin/bash -G sudo`
+      — the exact 1A.3 bug class, un-fixed in this second code path: silently produces an
+      admin-group-less account (with root also locked by default) on any non-Debian-family
+      target (Fedora/RHEL/Arch/openSUSE use `wheel`, not `sudo`) — and never checked whether
+      `useradd`/`chpasswd` actually succeeded before declaring the deploy step done. Fixed:
+      `extractLiveRootFS` now calls the shared, hardened `assertDefaultCredentials` directly
+      (which detects `sudo` vs `wheel` and verifies the account exists afterward via
+      `ORCH_ACCOUNT_VERIFIED`), with the installer-artifact/Calamares cleanup split out into
+      the new, separately-testable `renderCalamaresCleanupScript`. Confirmed via grep that
+      the old hardcoded `-G sudo` pattern no longer exists anywhere in `orchestrator.go`.
+      **Not separately integration-tested** (acknowledged gap, not silently skipped):
+      exercising `extractLiveRootFS`'s account-creation step end-to-end would need a real
+      loop-mounted disk with a working minimal rootfs inside it (real `useradd`/`chpasswd`/
+      `getent` binaries reachable from the chroot) — materially more setup than this session's
+      other loop-image tests, which only needed `mkfs`/`parted`/filesystem tools, not a
+      bootable userland. Relying instead on `assertDefaultCredentials`'s own existing,
+      thorough tests (`engine/bootloader_test.go`) for its behavior, plus this item's new
+      script-content checks for the scripts it renders.
+      **Noted, not acted on:** while tracing callers to confirm the fix's reach, found
+      `engine/rootfs.go` (~780 lines: `PlanDeploy`/`ApplyDeploy`/`deploySquashfsFromISO`/
+      `deployWindowsFromISO`/`purgeLiveInstallerShortcuts`/etc.) has **zero callers anywhere**
+      in the repo outside its own file — an entire alternate deploy pipeline, apparently
+      superseded by `orchestrator.go`'s `extractLiveRootFS`/`deployWindowsPayload` but never
+      removed. Not deleted in this pass (a ~780-line removal is a bigger, more consequential
+      decision than this item's scope, and it has its own passing tests) — flagged here for
+      a deliberate future cleanup decision rather than silently left for someone to discover
+      by surprise.
 - [ ] 27. Windows Panther plaintext password verification — Not started
 - [ ] 28. Wire signature check into downloader — Not started
 - [ ] 29. README/CONTRIBUTING/CI; LICENSE — ask user first — Not started

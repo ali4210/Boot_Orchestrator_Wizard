@@ -672,37 +672,33 @@ func extractLiveRootFS(isoPath, targetPart string, creds Credentials, logFn func
 	}
 
 	logFn("=> [CREDENTIALS] Configuring persistent user accounts and purging installer artifacts...")
-	if !ValidUsername(creds.Username) {
-		return fmt.Errorf("refusing to provision account: %q is not a valid username", creds.Username)
-	}
-	passHash, hashErr := creds.ResolvedPasswordHash()
-	if hashErr != nil {
-		return fmt.Errorf("hashing password for %s: %w", creds.Username, hashErr)
-	}
-
-	sudoersDir := filepath.Join(targetMount, "etc", "sudoers.d")
-	_ = os.MkdirAll(sudoersDir, 0750)
-	_ = os.WriteFile(filepath.Join(sudoersDir, creds.Username), []byte(creds.Username+" ALL=(ALL:ALL) ALL\n"), 0440)
 
 	_ = exec.Command("mount", "--bind", "/dev", filepath.Join(targetMount, "dev")).Run()
 	_ = exec.Command("mount", "--bind", "/proc", filepath.Join(targetMount, "proc")).Run()
 	_ = exec.Command("mount", "--bind", "/sys", filepath.Join(targetMount, "sys")).Run()
 
-	rootCmd := "passwd -l root 2>/dev/null || true"
-	if creds.AllowRootLogin {
-		rootCmd = fmt.Sprintf("echo %s | chpasswd -e 2>/dev/null || true", shellSingleQuote("root:"+passHash))
+	// Audit item 26 (found while surveying generated scripts for the
+	// syntax/fmt-verb check below): this used to provision the account
+	// with its own inline, unverified script — hardcoding "-G sudo"
+	// (silently produces an admin-group-less account, with root also
+	// locked by default, on any non-Debian-family target: Fedora/RHEL/
+	// Arch/openSUSE use "wheel", not "sudo" — the exact lockout bug class
+	// audit 1A.3 already fixed, just not in this second, parallel code
+	// path) and never checking whether useradd/chpasswd actually
+	// succeeded. Delegates to the shared, hardened assertDefaultCredentials
+	// (bootloader.go) instead, which detects sudo vs wheel and verifies
+	// the account actually exists afterward before returning success.
+	if err := assertDefaultCredentials(targetMount, creds, logFn); err != nil {
+		_ = exec.Command("umount", "-l", filepath.Join(targetMount, "dev")).Run()
+		_ = exec.Command("umount", "-l", filepath.Join(targetMount, "proc")).Run()
+		_ = exec.Command("umount", "-l", filepath.Join(targetMount, "sys")).Run()
+		return fmt.Errorf("provisioning account: %w", err)
 	}
-	chrootCleanup := fmt.Sprintf(`
-%s
-id -u %[2]s >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo %[2]s
-echo %[3]s | chpasswd -e
-rm -rf /home/%[2]s/Desktop/install* /home/%[2]s/Desktop/calamares* /home/%[2]s/Desktop/README*
-rm -rf /etc/skel/Desktop/install* /etc/skel/Desktop/calamares* /etc/skel/Desktop/README*
-rm -rf /root/Desktop/install* /root/Desktop/calamares* /root/Desktop/README*
-apt-get purge -y calamares calamares-settings-debian calamares-settings-parrot 2>/dev/null || true
-systemctl disable calamares.service 2>/dev/null || true
-`, rootCmd, creds.Username, shellSingleQuote(creds.Username+":"+passHash))
-	_ = exec.Command("chroot", targetMount, "bash", "-c", chrootCleanup).Run()
+
+	cleanupScript := renderCalamaresCleanupScript(creds.Username)
+	if out, err := exec.Command("chroot", targetMount, "bash", "-c", cleanupScript).CombinedOutput(); err != nil {
+		logFn(fmt.Sprintf("=> [WARNING] installer-artifact cleanup note: %v (%s)", err, out))
+	}
 
 	_ = exec.Command("umount", "-l", filepath.Join(targetMount, "dev")).Run()
 	_ = exec.Command("umount", "-l", filepath.Join(targetMount, "proc")).Run()
