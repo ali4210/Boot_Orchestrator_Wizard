@@ -844,7 +844,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
         boot into the live USB image; it already has its own 30x1s retry but no partprobe/
         udevadm settle/UUID fallback. Left as-is.
 - [x] F16. ISO picker: Bubble Tea model test driving Deploy payload -> picker -> .iso
-      selection, and direct .iso path entry; wire the custom-ISO path if unwired (`PENDING_HASH`)
+      selection, and direct .iso path entry; wire the custom-ISO path if unwired (`88a885c`)
       - Two genuinely separate gaps, both fixed:
         1. **The interactive picker was unwired for the client-deploy flow.** `ScreenClientPanel`'s
            "Deploy from Local Payload" option (no staged payload auto-detected) routed to
