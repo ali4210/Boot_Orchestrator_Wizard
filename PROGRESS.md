@@ -1257,7 +1257,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       contains the cleanup command and parses as valid XML afterward. Verified failing
       before the fix (temporarily reverted just the manifest XML via `git stash`, confirmed
       `TestInjectAutounattend_PantherCleanupSurvivesSubstitution` fails) and passing after.
-- [x] 28. Wire signature check into downloader — Done (`PENDING_HASH`). Completes item
+- [x] 28. Wire signature check into downloader — Done (`8b7bfab`). Completes item
       20's primitive: `discovery.Entry` gets two new optional fields, `SignatureURL` and
       `SigningKeyURL` (both empty for every current catalog entry — inventing real values
       would mean fabricating a trust relationship this tool cannot actually verify
