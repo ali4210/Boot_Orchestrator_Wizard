@@ -1060,7 +1060,7 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       signature from a key not in the keyring (the "attacker signs their own tampered
       payload" scenario) is rejected; corrupt signature bytes and a corrupt keyring both
       fail cleanly rather than panicking or silently passing.
-- [x] 21. Image-deploy rollback handler or documented limitation — Done (`PENDING_HASH`).
+- [x] 21. Image-deploy rollback handler or documented limitation — Done (`5cdce6e`).
       Audit 2.12: `rollbackHandlers` had no entry at all for `"image-deploy"`, so a failed
       deploy made `journal.RollbackAll` report a generic `no rollback handler registered for
       "image-deploy"` — true, but indistinguishable from an oversight rather than the
