@@ -3,9 +3,49 @@ package safety
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+// withScratchJournalCandidateDirs redirects journalUnixCandidateDirs to
+// two directories under t.TempDir() for the duration of the test,
+// restoring the real values afterward (follow-up F17) — so a test calling
+// DefaultJournalPath() never really creates /var/lib/boot-orchestrator or
+// /var/tmp/boot-orchestrator on the machine running the test. Confirmed
+// this was a real, not just theoretical, problem: before this fix, running
+// this package's own test suite left a real, root-owned
+// /var/lib/boot-orchestrator directory sitting on the test machine
+// (created by whichever test happened to run with elevated privileges)
+// and a real /var/tmp/boot-orchestrator one even for an unprivileged run.
+func withScratchJournalCandidateDirs(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	restore := SetJournalCandidateDirsForTesting([]string{filepath.Join(dir, "lib"), filepath.Join(dir, "tmp")})
+	t.Cleanup(restore)
+}
+
+// TestSetJournalCandidateDirsForTesting_OverridesAndRestores is the
+// regression test proving the follow-up F17 fix actually works. It
+// deliberately never calls DefaultJournalPath() with the REAL candidate
+// dirs in effect (that call is exactly the thing that creates
+// /var/lib/boot-orchestrator or /var/tmp/boot-orchestrator for real) —
+// instead it inspects journalUnixCandidateDirs directly, which this
+// in-package test file can do without invoking the function at all.
+func TestSetJournalCandidateDirsForTesting_OverridesAndRestores(t *testing.T) {
+	original := journalUnixCandidateDirs
+	scratch := []string{"/nonexistent-scratch-a", "/nonexistent-scratch-b"}
+
+	restore := SetJournalCandidateDirsForTesting(scratch)
+	if !reflect.DeepEqual(journalUnixCandidateDirs, scratch) {
+		t.Fatalf("expected journalUnixCandidateDirs to be overridden to %v, got %v", scratch, journalUnixCandidateDirs)
+	}
+
+	restore()
+	if !reflect.DeepEqual(journalUnixCandidateDirs, original) {
+		t.Fatalf("expected restore() to put the original candidate dirs back; want %v, got %v", original, journalUnixCandidateDirs)
+	}
+}
 
 // TestDefaultJournalPath_ResolvesOutsideTheCurrentDirectory is the
 // regression test for follow-up F12's core fix: the journal must no
@@ -16,6 +56,7 @@ import (
 // normal test environment, so the bare repo-relative fallback should never
 // actually be hit here.
 func TestDefaultJournalPath_ResolvesOutsideTheCurrentDirectory(t *testing.T) {
+	withScratchJournalCandidateDirs(t)
 	path := DefaultJournalPath()
 	if path == "orchestrator_journal.json" {
 		t.Fatalf("DefaultJournalPath fell all the way back to the repo-relative legacy path in a normal test environment — none of /var/lib, /var/tmp, or $HOME/.local/state were writable?")
@@ -34,6 +75,7 @@ func TestDefaultJournalPath_ResolvesOutsideTheCurrentDirectory(t *testing.T) {
 // of bits that Windows mostly ignores, but is still meaningful on the
 // Linux/macOS CI and dev environments this project actually targets).
 func TestDefaultJournalPath_DirectoryIsNotWorldOrGroupWritable(t *testing.T) {
+	withScratchJournalCandidateDirs(t)
 	path := DefaultJournalPath()
 	dir := filepath.Dir(path)
 	fi, err := os.Stat(dir)

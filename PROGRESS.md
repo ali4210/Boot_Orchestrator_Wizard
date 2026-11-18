@@ -904,9 +904,76 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
         already covered by F13's tests; `ScreenLANPeerConnect`/USB-detected payloads
         (`ScreenUSBSelect`) already had working `overridePayloadURL` wiring before this item and
         were not touched.
-- [ ] F17. Journal: tests must not touch real /var/lib or /var/tmp; test that every
+- [x] F17. Journal: tests must not touch real /var/lib or /var/tmp; test that every
       `journal.Begin` name is in `allowedStepNames`; document where the journal lives after
-      reboot into the USB environment — Not started
+      reboot into the USB environment (`PENDING_HASH`)
+      - **Real bug found and fixed, wider than just this package's own tests:**
+        `ui.NewModel()` unconditionally calls `safety.LoadJournal(safety.DefaultJournalPath())`
+        on every construction (to pick up any unfinished session), and `DefaultJournalPath()`
+        really runs `os.MkdirAll` against `/var/lib/boot-orchestrator` then
+        `/var/tmp/boot-orchestrator` (mode 0700) until one succeeds. Confirmed on this dev
+        machine: both directories existed for real (one root-owned, created by an earlier
+        `sudo -E go test` run in this engagement; one kali-owned, from a plain `go test` run) —
+        meaning every `ui` package test that ever constructed a `Model`, not just this
+        package's own journal tests, had been touching real `/var/lib`/`/var/tmp` the whole
+        time. (Left those two pre-existing leftover directories alone rather than deleting
+        them — cleaning up state under `/var/lib`/`/var/tmp` outside a test's own `t.TempDir()`
+        is exactly the kind of action this project's own rules say to leave for the user to
+        decide on, not something to do unprompted.)
+      - Fix: `safety/journal.go`'s two hardcoded Unix candidate directories are now a var,
+        `journalUnixCandidateDirs`, with an exported `SetJournalCandidateDirsForTesting(dirs)
+        (restore func())` so any package's test can redirect it to a scratch dir. Added
+        `ui/main_test.go`'s `TestMain`, which redirects it to a temp dir for the whole `ui`
+        test binary run — covering every current and future `ui` test that constructs a
+        `Model`, not just the ones added in this item. `safety/journal_security_test.go`'s two
+        pre-existing tests that call `DefaultJournalPath()` directly
+        (`TestDefaultJournalPath_ResolvesOutsideTheCurrentDirectory`,
+        `_DirectoryIsNotWorldOrGroupWritable`) now redirect via the same helper first.
+      - New completeness tests (`safety/journal_stepnames_test.go`), per the task's literal
+        ask: `TestAllJournalBeginCallSites_AreInAllowedStepNames` statically scans every `.go`
+        file in the repo (via `go/parser`/`go/ast`, not an import of `engine` — avoids any
+        import-cycle concern) for a literal `X.Begin("name", ...)` call and fails listing any
+        step name used that isn't in `allowedStepNames` — the real-world failure mode being
+        that such a step would commit fine but then make `LoadJournal` permanently refuse to
+        reload that exact journal (it looks "unrecognized" to `validateLoadedJournal`), even on
+        the very next run of the same binary that just wrote it.
+        `TestAllowedStepNames_EveryEntryHasAUseOrIsDocumentedAsReserved` is the reverse
+        direction, documenting a secondary finding this scan surfaced: `allowedStepNames`
+        currently has 6 entries ("docker-isolation", "uefi-set-boot-next",
+        "uefi-set-boot-order", "bcd-mutation", "bcd-add-entry", "grub-set-default") with zero
+        `journal.Begin` call sites anywhere in the repo — they exist only as
+        `engine/orchestrator.go`'s `RollbackAll` handler-map keys. Not a security issue (an
+        allowlist being too permissive can't let a tampered journal invoke anything that isn't
+        already gated by a step actually being present), but dead allowlist surface; this test
+        pins the exact current set so it fails loudly if it silently grows or shrinks instead.
+      - Reproduce-first verified empirically for both new tests: temporarily added
+        `journal.Begin("totally-unlisted-step-xyz", nil)` to `engine/orchestrator.go` —
+        `TestAllJournalBeginCallSites_AreInAllowedStepNames` failed for real, then passed again
+        after reverting (`git checkout -- engine/orchestrator.go`); temporarily added an unused
+        entry to `allowedStepNames` — `TestAllowedStepNames_...` failed for real, then passed
+        again after removing it. Also verified the `ui/main_test.go` fix empirically: recorded
+        the two pre-existing real directories' mtimes, ran `go test ./ui/...` and
+        `go test ./safety/...` with `-count=1` (bypassing cache), confirmed the mtimes were
+        unchanged afterward — proving the fix actually stops new real-filesystem touches,
+        not just that it compiles.
+      - **Where the journal lives after reboot into the USB environment** (documented, not
+        just verified by inspection — confirmed by grepping `engine/autonomous_installer_script.go`
+        and `engine/usb_manager.go` for any reference to "journal": there is none): the journal
+        is purely host-side bookkeeping. `safety.DefaultJournalPath()` resolves to
+        `/var/lib/boot-orchestrator/journal.json` (or the `/var/tmp` fallback) on the HOST's own
+        persistent root filesystem, written by the orchestrator binary while it runs under the
+        original host OS, BEFORE the autonomous-reboot handoff into the live USB staging
+        environment. `transient_resize.sh` (generated by `renderAutonomousInstallerScript`) and
+        the GRUB menu entry that launches it (`engine/usb_manager.go`) never read, write, or
+        otherwise reference the journal at all — not even when they mount the host's own
+        partition at `/mnt/host` and chroot into it for `update-initramfs`/`update-grub` (that
+        chroot only ever touches `/boot/efi`, `/dev`, `/proc`, `/sys` bind-mounts, never
+        `/var/lib`). So after the install completes and the machine reboots again, the SAME
+        journal file is sitting at the SAME path on the host's own disk, exactly as the
+        original orchestrator run left it — nothing in the USB-staging detour can see or
+        disturb it. The only thing that ever removes it post-install is
+        `ExecuteDecommissionWithOptions` (the revert path), which purges it deliberately as its
+        own final step — an ordinary revert operation, unrelated to the reboot-into-USB cycle.
 - [ ] F18. Document download-verify.yml's exact workflow_dispatch steps; record per-bug
       (E-H) whether reproduced or only inferred — Not started
 

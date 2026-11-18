@@ -100,6 +100,31 @@ type RollbackFunc func(data json.RawMessage) error
 // (%ProgramData%) but does NOT actually achieve the same non-admin-writable
 // guarantee it does on Unix — see the "Security tradeoff" note in
 // PROGRESS.md.
+
+// journalUnixCandidateDirs are the default journal state directories tried
+// in order on non-Windows platforms. Injectable (follow-up F17): a test
+// calling DefaultJournalPath() with the real values would really create
+// /var/lib/boot-orchestrator or /var/tmp/boot-orchestrator (mode 0700) on
+// whatever machine runs the test — exactly the "tests must not touch real
+// /var/lib or /var/tmp" problem this var exists to let a test avoid, by
+// pointing it at a t.TempDir() for the duration of the test instead.
+var journalUnixCandidateDirs = []string{"/var/lib/boot-orchestrator", "/var/tmp/boot-orchestrator"}
+
+// SetJournalCandidateDirsForTesting overrides journalUnixCandidateDirs for
+// the duration of a test and returns a function that restores the real
+// value. Exported specifically so OTHER packages' tests can use it too:
+// ui.NewModel() calls LoadJournal(DefaultJournalPath()) unconditionally on
+// every construction (to pick up any unfinished session), so — before this
+// existed — every single ui package test that constructed a Model really
+// created /var/lib/boot-orchestrator or /var/tmp/boot-orchestrator on
+// whatever machine ran `go test ./ui/...`, not just this package's own
+// tests. See ui's TestMain for where this is applied process-wide.
+func SetJournalCandidateDirsForTesting(dirs []string) (restore func()) {
+	orig := journalUnixCandidateDirs
+	journalUnixCandidateDirs = dirs
+	return func() { journalUnixCandidateDirs = orig }
+}
+
 func DefaultJournalPath() string {
 	var candidates []string
 	if runtime.GOOS == "windows" {
@@ -107,7 +132,7 @@ func DefaultJournalPath() string {
 			candidates = append(candidates, filepath.Join(pd, "BootOrchestrator"))
 		}
 	} else {
-		candidates = []string{"/var/lib/boot-orchestrator", "/var/tmp/boot-orchestrator"}
+		candidates = journalUnixCandidateDirs
 	}
 	for _, dir := range candidates {
 		if err := os.MkdirAll(dir, 0700); err == nil {
