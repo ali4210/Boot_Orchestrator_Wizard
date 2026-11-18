@@ -1352,7 +1352,69 @@ item's entry above). Nothing pushed; branch `test/os-matrix` (Phase 3) remains u
       ~88, bootloader/NVRAM ~28, package install ~21, payload write ~18 — these must be
       intercepted for a real dry-run; read-only queries ~36 and udev/kernel re-read nudges
       ~17 are already safe to run for real and don't need migration at all).
-- [ ] 32. FS interface + migration batches — Not started
+- [x] 32. FS interface + migration batches — Done (`PENDING_HASH`). Per the scope agreed
+      before starting Phase 5 (see the chat summary at this checkpoint): inventory +
+      interface + guard test + **one** real migration batch, not an attempt at all ~500
+      call sites in one pass.
+      - New `engine.SetDryRun(bool)`/`IsDryRun()` (`engine/dryrun.go`): a single toggle that
+        swaps both `cmdRunner` (the existing `Runner` interface) and a new `fsRunner`
+        (below) between the real implementations and ones that log what they would have
+        done and return synthetic success. Covers the **73 already-`cmdRunner`-routed
+        `exec.Command` sites for free** — zero call-site changes needed, identified as the
+        highest-value batch in item 31's inventory.
+      - New `engine.FS` interface (`engine/fs.go`, mirroring `Runner`'s existing shape):
+        `WriteFile`/`MkdirAll`/`Remove`/`RemoveAll`, with `DefaultFS` (real) and `DryRunFS`
+        (logs, no-ops) implementations.
+      - **The one real migration batch**: `assertDefaultCredentials`'s sudoers.d
+        `MkdirAll`/`WriteFile` (`engine/bootloader.go`) now go through `fsRunner` instead of
+        calling `os.*` directly — chosen because it's small, self-contained, already
+        heavily tested, and security-relevant. Also fixed a smaller gap found while doing
+        this: both calls used to discard their error entirely (`_ = os.MkdirAll(...)`);
+        now a write failure aborts instead of silently continuing as if the sudoers file
+        had been written.
+      - **A real limitation found and documented, not papered over**: in dry-run mode,
+        `assertDefaultCredentials` correctly returns an *error*, not success — its own
+        `ORCH_ACCOUNT_VERIFIED` check can't pass when the simulated chroot never really ran
+        `useradd`. This is the right behavior (a dry-run that fabricated a fake "verified"
+        result would be lying about something it has no way to know), but it means "dry-run
+        this specific function" and "dry-run succeeds end-to-end" are not the same claim —
+        see `docs/dryrun-inventory.md`/`docs/ROADMAP.md` for why a fully honest, complete
+        `--dry-run` (item 34) needs more than this one pass.
+      - **A real security-hygiene bug found and fixed while writing this batch's own
+        tests**: the first version of `DryRunRunner`'s logging printed every argument in
+        full — for `assertDefaultCredentials`'s chroot call, one of those arguments is the
+        generated provisioning script, which embeds the account's password **hash**.
+        Printing it to stderr on every dry-run would needlessly duplicate a password hash
+        into logs/terminal scrollback. Fixed: `logDryRun` now truncates any single argument
+        over 60 bytes, so no argument (secret-looking or not — this helper has no way to
+        know which ones are) is ever printed in full.
+      - Tests (`engine/dryrun_test.go`): `DryRunRunner`/`DryRunFS` genuinely never execute/
+        write (proven against a real binary and real temp files, not just "returns no
+        error"); `SetDryRun` swaps both and `restore()` puts both back; the truncation fix
+        (proven to not leak a secret-length argument, with the pre-fix version confirmed to
+        leak it); `assertDefaultCredentials` in dry-run mode does not touch the real
+        filesystem (and is documented to correctly return an error, per above).
+- [x] 33. Guard test + allowlist — Done (`PENDING_HASH`). A ratchet, not a fix — see
+      `engine/call_site_ratchet_test.go`'s own doc comment for the full reasoning. Parses
+      every `.go` file in `engine/`/`ui/` via `go/ast` (deliberately not `grep` — see
+      below) and counts raw `exec.Command`/filesystem-write call sites per file, failing if
+      any file's count goes **up** from a hardcoded baseline, or if a **new** file has any
+      such calls with no baseline entry at all. Going down needs no update (debt reduction
+      is always welcome); going up or appearing new requires a deliberate, visible baseline
+      change.
+      **A real discovery while building this**: the baseline was initially copied from item
+      31's `grep`-based inventory counts, which also count a mention of `"exec.Command("`
+      *inside a doc comment* as if it were real code. `engine/runner.go`'s own two doc
+      comments use `exec.Command(...)` as literal example text, so `grep` said 4 there while
+      the real, AST-parsed code has 2. Fixed by correcting that one baseline entry to the
+      true, AST-measured count, and documenting the discrepancy in `docs/dryrun-inventory.md`
+      so that narrative document doesn't silently disagree with what's actually enforced.
+      Reproduce-first verified twice, for real: temporarily added a throwaway
+      `exec.Command` call to `engine/signature.go` (a file with none) — the "new,
+      un-baselined file" path failed with a clear message; temporarily added one to
+      `engine/runner.go` (3 vs. baseline 2) — the "existing file exceeded its baseline" path
+      failed too. Both reverted via `git checkout` after confirming the failure, then
+      re-confirmed passing clean.
 - [ ] 33. Guard test + allowlist — Not started
 - [ ] 34. Real --dry-run implementation — Not started
 

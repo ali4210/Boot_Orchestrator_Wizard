@@ -430,9 +430,22 @@ func assertDefaultCredentials(rootPath string, creds Credentials, logFn func(str
 		return fmt.Errorf("hashing password for %s: %w", creds.Username, err)
 	}
 
+	// Phase 5 item 32: the proof-of-concept FS-interface migration batch
+	// (see engine/fs.go, docs/dryrun-inventory.md) — routed through
+	// fsRunner rather than calling os.MkdirAll/os.WriteFile directly, so
+	// SetDryRun(true) can simulate this write. Also fixes a smaller,
+	// related gap found while doing this: both calls used to discard
+	// their error entirely; a failure here (read-only chroot, disk full)
+	// now aborts instead of silently proceeding to the chroot step below
+	// as if the sudoers file had actually been written.
 	sudoersDir := filepath.Join(rootPath, "etc", "sudoers.d")
-	_ = os.MkdirAll(sudoersDir, 0750)
-	_ = os.WriteFile(filepath.Join(sudoersDir, creds.Username), []byte(creds.Username+" ALL=(ALL:ALL) ALL\n"), 0440)
+	if err := fsRunner.MkdirAll(sudoersDir, 0750); err != nil {
+		return fmt.Errorf("creating %s: %w", sudoersDir, err)
+	}
+	sudoersFile := filepath.Join(sudoersDir, creds.Username)
+	if err := fsRunner.WriteFile(sudoersFile, []byte(creds.Username+" ALL=(ALL:ALL) ALL\n"), 0440); err != nil {
+		return fmt.Errorf("writing %s: %w", sudoersFile, err)
+	}
 
 	rootCmd := "passwd -l root 2>/dev/null || true"
 	if creds.AllowRootLogin {
