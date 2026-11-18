@@ -1323,9 +1323,19 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
       and `GOOS=darwin GOARCH=arm64 go build ./...` locally (clean exit) — not just
       reasoned about — plus the full native `go build && go vet && go test ./...` gate
       staying green throughout.
-- [ ] 30. docs/ROADMAP.md — Not started
+- [x] 30. docs/ROADMAP.md — Done (`PENDING_HASH`). What's done (pointing at `PROGRESS.md`/
+      `AUDIT_REPORT.md`/`OS_STATUS_MATRIX.md` for detail rather than duplicating it), what's
+      next (Phase 5 real dry-run, Phase 6 ARM64, merging `test/os-matrix`, the final
+      deliverables), and the known structural gaps worth a deliberate decision rather than
+      silent drift (the dead `engine/rootfs.go` pipeline, no checksums/signatures backfilled
+      yet, the two dead manifest URLs and Alpine's install-path incompatibility
+      `OS_STATUS_MATRIX.md` found). Linked from `README.md`'s Contributing section.
 
-**CHECKPOINT 4:** not reached
+**CHECKPOINT 4:** Reached. All of items 20-30 done, each with a real commit hash and test
+(or, for pure documentation items, a real, verified-accurate document). `go build ./... &&
+go vet ./... && go test ./...` clean on every commit, confirmed cross-platform too (item 29
+found and fixed two real, previously-undetected Windows/macOS build breakages — see that
+item's entry above). Nothing pushed; branch `test/os-matrix` (Phase 3) remains unmerged.
 
 ## Phase 5: Real dry-run (audit 2.4, full)
 - [ ] 31. docs/dryrun-inventory.md — Not started

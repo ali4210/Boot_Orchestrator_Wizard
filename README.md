@@ -136,6 +136,7 @@ itself, never a real block device.
 
 See `CONTRIBUTING.md`. `PROGRESS.md` is the single source of truth for what's done, in
 progress, or a known, documented limitation — read it before starting any change.
+`docs/ROADMAP.md` has the shorter, forward-looking view of what's next.
 
 ## License
 
