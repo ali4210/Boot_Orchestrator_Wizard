@@ -974,8 +974,61 @@ summary delivered at this checkpoint for the full per-bug breakdown. 41 commits 
         disturb it. The only thing that ever removes it post-install is
         `ExecuteDecommissionWithOptions` (the revert path), which purges it deliberately as its
         own final step — an ordinary revert operation, unrelated to the reboot-into-USB cycle.
-- [ ] F18. Document download-verify.yml's exact workflow_dispatch steps; record per-bug
-      (E-H) whether reproduced or only inferred — Not started
+- [x] F18. Document download-verify.yml's exact workflow_dispatch steps; record per-bug
+      (E-H) whether reproduced or only inferred (docs-only, no code change)
+
+      **Running `.github/workflows/download-verify.yml` via `workflow_dispatch` — exact steps.**
+      This workflow downloads every catalog entry FULLY (real, multi-gigabyte files) using
+      this project's own downloader, so it is never run on push/PR — only on demand or the
+      monthly cron. Not run as part of this session's own work (it would consume real CI
+      minutes/bandwidth for dozens of multi-GB downloads with no code under review to justify
+      it); documenting the steps, not executing them.
+
+      *Via the GitHub web UI:*
+      1. Push this branch (or merge it) so the workflow file exists on a branch GitHub can
+         run it from — `workflow_dispatch` only works against a ref where the workflow
+         definition is already present.
+      2. Open the repo on GitHub -> **Actions** tab -> select **"Download Verify"** in the
+         left-hand workflow list.
+      3. Click **"Run workflow"** (top right of the runs list) -> pick the branch/ref to run
+         against -> **"Run workflow"** (green button). No inputs are defined for this
+         workflow, so there is nothing else to fill in.
+      4. Watch the run under the "Download Verify" workflow's run list (up to a 360-minute
+         timeout — downloading ~29 catalog entries for real is slow). The single job's
+         `continue-on-error: true` on the `go run ./cmd/download-verify` step means the run
+         shows green even if individual entries report `MISMATCH`/`FAILED`/`SKIPPED-SIZE` —
+         the pass/fail signal to actually look at is the artifact's contents, not the run's
+         overall status badge.
+      5. Once finished, open the run -> **Artifacts** section at the bottom -> download
+         `download-verify-report` (a `download-verify-report.json`, retained 90 days) and
+         inspect each entry's `status`/`expected_sha256`/`computed_sha256`/`detail` fields
+         (see `cmd/download-verify/main.go`'s `EntryReport` struct for the exact schema).
+
+      *Via the `gh` CLI, equivalently:*
+      ```bash
+      gh workflow run "Download Verify" --ref <branch-name>
+      # find the run just queued (there is no input to tag it with, so grab the most recent):
+      gh run list --workflow="Download Verify" --limit 1
+      gh run watch <run-id>              # follow it live, or:
+      gh run view <run-id>                # check status once it's done
+      gh run download <run-id> --name download-verify-report --dir ./download-verify-report
+      cat ./download-verify-report/download-verify-report.json | jq '.[] | select(.status != "OK")'
+      ```
+
+      **Per-bug (E-H) reproduced vs. inferred — recorded honestly, not just "all tested":**
+
+      | Bug | Status | Basis |
+      |---|---|---|
+      | E (download stall/incomplete) | **Reproduced** | `engine/streamer_test.go`'s `httptest`-backed tests make a real server actually stall mid-body / during the initial format-sniff / send a declared-but-undelivered `Content-Length` / etc., and drive the real `StreamDownloadWithFailover` code path against it — not simulated inputs to a mocked function. Verified failing before the stall-watchdog fix existed and passing after. |
+      | F (revert does not work) | **Reproduced** | `engine/revert_linux_loopimage_test.go` builds a real GPT disk image on a real loop device and runs the real, unmodified `ExecuteDecommissionWithOptions` against it as root (`sudo -E go test ... -run TestExecuteDecommission`). Both original findings (missing swap/fstab awareness, unused `TargetPartUUID` verification) were confirmed broken this way, and the filesystem-mismatch safety-abort fix was specifically verified failing before the fix (temporarily disabled the check, re-ran under root, confirmed the wrong-type partition really got deleted) and passing after. Residual gap at the time (closed later by F14, this same slice): `findActiveESPMount`/`efibootmgr` were still hardcoded, so ESP-removal/NVRAM-removal had zero coverage — tests had to pass empty values to skip those paths entirely. |
+      | G (transient_resize.sh not created) | **Mostly inferred, fix partially reproduced.** The root cause itself (neither USB mount fallback attempt was ever checked for success) was identified by **code reading**, not by actually unplugging a USB drive on real bare-metal hardware and observing the orchestrator silently write to a local directory instead — that end-to-end symptom was never reproduced live in this session. What **is** reproduced: `engine/usb_storage_mount_test.go`'s negative case (an ordinary unmounted `t.TempDir()` — structurally identical to what `usbStorageDir` becomes when both real mount attempts fail) is rejected by the new `ensureUSBStorageMounted` check, and the positive case uses a **real** tmpfs mount (not a mock) to prove a genuinely mounted filesystem is still accepted. So: the fix's logic is reproduced against a real mount/non-mount filesystem state; the original bug's full real-world trigger (an actual failed USB mount on actual hardware) is inferred from the code, not reproduced. |
+      | H (ISO picker browses the wrong home) | **Reproduced, via simulation rather than a real account.** `engine/file_dialog_test.go`'s `TestGetRealUserHome_UsesLookupHomeNotGuessedPath` uses an **injectable** `userLookupFunc` to simulate a `SUDO_USER` whose real home is deliberately *not* at `/home/<name>` (the exact condition that makes the old guessed-path logic diverge from the correct looked-up path) and confirms the fixed code resolves to the looked-up path, not the guess. This exercises the real divergence mechanism end-to-end through the actual `GetRealUserHome` function, but via a simulated passwd-lookup result rather than an actually-created system user with a non-default home directory — a lighter-weight but still faithful reproduction, not pure code-reading inference. |
+
+      Summary: **E and F are reproduced on real infrastructure** (real HTTP stalls, a real
+      loop-mounted disk image). **G's root cause is inferred from code reading**, with only
+      the fix's own logic reproduced against real (if synthetic) mount state. **H sits in
+      between** — a real mechanism reproduced via a controlled simulation, not a fully live
+      end-to-end repro.
 
 ## Phase 3: OS verification matrix (branch test/os-matrix)
 - [ ] Tier 1 catalog validation — Not started
