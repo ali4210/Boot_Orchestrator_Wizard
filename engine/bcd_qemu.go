@@ -88,10 +88,10 @@ func writeWindowsBCD(isoPath, targetDiskPath, targetPart string, logFn func(stri
 	if err != nil {
 		return fmt.Errorf("creating WinPE staging dir: %w", err)
 	}
-	defer os.RemoveAll(stageDir)
+	defer fsRunner.RemoveAll(stageDir)
 
 	isoMount := "/mnt/orch_bcd_iso_source"
-	_ = os.MkdirAll(isoMount, 0755)
+	_ = fsRunner.MkdirAll(isoMount, 0755)
 	_ = exec.Command("umount", "-l", isoMount).Run()
 	if out, err := exec.Command("mount", "-o", "loop,ro", isoPath, isoMount).CombinedOutput(); err != nil {
 		return fmt.Errorf("mounting install ISO for WinPE staging: %w (%s)", err, string(out))
@@ -180,7 +180,7 @@ func writeWindowsBCD(isoPath, targetDiskPath, targetPart string, logFn func(stri
 
 	logFn("=> [BCD ENGINE] Verifying BCD store was written to host ESP...")
 	verifyMount := "/mnt/orch_bcd_verify"
-	_ = os.MkdirAll(verifyMount, 0755)
+	_ = fsRunner.MkdirAll(verifyMount, 0755)
 	_ = exec.Command("umount", "-l", verifyMount).Run()
 	out, err := exec.Command("mount", espDev, verifyMount).CombinedOutput()
 	if err != nil {
@@ -267,11 +267,11 @@ func injectBCDBootRunner(bootWimPath string, imageIndex int, targetDiskNum int, 
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmpDir)
+	defer fsRunner.RemoveAll(tmpDir)
 
 	winpeshl := "[LaunchApps]\r\n\"cmd.exe\",\"/c X:\\bcdfix.cmd\"\r\n"
 	winpeshlPath := filepath.Join(tmpDir, "winpeshl.ini")
-	if err := os.WriteFile(winpeshlPath, []byte(winpeshl), 0644); err != nil {
+	if err := fsRunner.WriteFile(winpeshlPath, []byte(winpeshl), 0644); err != nil {
 		return err
 	}
 
@@ -295,7 +295,7 @@ bcdboot W:\Windows /s S: /f UEFI
 wpeutil shutdown
 `, targetDiskNum, targetPartNum, espDiskNum, espPartNum)
 	bcdfixPath := filepath.Join(tmpDir, "bcdfix.cmd")
-	if err := os.WriteFile(bcdfixPath, []byte(bcdfix), 0644); err != nil {
+	if err := fsRunner.WriteFile(bcdfixPath, []byte(bcdfix), 0644); err != nil {
 		return err
 	}
 

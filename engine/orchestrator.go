@@ -321,7 +321,7 @@ func deployMacOSPayload(dmgPath, targetPart string, logFn func(string)) error {
 	}
 
 	targetMount := "/mnt/orch_target_root"
-	_ = os.MkdirAll(targetMount, 0755)
+	_ = fsRunner.MkdirAll(targetMount, 0755)
 	_ = exec.Command("umount", "-l", targetMount).Run()
 
 	logFn(fmt.Sprintf("=> [MACOS DEPLOY] Mounting %s at %s...", targetPart, targetMount))
@@ -368,7 +368,7 @@ func deployWindowsPayload(isoPath, targetPart string, wimIndex int, autounattend
 	}
 
 	targetMount := "/mnt/orch_target_root"
-	_ = os.MkdirAll(targetMount, 0755)
+	_ = fsRunner.MkdirAll(targetMount, 0755)
 	_ = exec.Command("umount", "-l", targetMount).Run()
 
 	logFn(fmt.Sprintf("=> [WINDOWS DEPLOY] Mounting target NTFS partition %s at %s...", targetPart, targetMount))
@@ -383,7 +383,7 @@ func deployWindowsPayload(isoPath, targetPart string, wimIndex int, autounattend
 	}()
 
 	isoMount := "/mnt/orch_iso_source"
-	_ = os.MkdirAll(isoMount, 0755)
+	_ = fsRunner.MkdirAll(isoMount, 0755)
 	_ = exec.Command("umount", "-l", isoMount).Run()
 
 	logFn("=> [WINDOWS DEPLOY] Mounting Windows source ISO loopback: " + isoPath)
@@ -451,10 +451,10 @@ func registerWindowsInGRUB(isoPath, targetDiskPath, targetPart, espPath, grubDef
 		hostESP = "/boot/efi"
 	}
 	winESPDir := filepath.Join(hostESP, "EFI", "Microsoft", "Boot")
-	_ = os.MkdirAll(winESPDir, 0755)
+	_ = fsRunner.MkdirAll(winESPDir, 0755)
 
 	targetMount := "/mnt/orch_target_root"
-	_ = os.MkdirAll(targetMount, 0755)
+	_ = fsRunner.MkdirAll(targetMount, 0755)
 	_ = exec.Command("umount", "-l", targetMount).Run()
 	if _, err := exec.Command("mount", "-o", "ro", targetPart, targetMount).CombinedOutput(); err == nil {
 		defer func() {
@@ -515,14 +515,14 @@ func registerMacOSInGRUB(targetPart, espPath, grubDefaultPath string, logFn func
 	ocTarget := "/boot/efi/EFI/OC/OpenCore.efi"
 	if _, err := os.Stat(ocTarget); err != nil {
 		logFn("=> [BOOTLOADER] OpenCore.efi missing. Staging standardized EFI package...")
-		_ = os.MkdirAll("/boot/efi/EFI/OC", 0755)
+		_ = fsRunner.MkdirAll("/boot/efi/EFI/OC", 0755)
 		tmpZip := "/tmp/OpenCoreEFI.zip"
 		url := "https://github.com/thenickdude/KVM-Opencore/releases/download/v21/OpenCoreEFIFolder-v21.zip"
 		if _, err := exec.Command("curl", "-sSL", "-o", tmpZip, url).CombinedOutput(); err == nil {
 			_ = exec.Command("unzip", "-q", "-o", tmpZip, "-d", "/tmp/oc_unpack").Run()
 			_ = exec.Command("cp", "-r", "/tmp/oc_unpack/EFI/.", "/boot/efi/EFI/").Run()
-			_ = os.RemoveAll("/tmp/oc_unpack")
-			_ = os.Remove(tmpZip)
+			_ = fsRunner.RemoveAll("/tmp/oc_unpack")
+			_ = fsRunner.Remove(tmpZip)
 		}
 	}
 
@@ -597,7 +597,7 @@ func extractLiveRootFS(isoPath, targetPart string, creds Credentials, logFn func
 	_ = exec.Command("sync").Run()
 
 	targetMount := "/mnt/orch_target_root"
-	_ = os.MkdirAll(targetMount, 0755)
+	_ = fsRunner.MkdirAll(targetMount, 0755)
 	_ = exec.Command("umount", "-l", targetMount).Run()
 
 	logFn(fmt.Sprintf("=> [ROOTFS DEPLOY] Mounting target %s at %s...", targetPart, targetMount))
@@ -610,7 +610,7 @@ func extractLiveRootFS(isoPath, targetPart string, creds Credentials, logFn func
 	}()
 
 	isoMount := "/mnt/orch_iso_source"
-	_ = os.MkdirAll(isoMount, 0755)
+	_ = fsRunner.MkdirAll(isoMount, 0755)
 	_ = exec.Command("umount", "-l", isoMount).Run()
 
 	logFn("=> [ROOTFS DEPLOY] Mounting source ISO loopback: " + isoPath)
@@ -672,14 +672,14 @@ func extractLiveRootFS(isoPath, targetPart string, creds Credentials, logFn func
 
 	initTarget := filepath.Join(targetMount, "sbin", "init")
 	systemdTarget := "/lib/systemd/systemd"
-	_ = os.Remove(initTarget)
-	_ = os.Symlink(systemdTarget, initTarget)
+	_ = fsRunner.Remove(initTarget)
+	_ = fsRunner.Symlink(systemdTarget, initTarget)
 
 	uuidOut, err := exec.Command("blkid", "-s", "UUID", "-o", "value", targetPart).Output()
 	if err == nil && len(strings.TrimSpace(string(uuidOut))) > 0 {
 		uuidStr := strings.TrimSpace(string(uuidOut))
 		fstabEntry := fmt.Sprintf("UUID=%s / ext4 defaults,noatime,errors=remount-ro 0 1\n", uuidStr)
-		_ = os.WriteFile(filepath.Join(targetMount, "etc", "fstab"), []byte(fstabEntry), 0644)
+		_ = fsRunner.WriteFile(filepath.Join(targetMount, "etc", "fstab"), []byte(fstabEntry), 0644)
 		logFn("=> [ROOTFS DEPLOY] Injected /etc/fstab entry mapped to UUID: " + uuidStr)
 	}
 
@@ -838,15 +838,15 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 		if !isSameOS || (!isSameURL && req.ImageURL != "") {
 			onUpdate(StepUpdate{StepName: "=> [JOURNAL REFRESH] Target OS changed: resetting checkpoint and payload...", Done: false})
 			_ = journal.PurgeForce()
-			_ = os.Remove(req.DownloadDestPath + ".part")
-			_ = os.Remove(req.DownloadDestPath)
+			_ = fsRunner.Remove(req.DownloadDestPath + ".part")
+			_ = fsRunner.Remove(req.DownloadDestPath)
 			journal, _ = safety.NewJournal(req.JournalPath, generateTxnID())
 		}
 	} else {
 		if fi, err := os.Stat(req.DownloadDestPath); err == nil {
 			if fi.Size() < 50*1024*1024 {
-				_ = os.Remove(req.DownloadDestPath)
-				_ = os.Remove(req.DownloadDestPath + ".part")
+				_ = fsRunner.Remove(req.DownloadDestPath)
+				_ = fsRunner.Remove(req.DownloadDestPath + ".part")
 			}
 		}
 	}
@@ -961,7 +961,7 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 		onUpdate(StepUpdate{StepName: "verifying cryptographic payload checksum...", Done: false})
 		if err := verifyFileSHA256(streamResult.DestPath, req.ImageSHA256); err != nil {
 			if !strings.HasPrefix(streamResult.MirrorUsed, "local://") {
-				_ = os.Remove(streamResult.DestPath)
+				_ = fsRunner.Remove(streamResult.DestPath)
 			}
 			journal.Fail(dlStep, err)
 			return fail("checksum-verification", fmt.Errorf("corrupted payload abort: %w", err))
@@ -980,7 +980,7 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 		signer, sigErr := verifyEntrySignature(streamResult.DestPath, req.SelectedEntry)
 		if sigErr != nil {
 			if !strings.HasPrefix(streamResult.MirrorUsed, "local://") {
-				_ = os.Remove(streamResult.DestPath)
+				_ = fsRunner.Remove(streamResult.DestPath)
 			}
 			journal.Fail(dlStep, sigErr)
 			return fail("signature-verification", fmt.Errorf("unsigned or tampered payload abort: %w", sigErr))
@@ -1054,7 +1054,7 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 
 			// Force-standardize canonical mountpoint to /mnt/orch_usb_storage
 			usbStorageDir := "/mnt/orch_usb_storage"
-			_ = os.MkdirAll(usbStorageDir, 0755)
+			_ = fsRunner.MkdirAll(usbStorageDir, 0755)
 
 			// Clean up any other conflicting mounts on the storage partition to prevent path divergence
 			if mntOut, mErr := exec.Command("findmnt", "-n", "-o", "TARGET", storageDev).Output(); mErr == nil {
@@ -1291,7 +1291,7 @@ deployPhase:
 	// Auto-detect Windows payloads dynamically if ISO contains install.wim or install.esd
 	if !isWindows && !isMacOS {
 		testMount := "/mnt/orch_iso_probe"
-		_ = os.MkdirAll(testMount, 0755)
+		_ = fsRunner.MkdirAll(testMount, 0755)
 		_ = exec.Command("umount", "-l", testMount).Run()
 		if _, err := exec.Command("mount", "-o", "loop,ro", streamResult.DestPath, testMount).CombinedOutput(); err == nil {
 			candidates := []string{
@@ -1307,7 +1307,7 @@ deployPhase:
 				}
 			}
 			_ = exec.Command("umount", "-l", testMount).Run()
-			_ = os.Remove(testMount)
+			_ = fsRunner.Remove(testMount)
 		}
 	}
 

@@ -76,7 +76,7 @@ func AutoMountDrive(devPath string, logFn func(string)) (string, func(), error) 
 	devPath = resolveBackupMountNode(devPath)
 
 	mountPoint := filepath.Join("/mnt", "orch_drive_"+filepath.Base(devPath))
-	_ = os.MkdirAll(mountPoint, 0755)
+	_ = fsRunner.MkdirAll(mountPoint, 0755)
 
 	fsTypeOut, _ := exec.Command("blkid", "-s", "TYPE", "-o", "value", devPath).Output()
 	detectedFS := strings.ToLower(strings.TrimSpace(string(fsTypeOut)))
@@ -113,7 +113,7 @@ func AutoMountDrive(devPath string, logFn func(string)) (string, func(), error) 
 func makeCleanup(mountPoint string) func() {
 	return func() {
 		_ = exec.Command("umount", "-l", mountPoint).Run()
-		_ = os.Remove(mountPoint)
+		_ = fsRunner.Remove(mountPoint)
 	}
 }
 
@@ -309,7 +309,7 @@ func CreateHostBackupWithProgress(targetPath string, onProgress func(written int
 			chkCmd := exec.Command("sha256sum", filepath.Base(fullDestPath))
 			chkCmd.Dir = destDir
 			if chkOut, cErr := chkCmd.Output(); cErr == nil {
-				_ = os.WriteFile(fullDestPath+".sha256", chkOut, 0644)
+				_ = fsRunner.WriteFile(fullDestPath+".sha256", chkOut, 0644)
 			}
 			_ = exec.Command("sync").Run()
 			return fullDestPath, nil
@@ -500,7 +500,7 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(stageDir)
+	defer fsRunner.RemoveAll(stageDir)
 
 	if out, err := exec.Command("mount", rootPart, stageDir).CombinedOutput(); err != nil {
 		return fmt.Errorf("mounting restore target failed: %w (%s)", err, string(out))
@@ -512,7 +512,7 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 
 	if isUEFI {
 		efiDir := filepath.Join(stageDir, "boot", "efi")
-		_ = os.MkdirAll(efiDir, 0755)
+		_ = fsRunner.MkdirAll(efiDir, 0755)
 		if out, err := exec.Command("mount", espPart, efiDir).CombinedOutput(); err != nil {
 			return fmt.Errorf("mounting ESP %s at %s: %w (%s)", espPart, efiDir, err, out)
 		}
@@ -537,13 +537,13 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 			espUUID := strings.TrimSpace(string(espUUIDOut))
 			fstabContent += fmt.Sprintf("UUID=%s /boot/efi vfat umask=0077 0 1\n", espUUID)
 		}
-		_ = os.WriteFile(fstabPath, []byte(fstabContent), 0644)
+		_ = fsRunner.WriteFile(fstabPath, []byte(fstabContent), 0644)
 	}
 
 	binds := []string{"/dev", "/proc", "/sys", "/dev/pts"}
 	for _, b := range binds {
 		dest := filepath.Join(stageDir, b)
-		_ = os.MkdirAll(dest, 0755)
+		_ = fsRunner.MkdirAll(dest, 0755)
 		_ = exec.Command("mount", "--bind", b, dest).Run()
 	}
 	defer func() {
@@ -553,7 +553,7 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 	}()
 
 	if hostDNS, err := os.ReadFile("/etc/resolv.conf"); err == nil {
-		_ = os.WriteFile(filepath.Join(stageDir, "etc", "resolv.conf"), hostDNS, 0644)
+		_ = fsRunner.WriteFile(filepath.Join(stageDir, "etc", "resolv.conf"), hostDNS, 0644)
 	}
 
 	logFn(fmt.Sprintf("=> Reinstalling GRUB bootloader to %s...", targetDisk))

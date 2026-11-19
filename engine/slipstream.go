@@ -161,7 +161,7 @@ func ApplySlipstream(plan *SlipstreamPlan) (err error) {
 		return fmt.Errorf("dism.exe not found — driver slipstreaming requires running on Windows or WinPE: %w", err)
 	}
 
-	if err := os.MkdirAll(plan.MountDir, 0755); err != nil {
+	if err := fsRunner.MkdirAll(plan.MountDir, 0755); err != nil {
 		return fmt.Errorf("creating mount dir %s: %w", plan.MountDir, err)
 	}
 

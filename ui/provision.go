@@ -5,7 +5,6 @@ package ui
 import (
 	"context"
 	"errors"
-	"os"
 	"strconv"
 	"strings"
 
@@ -243,8 +242,8 @@ func (m Model) handleProvisionDone(msg provisionDoneMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 
-	_ = os.Remove("/var/tmp/os_image.payload.part")
-	_ = os.Remove("/tmp/os_image.payload.part")
+	_ = engine.FSRunner().Remove("/var/tmp/os_image.payload.part")
+	_ = engine.FSRunner().Remove("/tmp/os_image.payload.part")
 
 	m.screen = ScreenError
 	m.fatalErr = res.OriginalError

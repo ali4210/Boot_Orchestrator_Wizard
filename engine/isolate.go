@@ -99,7 +99,7 @@ func ApplyDockerIsolation(plan *DockerIsolationPlan) (rollbackData []byte, err e
 	}
 
 	// 3. Create target and copy data preserving ownership/perms/xattrs/hardlinks.
-	if err := os.MkdirAll(plan.TargetRoot, 0711); err != nil {
+	if err := fsRunner.MkdirAll(plan.TargetRoot, 0711); err != nil {
 		return rollbackData, fmt.Errorf("creating target root %s: %w", plan.TargetRoot, err)
 	}
 	rsyncArgs := []string{"-aHAX", "--info=progress2", strings.TrimRight(sourceRoot, "/") + "/", plan.TargetRoot + "/"}
@@ -121,10 +121,10 @@ func ApplyDockerIsolation(plan *DockerIsolationPlan) (rollbackData []byte, err e
 	if err != nil {
 		return rollbackData, fmt.Errorf("marshal updated daemon.json: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(plan.DaemonJSONPath), 0755); err != nil {
+	if err := fsRunner.MkdirAll(filepath.Dir(plan.DaemonJSONPath), 0755); err != nil {
 		return rollbackData, fmt.Errorf("creating dir for daemon.json: %w", err)
 	}
-	if err := os.WriteFile(plan.DaemonJSONPath, out, 0644); err != nil {
+	if err := fsRunner.WriteFile(plan.DaemonJSONPath, out, 0644); err != nil {
 		return rollbackData, fmt.Errorf("writing updated daemon.json: %w", err)
 	}
 
@@ -153,11 +153,11 @@ func RollbackDockerIsolation(rollbackData json.RawMessage) error {
 	exec.Command("systemctl", "stop", "docker").CombinedOutput()
 
 	if len(rb.OriginalDaemonJSON) > 0 {
-		if err := os.WriteFile(rb.DaemonJSONPath, rb.OriginalDaemonJSON, 0644); err != nil {
+		if err := fsRunner.WriteFile(rb.DaemonJSONPath, rb.OriginalDaemonJSON, 0644); err != nil {
 			return fmt.Errorf("restoring original daemon.json: %w", err)
 		}
 	} else {
-		os.Remove(rb.DaemonJSONPath)
+		fsRunner.Remove(rb.DaemonJSONPath)
 	}
 
 	// Data at MovedTo is intentionally left in place rather than deleted —

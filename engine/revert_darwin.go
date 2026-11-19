@@ -226,7 +226,7 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 		logFn(fmt.Sprintf("=> Purging EFI directory %s...", p.EFIDirNameToPurge))
 		efiPart := p.DiskDevice + "s1"
 		_ = exec.Command("diskutil", "mount", efiPart).Run()
-		_ = os.RemoveAll(filepath.Join("/Volumes/EFI/EFI", p.EFIDirNameToPurge))
+		_ = fsRunner.RemoveAll(filepath.Join("/Volumes/EFI/EFI", p.EFIDirNameToPurge))
 		_ = exec.Command("diskutil", "unmount", efiPart).Run()
 	}
 

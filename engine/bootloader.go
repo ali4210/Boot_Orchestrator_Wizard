@@ -29,21 +29,21 @@ func AutoConfigureDualBoot(targetPartition, grubDefaultPath string, creds Creden
 	logFn(fmt.Sprintf("=> Target storage %s detected as [%s], UUID: %s", resolvedTarget, fsType, partUUID))
 
 	// 1. Enforce Clean Graphical Menu on Host with 10s Timeout & Host Safe Default (Kali/Host OS at 0)
-	_ = os.MkdirAll("/etc/default/grub.d", 0755)
+	_ = fsRunner.MkdirAll("/etc/default/grub.d", 0755)
 	menuConfig := `GRUB_DEFAULT=0
 GRUB_TIMEOUT=10
 GRUB_TIMEOUT_STYLE=menu
 GRUB_DISABLE_OS_PROBER=false
 `
-	_ = os.WriteFile("/etc/default/grub.d/50-dualboot-menu.cfg", []byte(menuConfig), 0644)
-	_ = os.WriteFile("/etc/default/grub.d/99-orchestrator-prober.cfg", []byte("GRUB_DISABLE_OS_PROBER=false\n"), 0644)
+	_ = fsRunner.WriteFile("/etc/default/grub.d/50-dualboot-menu.cfg", []byte(menuConfig), 0644)
+	_ = fsRunner.WriteFile("/etc/default/grub.d/99-orchestrator-prober.cfg", []byte("GRUB_DISABLE_OS_PROBER=false\n"), 0644)
 
 	if grubDefaultPath != "" {
 		if grubData, readErr := os.ReadFile(grubDefaultPath); readErr == nil {
 			content := string(grubData)
 			if strings.Contains(content, "GRUB_DISABLE_OS_PROBER=true") {
 				content = strings.ReplaceAll(content, "GRUB_DISABLE_OS_PROBER=true", "GRUB_DISABLE_OS_PROBER=false")
-				_ = os.WriteFile(grubDefaultPath, []byte(content), 0644)
+				_ = fsRunner.WriteFile(grubDefaultPath, []byte(content), 0644)
 			}
 		}
 	}
@@ -128,7 +128,7 @@ func configureLinuxPersistentEnvironment(targetPartition, partUUID string, creds
 	if err != nil {
 		return fmt.Errorf("creating temporary mount point: %w", err)
 	}
-	defer os.RemoveAll(stageDir)
+	defer fsRunner.RemoveAll(stageDir)
 
 	fsType := queryFilesystemType(targetPartition)
 	if fsType == "" {
@@ -157,14 +157,14 @@ func configureLinuxPersistentEnvironment(targetPartition, partUUID string, creds
 
 	// Ensure systemd init link exists to prevent kernel panic
 	initTarget := filepath.Join(stageDir, "sbin", "init")
-	_ = os.Remove(initTarget)
-	_ = os.Symlink("/lib/systemd/systemd", initTarget)
+	_ = fsRunner.Remove(initTarget)
+	_ = fsRunner.Symlink("/lib/systemd/systemd", initTarget)
 
 	fstabPath := filepath.Join(stageDir, "etc", "fstab")
-	_ = os.MkdirAll(filepath.Join(stageDir, "etc"), 0755)
+	_ = fsRunner.MkdirAll(filepath.Join(stageDir, "etc"), 0755)
 	if partUUID != "" {
 		fstabEntry := fmt.Sprintf("UUID=%s  /  ext4  defaults,noatime,errors=remount-ro  0  1\n", partUUID)
-		_ = os.WriteFile(fstabPath, []byte(fstabEntry), 0644)
+		_ = fsRunner.WriteFile(fstabPath, []byte(fstabEntry), 0644)
 		logFn("=> Target /etc/fstab populated with root UUID: " + partUUID)
 	}
 
@@ -189,8 +189,8 @@ func configureLinuxPersistentEnvironment(targetPartition, partUUID string, creds
 	}
 
 	sysctlPath := filepath.Join(stageDir, "etc", "sysctl.d", "20-quiet-printk.conf")
-	_ = os.MkdirAll(filepath.Dir(sysctlPath), 0755)
-	_ = os.WriteFile(sysctlPath, []byte("kernel.printk = 3 4 1 3\n"), 0644)
+	_ = fsRunner.MkdirAll(filepath.Dir(sysctlPath), 0755)
+	_ = fsRunner.WriteFile(sysctlPath, []byte("kernel.printk = 3 4 1 3\n"), 0644)
 
 	kernelName, initrdName := locateKernelAndRamdisk(filepath.Join(stageDir, "boot"))
 	logFn(fmt.Sprintf("=> Identified kernel: %s, initrd: %s", kernelName, initrdName))
@@ -203,7 +203,7 @@ exec tail -n +3 $0
 # menu entries you want to add after this comment.  Be careful not to change
 # the 'exec tail' line above.
 `
-	_ = os.WriteFile("/etc/grub.d/40_custom", []byte(default40Custom), 0755)
+	_ = fsRunner.WriteFile("/etc/grub.d/40_custom", []byte(default40Custom), 0755)
 	_, _ = cmdRunner.Run("chmod", "+x", "/etc/grub.d/40_custom")
 	logFn("=> Cleaned /etc/grub.d/40_custom: relying on os-prober to generate exactly one boot entry.")
 
@@ -232,8 +232,8 @@ func locateKernelAndRamdisk(bootDir string) (kernel, initrd string) {
 
 func assertDisplayServerEnvironment(rootPath string, logFn func(string)) error {
 	sddmDir := filepath.Join(rootPath, "etc", "sddm.conf.d")
-	_ = os.MkdirAll(sddmDir, 0755)
-	_ = os.Remove(filepath.Join(sddmDir, "x11-enforcement.conf"))
+	_ = fsRunner.MkdirAll(sddmDir, 0755)
+	_ = fsRunner.Remove(filepath.Join(sddmDir, "x11-enforcement.conf"))
 	return nil
 }
 
@@ -251,7 +251,7 @@ menuentry "Windows Boot Manager (UEFI on %s)" --class windows --class os {
 }
 `, filepath.Base(targetPartition), partUUID)
 
-	if err := os.WriteFile("/etc/grub.d/40_custom", []byte(winStanza), 0755); err != nil {
+	if err := fsRunner.WriteFile("/etc/grub.d/40_custom", []byte(winStanza), 0755); err != nil {
 		return err
 	}
 	_, err := cmdRunner.Run("chmod", "+x", "/etc/grub.d/40_custom")
@@ -270,7 +270,7 @@ menuentry "macOS (OpenCore Chainloader on %s)" --class macosx --class os {
 }
 `, filepath.Base(targetPartition), partUUID)
 
-	if err := os.WriteFile("/etc/grub.d/40_custom", []byte(macStanza), 0755); err != nil {
+	if err := fsRunner.WriteFile("/etc/grub.d/40_custom", []byte(macStanza), 0755); err != nil {
 		return err
 	}
 	_, err := cmdRunner.Run("chmod", "+x", "/etc/grub.d/40_custom")
@@ -291,7 +291,7 @@ func neutralizeLiveBootHooks(rootPath string, logFn func(string)) error {
 	}
 
 	for _, b := range binds {
-		_ = os.MkdirAll(b.dest, 0755)
+		_ = fsRunner.MkdirAll(b.dest, 0755)
 		if out, err := cmdRunner.Run("mount", "--bind", b.host, b.dest); err != nil {
 			return fmt.Errorf("bind mounting %s: %w (%s)", b.host, err, string(out))
 		}
@@ -304,7 +304,7 @@ func neutralizeLiveBootHooks(rootPath string, logFn func(string)) error {
 	}()
 
 	if hostDNS, err := os.ReadFile("/etc/resolv.conf"); err == nil {
-		_ = os.WriteFile(filepath.Join(rootPath, "etc", "resolv.conf"), hostDNS, 0644)
+		_ = fsRunner.WriteFile(filepath.Join(rootPath, "etc", "resolv.conf"), hostDNS, 0644)
 	}
 
 	purgeScript := `
@@ -343,25 +343,25 @@ func assertUniversalNetworking(rootPath string, logFn func(string)) error {
 	logFn("=> [NETWORKING] Injecting autonomous DHCP & DNS configuration...")
 
 	netDir := filepath.Join(rootPath, "etc", "systemd", "network")
-	_ = os.MkdirAll(netDir, 0755)
+	_ = fsRunner.MkdirAll(netDir, 0755)
 	netConfig := `[Match]
 Name=en* eth* wl*
 
 [Network]
 DHCP=yes
 `
-	_ = os.WriteFile(filepath.Join(netDir, "20-wired.network"), []byte(netConfig), 0644)
+	_ = fsRunner.WriteFile(filepath.Join(netDir, "20-wired.network"), []byte(netConfig), 0644)
 
 	resolvPath := filepath.Join(rootPath, "etc", "resolv.conf")
 	dnsConfig := "nameserver 1.1.1.1\nnameserver 8.8.8.8\n"
-	_ = os.WriteFile(resolvPath, []byte(dnsConfig), 0644)
+	_ = fsRunner.WriteFile(resolvPath, []byte(dnsConfig), 0644)
 
 	return nil
 }
 
 func assertBootableKernelAndPackages(rootPath string, logFn func(string)) error {
 	bootDir := filepath.Join(rootPath, "boot")
-	_ = os.MkdirAll(bootDir, 0755)
+	_ = fsRunner.MkdirAll(bootDir, 0755)
 
 	entries, _ := os.ReadDir(bootDir)
 	hasKernel := false
@@ -387,7 +387,7 @@ func assertBootableKernelAndPackages(rootPath string, logFn func(string)) error 
 	}
 
 	for _, b := range binds {
-		_ = os.MkdirAll(b.dest, 0755)
+		_ = fsRunner.MkdirAll(b.dest, 0755)
 		if out, err := cmdRunner.Run("mount", "--bind", b.host, b.dest); err != nil {
 			return fmt.Errorf("bind mounting %s: %w (%s)", b.host, err, string(out))
 		}
@@ -400,7 +400,7 @@ func assertBootableKernelAndPackages(rootPath string, logFn func(string)) error 
 	}()
 
 	if hostDNS, err := os.ReadFile("/etc/resolv.conf"); err == nil {
-		_ = os.WriteFile(filepath.Join(rootPath, "etc", "resolv.conf"), hostDNS, 0644)
+		_ = fsRunner.WriteFile(filepath.Join(rootPath, "etc", "resolv.conf"), hostDNS, 0644)
 	}
 
 	installScript := "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends " +

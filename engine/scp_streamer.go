@@ -242,10 +242,10 @@ func InspectStagedPayload() (bool, int64, string) {
 
 // PurgeStagedPayload autonomously removes scratch payloads and parts from both /var/tmp and /tmp.
 func PurgeStagedPayload() error {
-	_ = os.Remove("/tmp/os_image.payload")
-	_ = os.Remove("/var/tmp/os_image.payload")
-	_ = os.Remove("/tmp/os_image.payload.part")
-	_ = os.Remove("/var/tmp/os_image.payload.part")
+	_ = fsRunner.Remove("/tmp/os_image.payload")
+	_ = fsRunner.Remove("/var/tmp/os_image.payload")
+	_ = fsRunner.Remove("/tmp/os_image.payload.part")
+	_ = fsRunner.Remove("/var/tmp/os_image.payload.part")
 
 	searchDirs := []string{"/var/tmp", "/tmp"}
 	for _, dir := range searchDirs {
@@ -257,7 +257,7 @@ func PurgeStagedPayload() error {
 				}
 				name := entry.Name()
 				if IsSupportedPayload(name) || strings.HasPrefix(name, "os_image.payload") {
-					_ = os.Remove(filepath.Join(dir, name))
+					_ = fsRunner.Remove(filepath.Join(dir, name))
 				}
 			}
 		}

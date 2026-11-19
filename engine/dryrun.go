@@ -104,6 +104,21 @@ func IsDryRun() bool {
 	return dryRunEnabled
 }
 
+// FSRunner returns the currently active FS implementation (real or
+// dry-run). cmdRunner/fsRunner/execCommand are deliberately package-private
+// — SetDryRun is the only sanctioned way to change them — but the ui
+// package has its own filesystem-write call sites that must also honor
+// dry-run, so this (and ExecCommand below) is the narrow, read-only way
+// for another package to reach the current value. Always call it fresh
+// right before use rather than caching the result: SetDryRun can swap it
+// at any time, and caching would silently go stale across that swap.
+func FSRunner() FS { return fsRunner }
+
+// ExecCommand builds a command through the currently active
+// exec.Command-equivalent (real or dry-run), for the same reason
+// FSRunner exists — see its doc comment.
+func ExecCommand(name string, args ...string) *exec.Cmd { return execCommand(name, args...) }
+
 // DryRunRunner is a Runner that never actually executes anything: it logs
 // the command it would have run (to stderr, prefixed so it's
 // unmistakable in output) and returns an empty, successful result.

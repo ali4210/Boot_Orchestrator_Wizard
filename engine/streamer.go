@@ -119,7 +119,7 @@ func StreamDownloadWithFailover(ctx context.Context, mirrors []string, destPath,
 		return nil, fmt.Errorf("no download mirrors provided")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+	if err := fsRunner.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return nil, fmt.Errorf("creating destination directory: %w", err)
 	}
 
@@ -201,7 +201,7 @@ func StreamDownloadWithFailover(ctx context.Context, mirrors []string, destPath,
 					continue
 				}
 
-				if err := os.Rename(tmpPath, destPath); err != nil {
+				if err := fsRunner.Rename(tmpPath, destPath); err != nil {
 					return nil, fmt.Errorf("committing payload to %s: %w", destPath, err)
 				}
 
@@ -232,7 +232,7 @@ func StreamDownloadWithFailover(ctx context.Context, mirrors []string, destPath,
 		var attemptErr error
 		for cleanRestart := 0; cleanRestart < 2; cleanRestart++ {
 			if cleanRestart == 1 {
-				_ = os.Remove(tmpPath)
+				_ = fsRunner.Remove(tmpPath)
 			}
 
 			res, attemptErr = downloadFromSingleMirrorWithRetry(ctx, client, cleanMirror, tmpPath, start, onProgress)
@@ -262,13 +262,13 @@ func StreamDownloadWithFailover(ctx context.Context, mirrors []string, destPath,
 			}
 			if strings.Contains(attemptErr.Error(), "checksum mismatch") {
 				corruptPath := destPath + ".corrupt"
-				_ = os.Rename(tmpPath, corruptPath)
+				_ = fsRunner.Rename(tmpPath, corruptPath)
 			}
 			lastErr = fmt.Errorf("mirror [%d/%d] %s failed: %w", mirrorIndex+1, len(prioritizedMirrors), cleanMirror, attemptErr)
 			continue
 		}
 
-		if err := os.Rename(tmpPath, destPath); err != nil {
+		if err := fsRunner.Rename(tmpPath, destPath); err != nil {
 			return nil, fmt.Errorf("finalizing download commit to %s: %w", destPath, err)
 		}
 

@@ -84,7 +84,7 @@ func ensureMtabSymlink() error {
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("checking %s: %w", mtabPath, err)
 	}
-	if err := os.Symlink("/proc/self/mounts", mtabPath); err != nil {
+	if err := fsRunner.Symlink("/proc/self/mounts", mtabPath); err != nil {
 		return fmt.Errorf("symlinking %s to /proc/self/mounts: %w", mtabPath, err)
 	}
 	return nil
@@ -799,7 +799,7 @@ func FindESPPartition(diskPath string) (string, error) {
 			if _, mountErr := cmdRunner.Run("mount", "-o", "ro", candidate, probeDir); mountErr == nil {
 				_, statErr := os.Stat(filepath.Join(probeDir, "EFI"))
 				_, _ = cmdRunner.Run("umount", "-l", probeDir)
-				_ = os.RemoveAll(probeDir)
+				_ = fsRunner.RemoveAll(probeDir)
 				if statErr == nil {
 					return candidate, nil
 				}

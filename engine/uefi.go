@@ -244,7 +244,7 @@ func SetGrubDefaultEntry(grubDefaultPath, menuEntryTitle string) (rollbackData [
 	}
 	rollbackData, _ = json.Marshal(rb)
 
-	if err := os.WriteFile(grubDefaultPath, []byte(strings.Join(lines, "\n")), 0644); err != nil {
+	if err := fsRunner.WriteFile(grubDefaultPath, []byte(strings.Join(lines, "\n")), 0644); err != nil {
 		return rollbackData, fmt.Errorf("writing %s: %w", grubDefaultPath, err)
 	}
 
@@ -275,7 +275,7 @@ func RollbackSetGrubDefaultEntry(grubDefaultPath string, rollbackData json.RawMe
 		}
 		out = append(out, line)
 	}
-	if err := os.WriteFile(grubDefaultPath, []byte(strings.Join(out, "\n")), 0644); err != nil {
+	if err := fsRunner.WriteFile(grubDefaultPath, []byte(strings.Join(out, "\n")), 0644); err != nil {
 		return fmt.Errorf("writing restored %s: %w", grubDefaultPath, err)
 	}
 	return RegenerateGrubConfig()

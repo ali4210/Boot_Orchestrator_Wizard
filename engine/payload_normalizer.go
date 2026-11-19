@@ -61,7 +61,7 @@ func EnsureRawISO(filePath, destDir string, onProgress func(written, total int64
 		return filePath, fmt.Errorf("archive does not contain an ISO image")
 	}
 
-	if err := os.MkdirAll(destDir, 0755); err != nil {
+	if err := fsRunner.MkdirAll(destDir, 0755); err != nil {
 		return "", err
 	}
 

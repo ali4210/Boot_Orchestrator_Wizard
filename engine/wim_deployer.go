@@ -148,7 +148,7 @@ func ApplyWim(plan *ApplyWimPlan) error {
 		if err != nil {
 			return fmt.Errorf("creating temporary mountpoint: %w", err)
 		}
-		defer os.RemoveAll(mountPoint)
+		defer fsRunner.RemoveAll(mountPoint)
 
 		// 3. Mount NTFS target partition
 		if out, err := exec.Command("mount", "-t", "ntfs-3g", plan.TargetPartition, mountPoint).CombinedOutput(); err != nil {
@@ -206,11 +206,11 @@ func injectAutounattend(srcPath, targetRoot string, creds Credentials) error {
 		return fmt.Errorf("malformed XML answer file %s: %w", srcPath, err)
 	}
 	pantherDir := filepath.Join(targetRoot, "Windows", "Panther")
-	if err := os.MkdirAll(pantherDir, 0755); err != nil {
+	if err := fsRunner.MkdirAll(pantherDir, 0755); err != nil {
 		return fmt.Errorf("creating Panther dir: %w", err)
 	}
 	destPath := filepath.Join(pantherDir, "unattend.xml")
-	return os.WriteFile(destPath, data, 0644)
+	return fsRunner.WriteFile(destPath, data, 0644)
 }
 
 func splitLines(s string) []string {

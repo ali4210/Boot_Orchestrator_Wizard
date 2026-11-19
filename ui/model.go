@@ -394,8 +394,8 @@ func triggerTargetedRevertCmd(guest engine.DetectedGuestOS, keepSlice bool, ch c
 		// directory by default; purge both the current default location
 		// and the legacy repo-relative path so a completed revert doesn't
 		// leave either behind.
-		_ = os.Remove("orchestrator_installed_os.json")
-		_ = os.Remove(filepath.Join(filepath.Dir(safety.DefaultJournalPath()), "orchestrator_installed_os.json"))
+		_ = engine.FSRunner().Remove("orchestrator_installed_os.json")
+		_ = engine.FSRunner().Remove(filepath.Join(filepath.Dir(safety.DefaultJournalPath()), "orchestrator_installed_os.json"))
 
 		time.Sleep(500 * time.Millisecond)
 		return revertDoneMsg{err: revertErr}

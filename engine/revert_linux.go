@@ -408,7 +408,7 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 		espBase := findActiveESPMountFunc()
 		targetEFIDir := filepath.Join(espBase, "EFI", strings.TrimSpace(p.EFIDirNameToPurge))
 		if _, err := os.Stat(targetEFIDir); err == nil {
-			_ = os.RemoveAll(targetEFIDir)
+			_ = fsRunner.RemoveAll(targetEFIDir)
 			logFn(fmt.Sprintf("=> Successfully deleted EFI payload: %s", targetEFIDir))
 		}
 	}
@@ -524,7 +524,7 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 	// 6. Clean Custom GRUB Stanzas & Regenerate GRUB
 	progressFn("=> [REVERT 85%] Synchronizing bootloader and refreshing host GRUB...", 0.85)
 	for _, dropin := range grubDropinPaths {
-		_ = os.Remove(dropin)
+		_ = fsRunner.Remove(dropin)
 	}
 
 	defaultCustomGrub := `#!/bin/sh
@@ -533,7 +533,7 @@ exec tail -n +3 $0
 # menu entries you want to add after this comment. Be careful not to change
 # the 'exec tail' line above.
 `
-	_ = os.WriteFile(grubCustomPath, []byte(defaultCustomGrub), 0755)
+	_ = fsRunner.WriteFile(grubCustomPath, []byte(defaultCustomGrub), 0755)
 	_ = exec.Command("chmod", "+x", grubCustomPath).Run()
 
 	logFn("=> Refreshing host GRUB configuration...")
@@ -562,11 +562,11 @@ exec tail -n +3 $0
 
 	// 7. Purge Journal State Files — both the current default location
 	// (follow-up F12) and the legacy repo-relative paths.
-	_ = os.Remove("orchestrator_journal.json")
-	_ = os.Remove("orchestrator_installed_os.json")
-	_ = os.Remove("/var/tmp/orchestrator_journal.json")
-	_ = os.Remove(safety.DefaultJournalPath())
-	_ = os.Remove(filepath.Join(filepath.Dir(safety.DefaultJournalPath()), "orchestrator_installed_os.json"))
+	_ = fsRunner.Remove("orchestrator_journal.json")
+	_ = fsRunner.Remove("orchestrator_installed_os.json")
+	_ = fsRunner.Remove("/var/tmp/orchestrator_journal.json")
+	_ = fsRunner.Remove(safety.DefaultJournalPath())
+	_ = fsRunner.Remove(filepath.Join(filepath.Dir(safety.DefaultJournalPath()), "orchestrator_installed_os.json"))
 
 	progressFn("=> [REVERT COMPLETE 100%] Decommissioning completed successfully.", 1.0)
 	logFn("=> [SUCCESS] Decommissioning transaction completed cleanly.")
@@ -742,7 +742,7 @@ func ensureSwapFstabEntry(path, partUUID string) error {
 		out += "\n"
 	}
 	out += line
-	return os.WriteFile(path, []byte(out), 0644)
+	return fsRunner.WriteFile(path, []byte(out), 0644)
 }
 
 // partitionExists checks for the partition's /sys/class/block entry. Audit
@@ -796,7 +796,7 @@ func cleanDanglingFstabEntries(path string) (changed bool, removedSpecs []string
 	if !changed {
 		return false, nil, nil
 	}
-	return true, removedSpecs, os.WriteFile(path, []byte(strings.Join(out, "\n")), 0644)
+	return true, removedSpecs, fsRunner.WriteFile(path, []byte(strings.Join(out, "\n")), 0644)
 }
 
 // fstabDeviceExists reports whether spec (an /etc/fstab first-field device

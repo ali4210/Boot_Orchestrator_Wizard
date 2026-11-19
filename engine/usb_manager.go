@@ -214,7 +214,7 @@ func PrepareAutonomousUSBDisk(targetDev USBTargetDevice, logFn func(string)) (*U
 	}
 
 	mountDir := "/mnt/orch_usb_storage"
-	_ = os.MkdirAll(mountDir, 0755)
+	_ = fsRunner.MkdirAll(mountDir, 0755)
 	_ = exec.Command("umount", "-l", mountDir).Run()
 
 	logFn("=> [USB PREPARE] Mounting storage vault at " + mountDir)
@@ -237,7 +237,7 @@ func ArmAutonomousUSBBootloader(bootPart, isoPayloadPath, targetDisk string, log
 	}
 
 	bootMount := "/mnt/orch_usb_boot"
-	_ = os.MkdirAll(bootMount, 0755)
+	_ = fsRunner.MkdirAll(bootMount, 0755)
 	_ = exec.Command("umount", "-l", bootMount).Run()
 
 	logFn("=> [UNIVERSAL EFI] Mounting ORCH_BOOT at " + bootMount + "...")
@@ -250,10 +250,10 @@ func ArmAutonomousUSBBootloader(bootPart, isoPayloadPath, targetDisk string, log
 	}()
 
 	efiBootDir := filepath.Join(bootMount, "EFI", "BOOT")
-	_ = os.MkdirAll(efiBootDir, 0755)
+	_ = fsRunner.MkdirAll(efiBootDir, 0755)
 
 	bootGrubDir := filepath.Join(bootMount, "boot", "grub")
-	_ = os.MkdirAll(bootGrubDir, 0755)
+	_ = fsRunner.MkdirAll(bootGrubDir, 0755)
 
 	// Phase 6 item 36: this stages the orchestrator's OWN autonomous
 	// installer USB, which boots on whatever firmware the HOST machine
@@ -286,17 +286,17 @@ menuentry "Universal OS Orchestrator: Autonomous Offline Resizer & Installer" {
 }
 `
 
-	_ = os.WriteFile(filepath.Join(efiBootDir, "grub.cfg"), []byte(grubCfgContent), 0644)
-	_ = os.WriteFile(filepath.Join(bootGrubDir, "grub.cfg"), []byte(grubCfgContent), 0644)
-	_ = os.WriteFile(filepath.Join(bootMount, "grub.cfg"), []byte(grubCfgContent), 0644)
+	_ = fsRunner.WriteFile(filepath.Join(efiBootDir, "grub.cfg"), []byte(grubCfgContent), 0644)
+	_ = fsRunner.WriteFile(filepath.Join(bootGrubDir, "grub.cfg"), []byte(grubCfgContent), 0644)
+	_ = fsRunner.WriteFile(filepath.Join(bootMount, "grub.cfg"), []byte(grubCfgContent), 0644)
 
 	earlyCfg := filepath.Join("/tmp", "early-grub.cfg")
 	earlyCfgContent := `search --no-floppy --label --set=root ORCH_BOOT
 set prefix=($root)/EFI/BOOT
 normal
 `
-	_ = os.WriteFile(earlyCfg, []byte(earlyCfgContent), 0644)
-	defer os.Remove(earlyCfg)
+	_ = fsRunner.WriteFile(earlyCfg, []byte(earlyCfgContent), 0644)
+	defer fsRunner.Remove(earlyCfg)
 
 	builtMonolithic := false
 	grubModDir := "/usr/lib/grub/" + grubEFIFormat
@@ -526,7 +526,7 @@ func DownloadPayloadToUSB(targetDev USBTargetDevice, imageURL string, progressFn
 
 		mountCmd := exec.Command("mount", targetDev.DevPath, mountPoint)
 		if out, err := mountCmd.CombinedOutput(); err != nil {
-			_ = os.Remove(mountPoint)
+			_ = fsRunner.Remove(mountPoint)
 			return fmt.Errorf("mounting usb partition %s: %w\n%s", targetDev.DevPath, err, string(out))
 		}
 		autoMounted = true
@@ -536,7 +536,7 @@ func DownloadPayloadToUSB(targetDev USBTargetDevice, imageURL string, progressFn
 		_ = exec.Command("sync").Run()
 		if autoMounted {
 			_ = exec.Command("umount", "-l", mountPoint).Run()
-			_ = os.Remove(mountPoint)
+			_ = fsRunner.Remove(mountPoint)
 		}
 	}()
 
@@ -783,7 +783,7 @@ func ProbeUSBPayloads() ([]USBPayload, error) {
 							if isMounted(targetDir) {
 								targetDir, _ = os.MkdirTemp("/tmp", "orch_usb_scan_*")
 							} else {
-								_ = os.MkdirAll(targetDir, 0755)
+								_ = fsRunner.MkdirAll(targetDir, 0755)
 							}
 
 							_ = exec.Command("mount", devPath, targetDir).Run()
@@ -852,7 +852,7 @@ func CleanAutoMounts(payloads []USBPayload) {
 		}
 		if p.WasAutoMount && p.MountPoint != "" {
 			_ = exec.Command("umount", "-l", p.MountPoint).Run()
-			_ = os.Remove(p.MountPoint)
+			_ = fsRunner.Remove(p.MountPoint)
 		}
 	}
 }
@@ -879,7 +879,7 @@ func PurgeIntermediatePayloads(storageMountPath string) error {
 			strings.HasSuffix(lower, ".raw") ||
 			strings.HasSuffix(lower, ".payload") ||
 			strings.HasSuffix(lower, ".part") {
-			_ = os.RemoveAll(filepath.Join(storageMountPath, name))
+			_ = fsRunner.RemoveAll(filepath.Join(storageMountPath, name))
 		}
 	}
 

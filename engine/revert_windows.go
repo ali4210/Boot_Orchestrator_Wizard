@@ -275,11 +275,11 @@ if ($esp) {
 
 	// Purge journal files so state resets completely — both the current
 	// default location (follow-up F12) and the legacy repo-relative paths.
-	_ = os.Remove("orchestrator_journal.json")
-	_ = os.Remove("orchestrator_installed_os.json")
-	_ = os.Remove(filepath.Join(os.TempDir(), "orchestrator_journal.json"))
-	_ = os.Remove(safety.DefaultJournalPath())
-	_ = os.Remove(filepath.Join(filepath.Dir(safety.DefaultJournalPath()), "orchestrator_installed_os.json"))
+	_ = fsRunner.Remove("orchestrator_journal.json")
+	_ = fsRunner.Remove("orchestrator_installed_os.json")
+	_ = fsRunner.Remove(filepath.Join(os.TempDir(), "orchestrator_journal.json"))
+	_ = fsRunner.Remove(safety.DefaultJournalPath())
+	_ = fsRunner.Remove(filepath.Join(filepath.Dir(safety.DefaultJournalPath()), "orchestrator_installed_os.json"))
 
 	progressFn("=> [REVERT 100%] Windows host revert completed.", 1.0)
 	logFn("=> [WINDOWS ROLLBACK] Completed cleanly.")
