@@ -271,9 +271,9 @@ commit hash and test there — follow the link, don't take this table's word alo
 | 2.1 Bootloader failure silently reported as success | Critical | **Fixed** | Prior session, `f7ddc19` |
 | 2.2 `resize2fs` fails without `/etc/mtab` | Critical | **Fixed** | Prior session, `82b00ed` |
 | 2.3 Hardcoded identical username/password | Critical (security/product) | **Fixed** — but see note | `PROGRESS.md` Phase 1 + item 26 |
-| 2.4 No dry-run/simulation mode | Critical for safety & testability | **Open — honestly, not fixed.** Real interception infrastructure built and proven against one batch, but running the real flow under it would still be misleading (see below) | `PROGRESS.md` items 31-34 |
+| 2.4 No dry-run/simulation mode | Critical for safety & testability | **Fixed** — see note | `PROGRESS.md` items 31-34 + 45-49, `9a92174`/`522ee63`/`1cfc7b0`/`9647ba0`/`e020ef2` |
 | 2.5 No LVM/LUKS/RAID/BitLocker detection | High | **Fixed** | `PROGRESS.md` Phase 1 item 5, `3f21fec` |
-| 2.6 x86_64 hardcoded despite ARM64 catalog entries | High | **Partially fixed** — see note | `PROGRESS.md` items 35-37, `a7e8b64` |
+| 2.6 x86_64 hardcoded despite ARM64 catalog entries | High | **Fixed** — see note | `PROGRESS.md` items 35-37 + 42-44, `a7e8b64`/`fd92ee8`/`cab04fd`/`a9e5c1e` |
 | 2.7 No GPG/signature verification | High | **Mechanism fixed; data gap remains** — see note | `PROGRESS.md` items 20/28 |
 | 2.8 Broken Go-version bootstrap on Windows | High | **Fixed** | Prior session, `50113e5` |
 | 2.9 Unconfirmed root-level package installation | High | **Fixed** | Prior session, `bd5f6d7` |
@@ -297,18 +297,33 @@ commit hash and test there — follow the link, don't take this table's word alo
   Worth remembering as a pattern: fixing one instance of a bug class doesn't mean every
   instance is fixed; grep for the shape of the bug, not just the one call site a report
   named.
-- **2.4** remains genuinely open. Phase 5 built real, tested interception infrastructure
-  (`engine.Runner`/`engine.FS`/`SetDryRun`) and proved it against one real batch — but
-  `RunProvision`'s actual call sites interleave covered and uncovered operations inside the
-  same functions, so running the real flow under simulation today would intercept only part
-  of what happens and let the rest execute for real. That's worse than refusing, so
-  `--dry-run` still refuses to start. See `docs/dryrun-inventory.md`/`docs/ROADMAP.md` for
-  what's left before this can honestly close.
-- **2.6** is partially fixed: the one confirmed-broken case found this pass
+- **2.4** is now fixed. Phase 5 (items 31-34) built real, tested interception
+  infrastructure (`engine.Runner`/`engine.FS`/`SetDryRun`) and proved it against one real
+  batch, but deliberately stopped there — `RunProvision`'s call sites interleaved covered
+  and uncovered operations inside the same functions, so running the real flow under
+  simulation at that point would have intercepted only part of what happens. A later pass
+  (items 45-49) went back and migrated every remaining raw `exec.Command`/filesystem-write
+  call site reachable from a real entry point (provision, revert, backup, autonomous USB
+  staging) across `engine/`, `ui/`, and `cmd/orchestrator/` — mechanically, file by file,
+  with the full test suite green after each one — then wired `--dry-run` to actually run
+  the real flow instead of refusing. Two things are deliberately still NOT intercepted,
+  stated plainly rather than buried: the payload download itself (never touches the target
+  disk; skipping it would make the rest of a dry run unrealistic), and `safety.Journal`'s
+  own bookkeeping writes (a cross-package-cycle issue — `safety` can't import `engine` —
+  and a materially lower-risk category than disk/bootloader/NVRAM writes). See
+  `docs/dryrun-inventory.md`'s "Update (item 45)" section for the complete account.
+- **2.6** is now fixed. The one confirmed-broken case found in the earlier pass
   (`engine/usb_manager.go`'s autonomous USB-staging bootloader, which would have produced a
-  completely unbootable stick on real arm64 host hardware) is fixed and tested. Other
-  x86_64-hardcoded sites (`engine/bcd_qemu.go`'s Windows-BCD-via-QEMU helper, in particular)
-  were explicitly not audited this pass — see `docs/ARCH_SUPPORT.md`.
+  completely unbootable stick on real arm64 host hardware) was fixed and tested first. A
+  full-repo grep for `x86_64`/`amd64`/`BOOTX64` (items 42-44) then found three more live
+  instances of the same bug class — `engine/orchestrator.go`'s autonomous-USB NVRAM boot
+  entry, `engine/backup.go`'s disaster-recovery restore, `engine/bootloader.go`'s no-kernel
+  self-heal — all fixed and tested. `engine/bcd_qemu.go`'s Windows-BCD-via-QEMU helper is
+  the one case left deliberately unfixed rather than unaudited: no arm64 Windows catalog
+  entry exists or can be tested against, so instead of guessing at unverifiable arm64 BCD
+  logic, it now refuses loudly on any non-amd64 host — removing the "silently" from the
+  original finding without pretending to support a target that doesn't exist. See
+  `docs/ARCH_SUPPORT.md`.
 - **2.7**'s verification *mechanism* (OpenPGP signature checking, wired into the real
   download flow) is real, tested, and will work the moment a catalog entry has real
   `SignatureURL`/`SigningKeyURL` values — but no entry has them yet, for the same reason no
