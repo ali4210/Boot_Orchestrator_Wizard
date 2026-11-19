@@ -171,3 +171,37 @@ across every single migration commit, and a new end-to-end test
 bogus-disk fixture the real-mode regression test for item 25 already established, proving
 the *entire* call chain of a representative function is genuinely intercepted — not just
 that the dry-run switch itself works in isolation.
+
+## Update (items 53-55, audit follow-up G3): a real `RunProvision` proof, and two bugs it found
+
+Everything above was verified with mocks, fake-PATH binaries, and one bogus-disk fixture.
+Audit follow-up G3 asked for something stronger: run `RunProvision` itself — the real
+top-level entry point, not a unit of it — under `SetDryRun(true)` against a real,
+loop-mounted disk image, and assert the image file's own sha256 before and after. Building
+that proof surfaced two real bugs, both found by attempting the real thing rather than
+re-reading code, both fixed immediately:
+
+- The payload-download family (`streamer.go`/`stream_decoder.go`/`resilient_streamer.go`/
+  `scp_streamer.go`) had been migrated onto `fsRunner` in item 46 for blanket consistency —
+  silently breaking this document's own "the payload download stays real under --dry-run"
+  design. Reverted back to raw `os.*`.
+- `BackupPartitionTable` (called unconditionally at the start of every provision/revert)
+  depends on `blockDeviceSectorSize`/`blockDeviceSizeBytes`/`readDiskRegion`, all routed
+  through `cmdRunner` — which the blanket `SetDryRun` swap faked along with everything else,
+  even though these three are read-only by construction. That made every dry run abort at
+  "partition-shrink" before reaching any disk-mutating code at all, which is the exact
+  violation of "read-only queries... do NOT need interception" this document declared back
+  at the top, just never actually enforced for these three. Fixed via `diskReadRunner()`
+  (`engine/dryrun.go`) — not a general command-name allowlist (unsafe: `parted`/`dd` are
+  each used both read- and write-wise elsewhere in this codebase), only these three
+  unambiguous call sites.
+
+With both fixed, `TestRunProvision_DryRunAgainstRealLoopDeviceNeverTouchesTheImage`
+(`engine/orchestrator_dryrun_loopimage_test.go`) now gets RunProvision for real past
+`image-download` and `partition-shrink`, through its own "reuse the already-carved
+partition" shortcut, into `image-deploy` — where it correctly fails on
+`extractLiveRootFS`'s real >= 20GB size-floor check (the test's fixture is deliberately
+undersized so hashing the whole file before/after stays fast). The image file's sha256 is
+identical before and after. This is now the deepest, most concrete proof this project has
+that `--dry-run` genuinely never touches a real target disk — not a claim resting on mocks
+alone.

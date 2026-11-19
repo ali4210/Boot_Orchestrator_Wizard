@@ -101,11 +101,21 @@ rather than as blocking the gate (neither is Critical/High on its own):
 - **No catalog entry has a SHA256 checksum or OpenPGP signature.** The verification
   machinery for both is real and tested; the data needs independent human sourcing per
   entry.
-- **Two dead manifest URLs** (`gentoo-stage3-amd64`, both macOS recovery entries) found by
-  `OS_STATUS_MATRIX.md`'s real Tier 1 run — a data-curation fix, not attempted this pass.
+- ~~Two dead manifest URLs (`gentoo-stage3-amd64`, both macOS recovery entries)~~ — items
+  50-51 closed the live-safety half of this (both now marked `Unavailable`, hidden from the
+  TUI, refused in headless mode) and re-confirmed via `curl -I` that all three URLs are
+  still dead as of this pass. The data-curation half (fixing the URLs) is still open —
+  that's a sourcing task, not a code fix, and isn't what was blocking.
 - **`alpine-linux-amd64` is incompatible with the current autonomous install pipeline**
-  (no squashfs, no `/live` directory) — found by `OS_STATUS_MATRIX.md`'s real Tier 2 run,
-  not fixed this pass.
+  (no squashfs, no `/live` directory) — found by `OS_STATUS_MATRIX.md`'s real Tier 2 run.
+  Item 50 (G1) fixed the actual safety consequence of this class of incompatibility (both
+  real install paths now abort before any disk write instead of formatting first and
+  discovering the problem after), with a real test proving it — but the entry itself is
+  still catalogued as available and will still fail at image-deploy if selected; marking it
+  `Unavailable` too (like items 50-51 did for gentoo/macOS) is a reasonable, small follow-up
+  not done this pass, since unlike gentoo/macOS this is a pipeline-incompatibility, not a
+  dead URL, and the current "fails loudly before any disk write" behavior is the real safety
+  property that mattered, not "must never be offered at all."
 - **`engine/rootfs.go`** (~780 lines) and **`hypervisor/compact.go`** (~150 lines) have
   zero callers anywhere in the repo — both confirmed dead code, neither deleted (a
   deliberate decision deferred to `docs/ROADMAP.md`, not an oversight; `compact.go` was
@@ -136,18 +146,36 @@ operations, real `httptest`-server tests for network code, real OpenPGP cryptogr
 operations (not stubbed) for signature verification, a real cross-platform build matrix
 that found two previously-undetected Windows/macOS compile breakages, a real QEMU boot
 (both x86_64 and aarch64) reaching an actual bootloader/installer screen, and — for 2.4's
-closure specifically — a real end-to-end proof that a representative function's entire
-call chain is genuinely intercepted under simulation, not just that the switch itself
-flips.
+closure — both the `TestRestoreHostFromBackup_DryRunNeverTouchesRealDiskAndSucceeds`
+call-chain proof and, now (item 55), `TestRunProvision_DryRunAgainstRealLoopDeviceNeverTouchesTheImage`:
+`RunProvision` itself, run for real under dry-run against a real loop-mounted disk image,
+with the image file's own sha256 asserted identical before and after — the strongest form
+of this project's `--dry-run` claim, not resting on mocks alone.
+
+## G4 re-check (after G1-G3)
+
+Re-ran this gate's own checklist after G1 (abort-before-disk-write + catalog availability),
+G2 (root-gated CI), and G3 (the real `RunProvision` loop-image proof above). Result: **stays
+GREEN.** Neither G1 nor G3 surfaced a new Critical/High finding — both real bugs G3's
+investigation found (items 53/54: the download-path interception inconsistency, and
+`BackupPartitionTable`'s read-only queries being incorrectly faked) were fixed immediately,
+with tests, as part of the same work, not left open for a future pass. G2 added coverage
+without changing any code behavior. The "Known data/coverage gaps" section above was
+updated in place rather than left stale: the gentoo/macOS dead-URL gap's safety consequence
+is now actually closed (items 50-51), and the Alpine incompatibility's safety consequence
+is now closed too (item 50's abort-before-disk-write fix), with both sections saying
+precisely what is and isn't still open rather than a blanket "fixed"/"not fixed".
 
 ## What would make this NOT green again
 
-This verdict is accurate as of the commits in `PROGRESS.md` through item 49. It should be
+This verdict is accurate as of the commits in `PROGRESS.md` through item 56. It should be
 re-checked (not assumed to still hold) if any of the following happen: a new Critical/High
 finding is reported or discovered; a call site is added to a file this gate's closures
 depend on without also being routed through `Runner`/`FS`/`execCommand` (`call_site_
 ratchet_test.go`'s guard mechanically catches this for `engine`/`ui`/`cmd/orchestrator` —
 extended to the latter in item 49 specifically because the revert.go gap it found would not
-have been caught otherwise — but any future package is not automatically covered); or
-`engine/bcd_qemu.go` gains a real arm64 Windows use case without `validateBCDHostArch`
-being revisited.
+have been caught otherwise — but any future package is not automatically covered);
+`engine/bcd_qemu.go` gains a real arm64 Windows use case without `validateBCDHostArch` being
+revisited; or a future filesystem-write/exec.Command migration repeats item 53's mistake
+(migrating a file onto `fsRunner`/`execCommand` without checking whether it's actually part
+of the deliberately-real download path first).

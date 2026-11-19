@@ -1779,6 +1779,118 @@ dead-code file was also found during the sweep: `hypervisor/compact.go`
 the repo) — flagged in `docs/ROADMAP.md`, same treatment as `engine/rootfs.go`, not
 deleted this pass. `READINESS_GATE.md` and `AUDIT_REPORT.md` updated accordingly.
 
+## Pre-PR follow-ups: G1-G4 (requested before opening the PR)
+
+With 2.4 and 2.6 both closed and the gate GREEN (items 42-49), the user asked for four more
+specific things before opening the pull request: G1 (abort before any disk write on an
+unsupported ISO layout, plus mark the known-dead catalog entries unavailable), G2 (run the
+root-gated loop-device tests in CI), G3 (a real dry-run proof for RunProvision against a
+real loop-device image), G4 (re-check the gate and keep it green only if still true).
+
+### Item 50: G1 — abort before any disk write on an unsupported ISO layout — commit 6566fdc
+
+Both real install paths formatted/wrote the target disk BEFORE checking whether the source
+media's layout was even supported — discovered to be a real, exploitable bug (not
+hypothetical) by actually tracing `alpine-linux-amd64`'s documented incompatibility
+(`OS_STATUS_MATRIX.md`) through the code:
+
+- The autonomous USB installer script (`renderAutonomousInstallerScript`) ran
+  `sgdisk`/`parted`/`mkfs.ext4` against the target partition first, then searched for a
+  squashfs/live layout — and on finding neither, fell through to a blind
+  `rsync -aHAX /mnt/source/ /mnt/target/` that doesn't error at all, it just copies the
+  ISO's top-level files into what's supposed to be a root filesystem. Fixed by extracting
+  the search into `detectInstallerLayoutOrAbort` (mirroring the existing
+  `usbStorageMountRetryBlock` pattern) and moving it, plus an explicit `exit 1` on an
+  unsupported layout, to run before any of `sgdisk`/`parted`/`mkfs.ext4` — and removed the
+  rsync fallback entirely.
+- The direct dual-boot deploy (`extractLiveRootFS`) ran `mkfs.ext4` first, then searched for
+  a squashfs — and on finding none, fell back to a GUESSED, likely-nonexistent path passed
+  to `unsquashfs` (which does fail, but only after the target partition was already
+  reformatted). Fixed via `locateSquashfsOrErr` (returns a clear error instead of a guessed
+  path), called before `mkfs.ext4`.
+
+Tests: `TestDetectInstallerLayoutOrAbort_UnsupportedLayoutAbortsBeforeAnyDiskWrite` runs the
+real extracted bash fragment under bash with stubbed `mkfs.ext4`/`sgdisk`/`parted` binaries
+and proves those binaries are never actually invoked, plus the two "still works" cases.
+`TestLocateSquashfsOrErr_*` cover the Go side. `TestExtractLiveRootFS_LocatesSquashfsBeforeFormattingSourceOrder`
+is a `go/ast`-based structural check (same technique as `call_site_ratchet_test.go`) proving
+the real compiled call order — confirmed to actually catch a reordering regression by
+temporarily reverting the fix and watching this specific test fail.
+
+### Item 51: G1 — mark gentoo-stage3-amd64 and both macOS entries unavailable — commit d050f98
+
+Re-confirmed via `curl -I` (not trusted from the stale `OS_STATUS_MATRIX.md` report alone)
+that all three URLs are still dead: `gentoo-stage3-amd64`'s two mirrors both 404, both macOS
+recovery entries' Apple CDN URL 403 Forbidden. Added `Entry.Unavailable`/`UnavailableReason`
+(distinct from `EOL`, which is a "proceed anyway" choice) — `GetEntriesByCategory`/
+`ListCategories` hide unavailable entries (and categories left empty by that) from the TUI
+entirely; `Filter` (used by `cmd/env-check`) excludes them with no override; headless mode's
+`resolveHeadlessImage` refuses an unavailable `--os-id` outright, naming the real reason.
+Tests: `TestGetEntriesByCategory_HidesUnavailableEntries`,
+`TestListCategories_OmitsCategoryWhoseOnlyEntryIsUnavailable`,
+`TestFilter_ExcludesUnavailableRegardlessOfOtherCriteria`,
+`TestBuildHeadlessRequest_RefusesUnavailableCatalogEntry`.
+
+### Item 52: G2 — run root-gated loop-device tests in CI under sudo — commit 11da69e
+
+`engine/revert_linux_loopimage_test.go`'s real loop-device tests check `os.Geteuid() == 0`
+and `t.Skip` otherwise — meaning the existing CI job (running `go test` as the normal
+unprivileged runner user) had always silently skipped this real coverage. Added a job
+running `sudo -E go test ./engine/... ./safety/...` on `ubuntu-latest`. Verified for real in
+this sandbox before adding (not assumed): ran the exact command under sudo here, confirmed
+`ExecuteDecommissionWithOptions`'s three loop-image tests actually execute and pass.
+
+### Items 53-55: G3 — a real dry-run proof for RunProvision against a real loop-device image
+
+Building this proof surfaced two genuine, previously-unknown bugs — found by actually
+attempting the real thing, not by re-reading code:
+
+- **Item 53 (commit 88d09ab)**: the earlier filesystem-write migration (item 46) had routed
+  `streamer.go`/`stream_decoder.go`/`resilient_streamer.go`/`scp_streamer.go`'s
+  `os.MkdirAll`/`Rename`/`Remove` onto `fsRunner` for blanket consistency with every other
+  engine file — silently breaking this project's own documented design that the payload
+  download stays real under `--dry-run`. The real HTTP/local-file copy still happened for
+  real (never migrated), but the FINAL commit (`os.Rename` to `destPath`) got faked, so a
+  dry-run local-file ingest reported success while `destPath` never existed. Reverted all
+  four files back to raw `os.*`. Test:
+  `TestStreamDownloadWithFailover_LocalFileIngestCommitsForRealUnderDryRun` — reproduce-first
+  confirmed by temporarily re-routing the one `Rename` back through `fsRunner` and watching
+  this exact test fail with the predicted symptom.
+- **Item 54 (commit f5986ff)**: `BackupPartitionTable` — called unconditionally near the
+  start of every provision/revert — depends on `blockDeviceSectorSize`/
+  `blockDeviceSizeBytes`/`readDiskRegion` (`engine/partition.go`), all three routed through
+  `cmdRunner`. Under dry-run, `cmdRunner` becomes `DryRunRunner`, which returns empty output
+  for these too, even though none of them write anything — the empty output failed to parse
+  as a number, so `BackupPartitionTable` errored, so every single dry run aborted at
+  "partition-shrink" before any disk-mutating code was ever reached. Added `diskReadRunner()`
+  (`engine/dryrun.go`): returns the real `DefaultRunner` while dry-run is active but still
+  honors a test's own mock, wired into exactly these three unambiguous, always-read-only call
+  sites (not a general command-name allowlist — `parted`/`dd` are each used both read- and
+  write-wise elsewhere). Tests: `TestDiskReadRunner_BypassesDryRunStandIn`,
+  `TestBackupPartitionTable_WorksUnderDryRunAgainstRealLoopDevice` (root-gated, real loop
+  device) — reproduce-first confirmed by temporarily reverting the three call sites and
+  watching the exact predicted `strconv.ParseInt` error.
+- **Item 55 (commit b491bbf)**: the actual proof. `TestRunProvision_DryRunAgainstRealLoopDeviceNeverTouchesTheImage`
+  runs `RunProvision` itself (not a unit of it) under `SetDryRun(true)` against a real,
+  loop-mounted 256MB disk image, asserting the image file's own sha256 is identical before
+  and after. Confirmed via the test's own diagnostic step log (not assumed): the run gets
+  past `partition-shrink`/`image-download` for real (validating item 54's fix), takes
+  `RunProvision`'s own "reuse the already-carved partition" shortcut into `image-deploy`,
+  and fails there specifically on `extractLiveRootFS`'s real >= 20GB size-floor check (the
+  test's image is deliberately undersized so hashing stays fast) — asserted by exact error
+  text, not just "it failed somewhere." Documents, in its own doc comment, the separate,
+  structural reason `mkfs.ext4` would be unreachable even with a large-enough target: the
+  loop-back ISO mount is itself faked under dry-run, so `locateSquashfsOrErr` (item 50)
+  would abort there too — the same already-documented "a step whose success check depends
+  on real output may correctly fail in dry-run" limitation, just via a mount's side effect.
+
+### Item 56: G4 — readiness gate re-checked, stays GREEN
+
+See `READINESS_GATE.md`'s own re-check note. No new Critical/High finding surfaced by G1-G3
+— both bugs found (items 53/54) were fixed immediately, with tests, as part of the same
+work, not left open. The gate's verdict remains 🟢 GREEN, with `docs/dryrun-inventory.md`
+updated to record the new depth this real proof actually reaches.
+
 ## Final Summary (item 41)
 
 **50 commits on `fix/audit-phase-0-1` ahead of `origin/fix/audit-phase-0-1`, plus the
