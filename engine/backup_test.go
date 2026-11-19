@@ -151,3 +151,32 @@ func TestRestoreHostFromBackup_AbortsOnPartitionTableFailure(t *testing.T) {
 		t.Errorf("expected a partition-table-creation error message, got: %v", err)
 	}
 }
+
+// TestBuildGrubReinstallScript_MatchesHostArchNotHardcodedAmd64 is the
+// regression test for audit finding 2.6 (x86_64 hardcoded despite ARM64
+// support), as it applies to disaster-recovery restore: before this fix,
+// the UEFI grub-install invocation always used --target=x86_64-efi
+// regardless of the restoring host's actual architecture. On real arm64
+// host hardware that produces a restored system with an x86_64 GRUB
+// payload the arm64 UEFI firmware cannot execute — a silent, unbootable
+// restore, the exact failure class item 25 already fixed for ignored
+// command errors but which this specific hardcoded string survived.
+func TestBuildGrubReinstallScript_MatchesHostArchNotHardcodedAmd64(t *testing.T) {
+	arm64Script := buildGrubReinstallScript("/dev/sda", true, "arm64")
+	if strings.Contains(arm64Script, "x86_64-efi") {
+		t.Errorf("arm64 host restore script must not target x86_64-efi, got:\n%s", arm64Script)
+	}
+	if !strings.Contains(arm64Script, "arm64-efi") {
+		t.Errorf("arm64 host restore script must target arm64-efi, got:\n%s", arm64Script)
+	}
+
+	amd64Script := buildGrubReinstallScript("/dev/sda", true, "amd64")
+	if !strings.Contains(amd64Script, "x86_64-efi") {
+		t.Errorf("amd64 host restore script must target x86_64-efi, got:\n%s", amd64Script)
+	}
+
+	biosScript := buildGrubReinstallScript("/dev/sda", false, "arm64")
+	if strings.Contains(biosScript, "--target=") {
+		t.Errorf("BIOS (non-UEFI) restore must not pass --target= at all, got:\n%s", biosScript)
+	}
+}

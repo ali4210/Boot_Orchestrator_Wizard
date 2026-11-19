@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -556,20 +557,7 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 	}
 
 	logFn(fmt.Sprintf("=> Reinstalling GRUB bootloader to %s...", targetDisk))
-	var grubScript string
-	if isUEFI {
-		grubScript = fmt.Sprintf(`
-grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=kali --recheck || grub-install %s
-update-grub || grub-mkconfig -o /boot/grub/grub.cfg
-update-initramfs -u -k all || true
-`, targetDisk)
-	} else {
-		grubScript = fmt.Sprintf(`
-grub-install %s || grub-install --recheck %s
-update-grub || grub-mkconfig -o /boot/grub/grub.cfg
-update-initramfs -u -k all || true
-`, targetDisk, targetDisk)
-	}
+	grubScript := buildGrubReinstallScript(targetDisk, isUEFI, runtime.GOARCH)
 
 	chrootCmd := exec.Command("chroot", stageDir, "/bin/sh", "-c", grubScript)
 	_ = chrootCmd.Run()
@@ -577,4 +565,29 @@ update-initramfs -u -k all || true
 	_ = exec.Command("sync").Run()
 	logFn("=> [RESTORE COMPLETE] Operating system successfully restored.")
 	return nil
+}
+
+// buildGrubReinstallScript builds the chroot shell script that reinstalls
+// GRUB onto targetDisk during disaster recovery. goarch is the restoring
+// host's own architecture (e.g. runtime.GOARCH) — grub-install's
+// --target= value must match the host's EFI firmware architecture, not be
+// hardcoded to x86_64-efi, or a restore performed on arm64 host hardware
+// would silently install an x86_64 GRUB payload that the arm64 UEFI
+// firmware cannot execute, leaving the "restored" system unbootable.
+// Extracted as a pure function so the arch-selection logic is directly
+// testable without needing a real chroot/disk.
+func buildGrubReinstallScript(targetDisk string, isUEFI bool, goarch string) string {
+	if isUEFI {
+		_, _, _, grubEFIFormat := efiBootNamesForArch(goarch)
+		return fmt.Sprintf(`
+grub-install --target=%s --efi-directory=/boot/efi --bootloader-id=kali --recheck || grub-install %s
+update-grub || grub-mkconfig -o /boot/grub/grub.cfg
+update-initramfs -u -k all || true
+`, grubEFIFormat, targetDisk)
+	}
+	return fmt.Sprintf(`
+grub-install %s || grub-install --recheck %s
+update-grub || grub-mkconfig -o /boot/grub/grub.cfg
+update-initramfs -u -k all || true
+`, targetDisk, targetDisk)
 }
