@@ -7,10 +7,11 @@ import (
 	"testing"
 )
 
-// withTTY and withLocale are small test helpers that save/restore the two
-// package-level knobs renderBanner's decision depends on, so tests can
-// force either state deterministically regardless of what environment
-// `go test` itself happens to run under (which is never a real TTY).
+// withTTY and withLocaleUTF8 are small test helpers that save/restore the
+// two package-level knobs renderBanner's decision depends on, so tests
+// can force either state deterministically regardless of what
+// environment `go test` itself happens to run under (which is never a
+// real TTY) or which platform it runs on.
 func withTTY(t *testing.T, isTTY bool) {
 	t.Helper()
 	orig := stdoutIsTTYFunc
@@ -18,21 +19,19 @@ func withTTY(t *testing.T, isTTY bool) {
 	t.Cleanup(func() { stdoutIsTTYFunc = orig })
 }
 
-func withLocale(t *testing.T, value string) {
+// withLocaleUTF8 forces localeSupportsUTF8Func's result directly, rather
+// than setting LC_ALL/LC_CTYPE/LANG — those env vars only affect the
+// real Unix implementation (banner_locale_unix.go); Windows's real
+// implementation checks the console's own code page instead and ignores
+// them entirely (banner_locale_windows.go), so this is the only
+// cross-platform-deterministic way to force either outcome in a test
+// that must pass on every platform. banner_locale_unix_test.go
+// separately tests the real Unix env-var mechanism directly.
+func withLocaleUTF8(t *testing.T, supported bool) {
 	t.Helper()
-	for _, name := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
-		orig, had := os.LookupEnv(name)
-		t.Cleanup(func() {
-			if had {
-				os.Setenv(name, orig)
-			} else {
-				os.Unsetenv(name)
-			}
-		})
-	}
-	os.Setenv("LC_ALL", value)
-	os.Unsetenv("LC_CTYPE")
-	os.Unsetenv("LANG")
+	orig := localeSupportsUTF8Func
+	localeSupportsUTF8Func = func() bool { return supported }
+	t.Cleanup(func() { localeSupportsUTF8Func = orig })
 }
 
 func containsBraille(s string) bool {
@@ -58,7 +57,7 @@ func containsCompactTitle(s string) bool {
 // not an inconsistency.
 func TestBannerViewSizes(t *testing.T) {
 	withTTY(t, true)
-	withLocale(t, "en_US.UTF-8")
+	withLocaleUTF8(t, true)
 
 	type expectation struct {
 		braille bool
@@ -118,7 +117,7 @@ func TestBannerViewSizes(t *testing.T) {
 // "happy path" works at all.
 func TestBannerViewSizes_FullArtAtGenerousSize(t *testing.T) {
 	withTTY(t, true)
-	withLocale(t, "en_US.UTF-8")
+	withLocaleUTF8(t, true)
 
 	for _, screen := range []Screen{ScreenModeSelect, ScreenHub} {
 		m := NewModel("")
@@ -139,7 +138,7 @@ func TestBannerViewSizes_FullArtAtGenerousSize(t *testing.T) {
 
 func TestBanner_NonUTF8Locale_FallsBackToCompact(t *testing.T) {
 	withTTY(t, true)
-	withLocale(t, "C")
+	withLocaleUTF8(t, false)
 
 	m := NewModel("")
 	m.screen = ScreenHub
@@ -156,7 +155,7 @@ func TestBanner_NonUTF8Locale_FallsBackToCompact(t *testing.T) {
 
 func TestBanner_NotATTY_NoBannerAtAll(t *testing.T) {
 	withTTY(t, false)
-	withLocale(t, "en_US.UTF-8")
+	withLocaleUTF8(t, true)
 
 	for _, screen := range []Screen{ScreenModeSelect, ScreenHub} {
 		m := NewModel("")
@@ -174,7 +173,7 @@ func TestBanner_NotATTY_NoBannerAtAll(t *testing.T) {
 // to exactly the two named screens, not every screen in the TUI.
 func TestBanner_OtherScreensNeverShowBanner(t *testing.T) {
 	withTTY(t, true)
-	withLocale(t, "en_US.UTF-8")
+	withLocaleUTF8(t, true)
 
 	for _, screen := range []Screen{ScreenAdvancedRoleSelect, ScreenProgress, ScreenDone, ScreenError} {
 		if bannerAppliesToScreen(screen) {
@@ -195,7 +194,7 @@ func TestBanner_OtherScreensNeverShowBanner(t *testing.T) {
 // not just asserted.
 func TestBanner_WhenNotShown_OutputHasNoExtraLines(t *testing.T) {
 	withTTY(t, false)
-	withLocale(t, "en_US.UTF-8")
+	withLocaleUTF8(t, true)
 
 	m := NewModel("")
 	m.screen = ScreenHub

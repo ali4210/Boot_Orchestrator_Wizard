@@ -22,7 +22,16 @@ var bannerArt string
 // bannerLines/bannerWidth/bannerHeight are computed once at package init
 // from the embedded art, not hardcoded, so they can never drift from the
 // actual file.
-var bannerLines = strings.Split(strings.TrimRight(bannerArt, "\n"), "\n")
+//
+// The \r\n -> \n normalization below is defense in depth, not the actual
+// fix: a Windows checkout with core.autocrlf (Git for Windows' default)
+// silently rewrites banner.txt's LF endings to CRLF, which this project
+// hit for real on windows-latest CI — the real fix is .gitattributes
+// (`ui/banner.txt text eol=lf`), which stops that rewrite from happening
+// at checkout in the first place. This replace is kept anyway so the
+// embedded content is correct even if .gitattributes is ever missing,
+// stripped, or not honored by some future git version/host.
+var bannerLines = strings.Split(strings.TrimRight(strings.ReplaceAll(bannerArt, "\r\n", "\n"), "\n"), "\n")
 
 var bannerHeight = len(bannerLines)
 
@@ -74,6 +83,17 @@ var stdoutIsTTYFunc = func() bool {
 	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
 }
 
+// localeSupportsUTF8Func indirects to the real, per-platform
+// localeSupportsUTF8 (banner_locale_unix.go/banner_locale_windows.go) so
+// cross-platform tests can force either outcome deterministically.
+// Needed because the two real implementations check entirely different
+// things (POSIX env vars vs. the Windows console's own code page) — a
+// test cannot portably force "non-UTF-8" by setting LC_ALL the way
+// banner_locale_unix_test.go does, since that has zero effect on
+// Windows's real implementation, which ignores those variables by
+// design (see banner_locale_windows.go's own comment for why).
+var localeSupportsUTF8Func = localeSupportsUTF8
+
 // renderBanner decides what, if anything, to show above the
 // already-rendered header/body/footer for this frame: the full braille
 // art, a compact one-line ASCII fallback, or nothing. It never wraps or
@@ -96,7 +116,7 @@ func renderBanner(screen Screen, width, height int, header, body, footer string)
 
 	nonBannerHeight := lipgloss.Height(header) + lipgloss.Height(body) + lipgloss.Height(footer)
 
-	if localeSupportsUTF8() && width >= bannerWidth && height >= bannerHeight+nonBannerHeight {
+	if localeSupportsUTF8Func() && width >= bannerWidth && height >= bannerHeight+nonBannerHeight {
 		return styleBanner.Render(strings.Join(bannerLines, "\n"))
 	}
 
