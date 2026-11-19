@@ -81,6 +81,16 @@ Against a disposable target disk:
   device (`isBlockDevice`).
 - Confirm it refuses `--target-disk` pointed at the live root disk when not in dual-boot
   mode (`isLikelyLiveRootDisk`).
+- `--target-disk` must already have a partition table. This tool adds a second OS
+  **alongside** an existing one; a disk with no label at all has nothing to shrink or carve
+  free space next to, and the tool will not silently create one for you (see
+  `engine/partition.go`'s `CarveHardwarePartitionAtBoundary` — that is deliberately a
+  separate, explicitly-named feature of `RestoreHostFromBackup`'s disaster-recovery restore
+  instead, not something this path infers from an ambiguous parted error). If you're
+  building a disposable test disk from scratch (a blank loop device or a freshly-attached VM
+  disk) rather than reusing one with a real OS already on it, label it first —
+  `parted /dev/sdX mklabel gpt` — before pointing `--target-disk` at it, or you'll see a
+  plain "has no partition table" refusal instead of a provisioning run.
 - With everything correct, confirm the journal (`safety.DefaultJournalPath()`) gets created,
   progresses through steps, and is cleaned up/finalized on success.
 
