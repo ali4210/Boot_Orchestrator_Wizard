@@ -1627,6 +1627,112 @@ fixed and tested, or explicitly guarded against with a loud, documented refusal 
 fix is impossible to verify (bcd_qemu.go). `READINESS_GATE.md` and `AUDIT_REPORT.md` updated
 accordingly (see below).
 
+## Gate closure: 2.4 (items 45-49)
+
+With 2.6 closed, this section closes the other finding `READINESS_GATE.md` named: 2.4 (no
+real dry-run/simulation mode). Phase 5 (items 31-34) deliberately stopped at a
+proof-of-concept batch — `RunProvision`'s call sites interleaved covered and uncovered
+operations inside the same functions, so running the real flow under simulation at that
+point would have intercepted only part of what happens. These items go back and finish it.
+
+### Item 45: execCommand interception mechanism + FS Symlink/Rename — commit 9a92174
+
+The existing `Runner` interface (`engine/runner.go`) can't model a call site that sets
+`cmd.Stdin`/`cmd.Dir`/`cmd.Env` after construction — its own doc comment says so — and a
+real grep confirmed several genuinely do (`credentials.go`, `partition.go`,
+`engine_linux.go`, `backup.go`). Restructuring those onto `Run`/`RunStdout`'s two-method
+split would mean per-call-site logic changes across ~300 remaining sites — exactly the
+kind of high-risk manual transcription this project's reproduce-first discipline exists to
+avoid at this scale. Added `execCommand`, a package-level var with the exact same
+signature as `exec.Command` (returns a real `*exec.Cmd`), so migrating a call site is a
+pure rename with zero restructuring — callers can still set `.Stdin`/`.Dir`/`.Env` on the
+result exactly as before. `SetDryRun` swaps it to `dryRunExecCommand`, which returns a
+genuine, harmless stand-in (`true` on Linux/macOS, `cmd /c exit 0` on Windows) instead of a
+stub, so it satisfies `.Run()`/`.Output()`/`.CombinedOutput()` and any `.Stdin`/`.Dir`/
+`.Env` the caller sets, without executing anything real. Also extended the `FS` interface
+with `Symlink`/`Rename` (7 real call sites needed them). Tests:
+`TestDryRunExecCommand_NeverExecutesButSatisfiesStdinDirEnv` (proves both halves: never
+runs the real command, genuinely accepts `Stdin`/`Dir`/`Env` without panicking),
+`TestSetDryRun_SwapsBothRunnerAndFSAndRestores` extended to cover the new swap. Updated
+`call_site_ratchet_test.go`'s baselines for `dryrun.go` (2) and `fs.go` (6) — both are
+interception points themselves, same exemption pattern already used for `runner.go`.
+
+### Item 46: migrate every remaining filesystem write onto fsRunner — commit 522ee63
+
+Every remaining raw `os.WriteFile`/`MkdirAll`/`Remove`/`RemoveAll`/`Symlink`/`Rename` call
+site tracked by `call_site_ratchet_test.go`'s `fsWriteBaseline` (20 files, ~160 call
+sites — `bootloader.go`, `orchestrator.go`, `usb_manager.go`, `revert_linux.go`,
+`backup.go`, `bcd_qemu.go`, `streamer.go`, `stream_decoder.go`, `scp_streamer.go`,
+`revert_windows.go`, `isolate.go`, `wim_deployer.go`, `resilient_streamer.go`, `uefi.go`,
+`partition.go`, `slipstream.go`, `revert_darwin.go`, `payload_normalizer.go`, plus
+`ui/model.go`/`ui/provision.go`) routed through `fsRunner` — a pure mechanical rename,
+since `fsRunner`'s methods have the exact same signatures as their `os.*` equivalents.
+`engine/rootfs.go` is the one deliberate exception (dead code, zero callers). Since `ui`
+can't reach `engine`'s package-private `fsRunner` directly, added `engine.FSRunner()` as
+the narrow, always-call-fresh accessor it needs. Verified behavior-preserving, not just
+compiling: the full existing test suite (every loop-device and httptest-backed integration
+test exercising these exact functions for real) stayed green throughout.
+
+### Item 47: migrate every remaining exec.Command call site — commit 1cfc7b0
+
+The exec.Command half of the same migration: 20 files, ~294 call sites
+(`orchestrator.go`, `revert_linux.go`, `usb_manager.go`, `backup.go`, `bcd_qemu.go`,
+`engine_linux.go`, `uefi.go`, `engine_darwin.go`, `wim_deployer.go`, `revert_darwin.go`,
+`revert_windows.go`, `isolate.go`, `engine_windows.go`, `slipstream.go`, `partition.go`,
+`file_dialog.go`, `autodiscover.go`, `efi_bootentry.go`, `credentials.go`,
+`autonomous_installer_script.go`, plus `ui/model.go`) routed onto `execCommand` — again a
+pure rename, no restructuring. Confirmed this specifically closed the Stdin/Dir/Env gap
+Runner's doc comment admits it can't cover: `credentials.go`'s `HashPassword` (`cmd.Stdin`),
+`engine_linux.go`'s `EnsureRequiredPackage` (`cmd.Env`), and `partition.go`'s
+`parted`/`dd` invocations (`cmd.Stdin`, 3 sites) all keep working completely unchanged,
+since `execCommand` returns a real `*exec.Cmd`. `ui/model.go` uses the new
+`engine.ExecCommand()` accessor for the same cross-package reason as item 46's
+`FSRunner()`. Remaining raw `exec.Command(` call sites anywhere in engine/ui (non-test)
+after this: `rootfs.go` (dead code), `runner.go` and `dryrun.go` (the two interception
+points by design) — confirmed via grep, not assumed.
+
+### Item 48: wire --dry-run to actually run the real flow — commit 9647ba0 (banner correction: c9b51a3)
+
+`cmd/orchestrator/main.go`'s `checkDryRun`/`dryRunRefusalMessage` (always printed a refusal
+and `os.Exit(1)`) replaced with `applyDryRunFlag`/`dryRunBanner`: enables
+`engine.SetDryRun(true)` and returns an explanatory banner instead, and `main()` now keeps
+running the real flow (pre-flight, headless, or TUI) afterward rather than exiting. New
+end-to-end proof, not just a unit test of the switch itself:
+`TestRestoreHostFromBackup_DryRunNeverTouchesRealDiskAndSucceeds` reuses the exact
+bogus-disk fixture `TestRestoreHostFromBackup_AbortsOnPartitionTableFailure` (item 25) already
+uses to prove real mode fails fast — under dry-run the same call returns nil instead,
+meaning every mutating call in that function's entire chain (partition, format, mount,
+extract, fstab, grub-install, cleanup) was actually intercepted; if even one call site
+inside this function had been missed, it would still hit the same partition-table error
+real mode does.
+
+Follow-up correction (commit c9b51a3): while double-checking every claim in the banner
+against the real code rather than trusting the first draft, found the banner overclaimed
+— "nothing on this run will touch a real disk" isn't quite true, since the payload
+download itself (`engine/streamer.go`'s real `net/http` GET plus `os.Create`/`io.Copy`) is
+deliberately not intercepted (see item 49's note). Reworded the banner and its doc comment
+to say so explicitly instead of letting the original wording imply more than what's true.
+
+### Item 49: headless --revert's cleanup also honors dry-run — commit e020ef2
+
+The full-repo sweep for this closure found `cmd/orchestrator/revert.go`'s post-revert
+cleanup (removing `orchestrator_installed_os.json`) still used raw `os.Remove` — the exact
+same cleanup `ui/model.go`'s TUI revert path had already been migrated onto
+`engine.FSRunner()` in item 46. Headless `--revert` is a separate, real entry point from
+the TUI, so this was a genuine gap, not a hypothetical one: running `--revert` under
+dry-run would have correctly intercepted `ExecuteDecommissionWithOptions`'s own operations
+but still deleted a real file afterward. Fixed via the same accessor.
+
+**2.4 is now closed**, with two residual gaps left deliberately uncovered and documented
+rather than silently gapped: the payload download (never touches the target disk; see
+`docs/dryrun-inventory.md`), and `safety.Journal`'s own bookkeeping writes (a
+cross-package-cycle issue — `safety` can't import `engine` — and a materially
+lower-risk category than disk/bootloader/NVRAM writes). A new, previously-undocumented
+dead-code file was also found during the sweep: `hypervisor/compact.go`
+(`ZeroFillGuestLinux`/`ZeroFillGuestWindows`/`PlanHostCompact`, zero callers anywhere in
+the repo) — flagged in `docs/ROADMAP.md`, same treatment as `engine/rootfs.go`, not
+deleted this pass. `READINESS_GATE.md` and `AUDIT_REPORT.md` updated accordingly.
+
 ## Final Summary (item 41)
 
 **50 commits on `fix/audit-phase-0-1` ahead of `origin/fix/audit-phase-0-1`, plus the
