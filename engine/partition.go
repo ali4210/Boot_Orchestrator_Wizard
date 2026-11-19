@@ -277,6 +277,23 @@ func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint6
 	// 2. Read partition map
 	out, err := diskReadRunner().Run("parted", "-s", diskPath, "unit", "s", "print")
 	if err != nil {
+		// This codepath exists to shrink/carve alongside an EXISTING OS on
+		// diskPath, not to prepare a brand-new disk from scratch (that is
+		// a deliberately separate feature — see RestoreHostFromBackup in
+		// backup.go, which DOES create a fresh GPT label, for a disaster-
+		// recovery restore onto a known-blank replacement disk). A disk
+		// with no partition table at all has nothing to dual-boot
+		// alongside, so this requires one to already exist rather than
+		// guessing "unrecognised disk label" always means "safe to
+		// silently create one" — that same parted message is also what a
+		// corrupted or unsupported-scheme table looks like, and auto-
+		// labelling over an unknown (not confirmed-blank) disk risks
+		// destroying something recoverable. Reported plainly instead, so
+		// the fix is an explicit, deliberate step (see
+		// MANUAL_TEST_PLAN.md), not a guess this tool makes for you.
+		if strings.Contains(string(out), "unrecognised disk label") {
+			return nil, fmt.Errorf("%s has no partition table — this installer adds a second OS alongside an existing one and requires the target disk to already be labelled; create one first (e.g. `parted %s mklabel gpt`), then try again: %w", diskPath, diskPath, err)
+		}
 		return nil, fmt.Errorf("reading partition table on %s: %w\n%s", diskPath, err, string(out))
 	}
 
