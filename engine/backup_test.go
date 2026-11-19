@@ -3,6 +3,7 @@ package engine
 import (
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -40,6 +41,9 @@ func withFakeFindmntAndLsblk(t *testing.T, findmntRules map[string]string, lsblk
 // safe to repartition into ext4+FAT32. It must now be classified removable
 // only by lsblk's own RM or TRAN=="usb" signal.
 func TestDetectBackupTargets_InternalSecondDiskNotTreatedAsRemovable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("withFakeLsblk's #!/bin/sh fake-binary mechanism only works on a real POSIX shell — unrelated to DetectBackupTargets's own correctness, which already degrades gracefully on Windows (clean wrapped error, no panic, when the real lsblk isn't found there); see TestDetectBackupTargets_NoLsblkOnPATH_ReturnsCleanErrorNotPanic, which runs on every platform")
+	}
 	// DetectActiveRootDisk (called internally) reads the real host's own
 	// root mount — read-only, and irrelevant here since neither fixture
 	// disk is named after whatever that happens to be on the test machine.
@@ -84,6 +88,9 @@ func TestDetectBackupTargets_InternalSecondDiskNotTreatedAsRemovable(t *testing.
 // have been offered as a valid backup target to repartition, even though
 // it's the disk the tool is currently running from.
 func TestDetectBackupTargets_ExcludesLiveUSBBootDiskEvenOnOverlayRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("withFakeFindmntAndLsblk's #!/bin/sh fake-binary mechanism only works on a real POSIX shell — same reason as TestDetectBackupTargets_InternalSecondDiskNotTreatedAsRemovable above")
+	}
 	withFakeFindmntAndLsblk(t,
 		map[string]string{
 			"/":                "overlay",
@@ -119,6 +126,35 @@ func TestDetectBackupTargets_ExcludesLiveUSBBootDiskEvenOnOverlayRoot(t *testing
 	}
 	if !found {
 		t.Fatalf("expected the other, genuinely pluggable USB disk 'sdy' to still be offered as a backup target, got: %+v", targets)
+	}
+}
+
+// TestDetectBackupTargets_NoLsblkOnPATH_ReturnsCleanErrorNotPanic is the
+// regression/reachability test for audit follow-up (Windows CI):
+// DetectBackupTargets is reachable on a Windows host for real —
+// ui/model.go's scanBackupDrivesCmd calls it unconditionally, with no
+// runtime.GOOS guard, whenever the TUI's backup screen is opened — and
+// Windows has no lsblk at all. Runs on every platform (not Windows-only):
+// the point is proving DetectBackupTargets's own error handling is
+// correct, which is a property worth checking everywhere, not simulating
+// Windows specifically. Confirms the already-correct behavior (a clean,
+// wrapped error, never a panic) rather than assuming it from reading the
+// source — an empty PATH makes `lsblk` genuinely unresolvable on any
+// platform, the same shape of failure as "lsblk not found" on Windows.
+func TestDetectBackupTargets_NoLsblkOnPATH_ReturnsCleanErrorNotPanic(t *testing.T) {
+	origPath := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", origPath) })
+	os.Setenv("PATH", t.TempDir()) // a real, empty directory — guaranteed no lsblk
+
+	targets, err := DetectBackupTargets()
+	if err == nil {
+		t.Fatalf("expected a clean error when lsblk cannot be found, got nil (targets: %+v)", targets)
+	}
+	if targets != nil {
+		t.Fatalf("expected nil targets alongside the error, got: %+v", targets)
+	}
+	if !strings.Contains(err.Error(), "querying storage topology") {
+		t.Fatalf("expected the error to name what it was doing, got: %v", err)
 	}
 }
 
