@@ -77,6 +77,18 @@ type ProvisionResult struct {
 // it actually is. fail() (below) emits a specific, user-facing message
 // explaining this at the moment image-deploy fails, rather than leaving
 // it to this handler's own silence to explain nothing at all.
+// autonomousUSBEFILoaderNVRAMPath is the Windows-style EFI loader path
+// (efibootmgr's -l argument) for the one-shot NVRAM boot entry that points
+// at whatever ArmAutonomousUSBBootloader actually staged on the USB
+// drive's EFI/BOOT directory — BOOTX64.EFI on amd64 hosts, BOOTAA64.EFI on
+// arm64 hosts (see usb_manager.go's efiBootNamesForArch, the single source
+// of truth both call sites now share). goarch is the host's own
+// architecture (e.g. runtime.GOARCH).
+func autonomousUSBEFILoaderNVRAMPath(goarch string) string {
+	loaderName, _, _, _ := efiBootNamesForArch(goarch)
+	return `\EFI\BOOT\` + loaderName
+}
+
 func RollbackImageDeploy(_ json.RawMessage) error {
 	return nil
 }
@@ -1181,7 +1193,14 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 
 			onUpdate(StepUpdate{StepName: "=> [NVRAM ENGINE] Setting one-shot UEFI BootNext to USB...", Done: false})
 			usbDiskParent, usbBootNum, _ := SplitDiskAndPartition(bootDev)
-			_ = exec.Command("efibootmgr", "-c", "-d", usbDiskParent, "-p", usbBootNum, "-L", "ORCH_AUTONOMOUS_INSTALLER", "-l", `\EFI\BOOT\BOOTX64.EFI`).Run()
+			// Must match whatever ArmAutonomousUSBBootloader actually staged
+			// at EFI/BOOT on this host's architecture (BOOTX64.EFI vs
+			// BOOTAA64.EFI — see usb_manager.go's efiBootNamesForArch).
+			// Hardcoding BOOTX64.EFI here would register an NVRAM one-shot
+			// boot entry pointing at a file that doesn't exist on an arm64
+			// host's USB stick, silently breaking the reboot-into-installer
+			// step even though the USB media itself was staged correctly.
+			_ = exec.Command("efibootmgr", "-c", "-d", usbDiskParent, "-p", usbBootNum, "-L", "ORCH_AUTONOMOUS_INSTALLER", "-l", autonomousUSBEFILoaderNVRAMPath(runtime.GOARCH)).Run()
 
 			bootNum := ""
 			if out, err := exec.Command("efibootmgr").Output(); err == nil {

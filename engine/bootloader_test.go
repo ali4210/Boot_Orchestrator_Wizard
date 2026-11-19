@@ -130,3 +130,20 @@ func TestAssertDefaultCredentials_FailsLoudlyWhenAccountNotVerified(t *testing.T
 		t.Fatalf("expected the error to name the account, got: %v", err)
 	}
 }
+
+// TestDebianKernelPackageForArch_MatchesGuestArch is the regression test
+// for audit finding 2.6 (x86_64 hardcoded despite ARM64 support) as it
+// applies to assertBootableKernelAndPackages' self-heal install: before
+// this fix, a guest OS extracted with no kernel present always had
+// "linux-image-amd64" apt-get installed into its chroot, which fails
+// outright against an arm64 guest's own apt (debian-netboot-arm64,
+// ubuntu-server-arm64 — added in item 36), since no such package exists in
+// the arm64 repos.
+func TestDebianKernelPackageForArch_MatchesGuestArch(t *testing.T) {
+	if got := debianKernelPackageForArch("arm64"); got != "linux-image-arm64" {
+		t.Errorf("arm64: expected linux-image-arm64, got %q", got)
+	}
+	if got := debianKernelPackageForArch("amd64"); got != "linux-image-amd64" {
+		t.Errorf("amd64: expected linux-image-amd64, got %q", got)
+	}
+}

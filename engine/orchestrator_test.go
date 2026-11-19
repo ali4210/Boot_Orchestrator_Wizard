@@ -123,3 +123,20 @@ func TestRollbackAll_ImageDeployStepRollsBackWithoutError(t *testing.T) {
 		t.Fatalf("expected RollbackAll to complete without error for a failed image-deploy step, got: %v", err)
 	}
 }
+
+// TestAutonomousUSBEFILoaderNVRAMPath_MatchesHostArch is the regression
+// test for audit finding 2.6 (x86_64 hardcoded despite ARM64 support) as it
+// applies to the autonomous-USB one-shot NVRAM boot entry: before this fix,
+// RunProvision always registered \EFI\BOOT\BOOTX64.EFI regardless of the
+// host's real architecture, which on an arm64 host points at a file that
+// was never staged (ArmAutonomousUSBBootloader stages BOOTAA64.EFI there —
+// see usb_manager.go's efiBootNamesForArch), silently breaking the
+// reboot-into-installer step even though the USB media itself was correct.
+func TestAutonomousUSBEFILoaderNVRAMPath_MatchesHostArch(t *testing.T) {
+	if got := autonomousUSBEFILoaderNVRAMPath("arm64"); got != `\EFI\BOOT\BOOTAA64.EFI` {
+		t.Errorf("arm64 host: expected \\EFI\\BOOT\\BOOTAA64.EFI, got %q", got)
+	}
+	if got := autonomousUSBEFILoaderNVRAMPath("amd64"); got != `\EFI\BOOT\BOOTX64.EFI` {
+		t.Errorf("amd64 host: expected \\EFI\\BOOT\\BOOTX64.EFI, got %q", got)
+	}
+}

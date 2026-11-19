@@ -403,11 +403,29 @@ func assertBootableKernelAndPackages(rootPath string, logFn func(string)) error 
 		_ = os.WriteFile(filepath.Join(rootPath, "etc", "resolv.conf"), hostDNS, 0644)
 	}
 
-	installScript := "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-image-amd64 systemd-sysv sudo"
+	installScript := "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends " +
+		debianKernelPackageForArch(runtime.GOARCH) + " systemd-sysv sudo"
 	logFn(fmt.Sprintf("=> [PACKAGE SELF-HEAL] Executing: %s", installScript))
 	_, _ = cmdRunner.Run("chroot", rootPath, "/bin/sh", "-c", installScript)
 
 	return nil
+}
+
+// debianKernelPackageForArch returns the real Debian/Ubuntu kernel
+// metapackage name for goarch (the same values runtime.GOARCH uses). This
+// chroot runs inside the newly-provisioned guest OS, and a dual-boot guest
+// is always the same architecture as the host (you cannot boot an arm64
+// guest on amd64 UEFI firmware or vice versa — see docs/ARCH_SUPPORT.md),
+// so goarch here is the host's own architecture. Hardcoding
+// "linux-image-amd64" would make this self-heal install step try to pull an
+// amd64 kernel package into an arm64 guest's own apt (debian-netboot-arm64,
+// ubuntu-server-arm64 — added in item 36), which fails outright since no
+// such package exists in the arm64 repos.
+func debianKernelPackageForArch(goarch string) string {
+	if goarch == "arm64" {
+		return "linux-image-arm64"
+	}
+	return "linux-image-amd64"
 }
 
 // assertDefaultCredentials creates creds.Username (sudo-enabled) in the

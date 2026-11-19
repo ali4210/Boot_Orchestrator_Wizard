@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -88,7 +89,7 @@ func (m *Model) selectLocalPayload(path string, sizeBytes int64, versionLabel st
 		Version:         versionLabel,
 		Family:          fam,
 		Flavor:          "gui",
-		Arch:            "amd64",
+		Arch:            syntheticEntryArch(),
 		DownloadURL:     path,
 		Mirrors:         []string{path},
 		ApproxSizeBytes: uint64(sizeBytes),
@@ -96,6 +97,29 @@ func (m *Model) selectLocalPayload(path string, sizeBytes int64, versionLabel st
 	}
 	m.customBootCursor = 0
 	m.screen = ScreenCustomBootModeSelect
+}
+
+// syntheticEntryArch is the best available Arch label for a user-supplied
+// or LAN-discovered payload whose real architecture this tool cannot
+// introspect (a raw ISO/IMG path, or a LAN peer's advertised URL). It is
+// display-only — discovery.Entry.Arch is never consulted by the actual
+// bootloader-writing logic (that always keys off runtime.GOARCH directly,
+// since a dual-boot guest must match the host's firmware architecture
+// anyway) — but hardcoding "amd64" here would mislabel an arm64 host's own
+// custom payload, so this reports the host's real architecture instead.
+func syntheticEntryArch() discovery.Arch {
+	return archForGOARCH(runtime.GOARCH)
+}
+
+// archForGOARCH is syntheticEntryArch's pure mapping, extracted so the
+// arch-selection logic is directly testable for both architectures without
+// needing to actually build/run this binary on each one (same pattern as
+// engine/usb_manager.go's efiBootNamesForArch).
+func archForGOARCH(goarch string) discovery.Arch {
+	if goarch == "arm64" {
+		return discovery.ArchARM64
+	}
+	return discovery.ArchAMD64
 }
 
 type categoryItem struct {
@@ -1660,7 +1684,7 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					Version:         fmt.Sprintf("LAN Peer (%s:8080)", selected.IP),
 					Family:          fam,
 					Flavor:          "gui",
-					Arch:            "amd64",
+					Arch:            syntheticEntryArch(),
 					DownloadURL:     selected.URL,
 					Mirrors:         []string{selected.URL},
 					ApproxSizeBytes: uint64(selected.SizeBytes),
@@ -1686,7 +1710,7 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					Version:         "Peer Endpoint",
 					Family:          fam,
 					Flavor:          "gui",
-					Arch:            "amd64",
+					Arch:            syntheticEntryArch(),
 					DownloadURL:     val,
 					Mirrors:         []string{val},
 					ApproxSizeBytes: 8 * 1024 * 1024 * 1024,
