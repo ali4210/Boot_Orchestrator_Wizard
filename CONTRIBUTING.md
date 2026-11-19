@@ -45,18 +45,37 @@ development:
 - **Never rewrite git history** (`rebase -i`, `commit --amend` on anything already
   committed) and **never force-push**.
 
-## Running the root-gated / destructive-but-safe tests
-
-A handful of tests exercise real partition/filesystem operations against a loop-mounted disk
-image file, and require the test *process itself* to run as root (they check
-`os.Geteuid()`and skip cleanly otherwise):
+## Running the tests: two supported commands
 
 ```bash
-sudo -E "$(which go)" test ./engine/... -run TestExecuteDecommission -v
+go test ./...                                 # as a normal (non-root) user
+sudo -E go test ./engine/... ./safety/...     # for the root-gated loop-image tests
 ```
 
-These never touch a real block device — only a `.img` file created in a temp directory for
-the duration of the test.
+- **`go test ./...`, as a normal user.** This is the default, and what you should run while
+  developing. A handful of tests require real root privileges to exercise their real
+  behavior (see below) and will cleanly `t.Skip` themselves here rather than fail — that's
+  expected, not a gap.
+- **`sudo -E go test ./engine/... ./safety/...`.** A handful of tests exercise real
+  partition/filesystem operations against a loop-mounted disk image file (`losetup`), and
+  require the test *process itself* — not just a subcommand it shells out to — to run as
+  root; they check `os.Geteuid() == 0` directly and skip cleanly otherwise. `-E` preserves
+  your environment (`GOCACHE`/`GOPATH`/`PATH`) so `go` itself is still found and uses your
+  already-permissioned build cache, rather than trying to rebuild one as root. These never
+  touch a real block device — only a `.img` file created in a temp directory for the
+  duration of the test. This is exactly what `.github/workflows/ci.yml`'s
+  `test-root-gated-loopdevice` job runs in CI on every push/PR, not just something to run
+  locally by hand.
+  - **The reverse also holds**: `autorun_test.go`'s `TestCheckRootOwnedFiles_BinOwnedByRootBlocks`/
+    `TestCheckRootOwnedFiles_RuntimeDirOwnedByRootBlocks` test `autorun.sh`'s
+    `check_root_owned_files`, which intentionally does nothing when `$EUID -eq 0` (root can
+    read/write/purge anything regardless of file ownership, so there's nothing to block) —
+    these two specifically check `os.Geteuid() == 0` and skip under the *second* command
+    above, the opposite of the loop-image tests. Both directions of "skip under the wrong
+    privilege level" are deliberate, not something to "fix" by forcing a test to run
+    somewhere its own premise doesn't hold.
+  - If you only need one specific root-gated test while iterating, narrow it with `-run`,
+    e.g. `sudo -E go test ./engine/... -run TestExecuteDecommission -v`.
 
 ## Verification tools (don't run these casually)
 
