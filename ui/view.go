@@ -103,7 +103,13 @@ func (m Model) View() string {
 	}
 
 	footer := StyleFooter.Render(m.footerHint())
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+
+	parts := make([]string, 0, 4)
+	if banner := renderBanner(m.screen, m.width, m.height, header, body, footer); banner != "" {
+		parts = append(parts, banner)
+	}
+	parts = append(parts, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 func (m Model) footerHint() string {

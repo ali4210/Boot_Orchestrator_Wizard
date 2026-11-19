@@ -1,0 +1,9 @@
+# ui/banner.txt is braille-art, checked by hand and embedded verbatim via
+# go:embed (ui/banner.go): every line must stay exactly as wide as every
+# other, with LF-only endings. Without this, a Windows checkout with
+# core.autocrlf (the default for Git for Windows installs) silently
+# rewrites every LF to CRLF on checkout, embedding a stray \r at the end
+# of each line — found via windows-latest CI actually failing on it, not
+# assumed. `eol=lf` forces LF on checkout regardless of the platform or
+# the cloning user's own core.autocrlf setting.
+ui/banner.txt text eol=lf
