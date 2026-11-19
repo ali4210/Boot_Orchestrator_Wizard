@@ -106,16 +106,15 @@ rather than as blocking the gate (neither is Critical/High on its own):
   TUI, refused in headless mode) and re-confirmed via `curl -I` that all three URLs are
   still dead as of this pass. The data-curation half (fixing the URLs) is still open —
   that's a sourcing task, not a code fix, and isn't what was blocking.
-- **`alpine-linux-amd64` is incompatible with the current autonomous install pipeline**
-  (no squashfs, no `/live` directory) — found by `OS_STATUS_MATRIX.md`'s real Tier 2 run.
-  Item 50 (G1) fixed the actual safety consequence of this class of incompatibility (both
-  real install paths now abort before any disk write instead of formatting first and
-  discovering the problem after), with a real test proving it — but the entry itself is
-  still catalogued as available and will still fail at image-deploy if selected; marking it
-  `Unavailable` too (like items 50-51 did for gentoo/macOS) is a reasonable, small follow-up
-  not done this pass, since unlike gentoo/macOS this is a pipeline-incompatibility, not a
-  dead URL, and the current "fails loudly before any disk write" behavior is the real safety
-  property that mattered, not "must never be offered at all."
+- ~~`alpine-linux-amd64` is incompatible with the current autonomous install pipeline~~ —
+  found by `OS_STATUS_MATRIX.md`'s real Tier 2 run (no squashfs, no `/live` directory). Item
+  50 (G1) fixed the safety consequence of this class of incompatibility first (both real
+  install paths now abort before any disk write instead of formatting first and discovering
+  the problem after, with a real test). A later pass then marked the entry itself
+  `Unavailable` (`"incompatible with the autonomous installer"`, same mechanism and
+  `UnavailableReason` field as `gentoo-stage3-amd64`/macOS) — hidden from the TUI's catalog
+  listing and refused outright in headless mode, with a real test proving both against the
+  actual embedded manifest entry (not just a synthetic fixture), reproduce-first confirmed.
 - **`engine/rootfs.go`** (~780 lines) and **`hypervisor/compact.go`** (~150 lines) have
   zero callers anywhere in the repo — both confirmed dead code, neither deleted (a
   deliberate decision deferred to `docs/ROADMAP.md`, not an oversight; `compact.go` was
@@ -165,6 +164,31 @@ updated in place rather than left stale: the gentoo/macOS dead-URL gap's safety 
 is now actually closed (items 50-51), and the Alpine incompatibility's safety consequence
 is now closed too (item 50's abort-before-disk-write fix), with both sections saying
 precisely what is and isn't still open rather than a blanket "fixed"/"not fixed".
+
+## Update: real Windows go test failures (Part A) + Alpine marked Unavailable (Part B)
+
+Watching the PR's actual CI runs to completion (not just `go build`/`go vet` cross-compiles)
+surfaced 14 more real `go test ./...` failures on `windows-latest`, beyond the ones G1-G3
+already fixed — all genuinely new information, not re-litigating anything above. Investigated
+each by confirming reachability first, per the same discipline as everything else in this
+document: the underlying production code (chroot-based Linux account provisioning,
+lsblk-dependent USB/backup discovery, the bash-script-driven autonomous-USB worker script)
+is unreachable on a Windows host in every case except one — `injectAutounattend`'s Windows
+setup answer file (the plaintext-password "equivalent" `writeScriptSecurely`'s own tests
+asked about), which IS genuinely reachable and functional on native Windows, and got a real
+ACL fix (the same `safety.RestrictToAdministrators` the journal directory already uses), not
+a skip. Every skip has a one-line reason in the code and in `PROGRESS.md`; every skipped test
+was verified to still run and pass on Linux. `safety/journal_acl_windows_test.go`'s ACL test
+is confirmed to have run as part of a clean `boot-orchestrator/safety` package result on
+`windows-latest` (CI doesn't run `-v`, so no literal per-test line is visible, stated
+honestly rather than overclaimed). `autorun.bat`/`autorun.ps1` have **no CI coverage at
+all** — not even a syntax check — confirmed via grep across `.github/workflows/*.yml`,
+reported as a real gap, not fixed (building that coverage wasn't asked for).
+
+Part B: `alpine-linux-amd64` is now marked `Unavailable` (`"incompatible with the autonomous
+installer"`) — hidden from the TUI, refused in headless mode, same mechanism as
+`gentoo-stage3-amd64`/macOS, with a real test against the actual embedded manifest entry
+(reproduce-first confirmed).
 
 ## What would make this NOT green again
 

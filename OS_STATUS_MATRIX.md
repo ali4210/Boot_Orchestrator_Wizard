@@ -95,14 +95,21 @@ entries), `testing/reports/tier2-alpine-linux-amd64-2026-11-18.json`,
    `*.squashfs` file anywhere (it uses `boot/modloop-lts`, a squashfs-*formatted* module
    loopback file, but not named `*.squashfs` and not at a path
    `renderAutonomousInstallerScript`'s `SQUASH_FILE` search recognizes) and no `/live`
-   directory either. If a user ever selected Alpine for a dual-boot autonomous install, the
-   script would silently fall through to its generic `rsync -aHAX /mnt/source/ /mnt/target/`
-   fallback — copying the **live ISO's own read-only root**, not an installable rootfs, onto
-   the target partition. This is very unlikely to produce a bootable installed system. Not
-   fixed in this pass (Phase 3 is verification, not remediation) — flagged here for Phase 4 or
-   a follow-up to either special-case Alpine's `modloop` layout in the installer script, or
-   mark `alpine-linux-amd64` as TTY/live-only (not dual-boot-installable) in the manifest until
-   it is.
+   directory either. Before audit follow-up G1 (`PROGRESS.md` item 50), selecting Alpine for a
+   dual-boot autonomous install would have silently fallen through to the installer script's
+   generic `rsync -aHAX /mnt/source/ /mnt/target/` fallback — copying the **live ISO's own
+   read-only root**, not an installable rootfs, onto the target partition — only after the
+   target partition had already been destructively reformatted.
+   **Status update**: item 50 fixed the safety consequence for real (both real install paths
+   now detect an unsupported layout and abort *before* any disk write — see
+   `engine/autonomous_installer_script.go`'s `detectInstallerLayoutOrAbort` and
+   `engine/orchestrator.go`'s `locateSquashfsOrErr`, both with real tests proving it). A later
+   follow-up (item 65 at the time of this note) went further and marked `alpine-linux-amd64`
+   `Unavailable` in the manifest (`"incompatible with the autonomous installer"`) — hidden from
+   the TUI's catalog listing and refused outright in headless mode, the same treatment
+   `gentoo-stage3-amd64` and both macOS entries already had — rather than leaving it
+   selectable only to fail loudly at image-deploy time. See `READINESS_GATE.md` and
+   `PROGRESS.md` for the real commits/tests.
 4. **approx_size_bytes drift is widespread but not itself a bug.** 12 of 29 entries show a
    real `Content-Length` more than 256MiB off from the manifest's `approx_size_bytes`. Nearly
    all of these point at a distro's own "latest"/rolling URL (Rocky "latest", Fedora point

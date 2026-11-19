@@ -252,6 +252,37 @@ func TestBuildHeadlessRequest_RefusesUnavailableCatalogEntry(t *testing.T) {
 	}
 }
 
+// TestBuildHeadlessRequest_RefusesRealAlpineEntry is
+// TestBuildHeadlessRequest_RefusesUnavailableCatalogEntry's counterpart
+// against the REAL embedded catalog (discovery.LoadEmbedded, the exact
+// loader runHeadless itself uses — see headless.go) rather than a
+// synthetic fixture: proves the actual alpine-linux-amd64 manifest entry,
+// not just the general Unavailable mechanism, is refused in headless
+// mode. alpine-linux-amd64 was marked Unavailable because
+// OS_STATUS_MATRIX.md's real Tier 2/3 runs found its ISO incompatible
+// with the autonomous installer (no squashfs, no /live directory).
+func TestBuildHeadlessRequest_RefusesRealAlpineEntry(t *testing.T) {
+	withFakeBlockDevice(t, "/dev/sdz")
+	cfg := validHeadlessConfig(t, "a-fine-password")
+	cfg.OSID = "alpine-linux-amd64"
+
+	catalog, err := discovery.LoadEmbedded()
+	if err != nil {
+		t.Fatalf("discovery.LoadEmbedded: %v", err)
+	}
+
+	_, err = buildHeadlessRequest(cfg, catalog, hypervisor.KindBareMetal, "", "", "")
+	if err == nil {
+		t.Fatalf("expected buildHeadlessRequest to refuse the real alpine-linux-amd64 entry")
+	}
+	if !strings.Contains(err.Error(), "unavailable") {
+		t.Errorf("expected the error to say the entry is unavailable, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "incompatible with the autonomous installer") {
+		t.Errorf("expected the error to carry the real UnavailableReason, got: %v", err)
+	}
+}
+
 // TestBuildHeadlessRequest_IsoPathUsesLocalFile proves --iso-path routes
 // the local file path straight into ImageURL (the same "local path" ingest
 // mechanism engine/streamer.go already supports for absolute paths), with

@@ -110,3 +110,48 @@ func TestEmbeddedCatalog_DoesNotContainWindowsXP(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedCatalog_AlpineIsMarkedUnavailable is the regression test for
+// marking alpine-linux-amd64 Unavailable: OS_STATUS_MATRIX.md's real Tier
+// 2/3 runs found Alpine's standard ISO has neither a *.squashfs file nor a
+// /live directory, so the autonomous installer's layout detection
+// (engine/autonomous_installer_script.go's detectInstallerLayoutOrAbort,
+// item 50/G1) would correctly refuse it every time — a real, reproducible
+// incompatibility, not a hypothetical one. Marked the same way
+// gentoo-stage3-amd64 and both macOS entries already are: hidden from the
+// TUI's catalog listing (GetEntriesByCategory/ListCategories) and refused
+// outright in headless mode (see cmd/orchestrator's own test for that
+// half), rather than letting a user discover the incompatibility only
+// after selecting it and watching a real download run.
+func TestEmbeddedCatalog_AlpineIsMarkedUnavailable(t *testing.T) {
+	cat, err := LoadEmbedded()
+	if err != nil {
+		t.Fatalf("LoadEmbedded: %v", err)
+	}
+
+	var alpine *Entry
+	for i := range cat.Entries {
+		if cat.Entries[i].ID == "alpine-linux-amd64" {
+			alpine = &cat.Entries[i]
+			break
+		}
+	}
+	if alpine == nil {
+		t.Fatalf("expected an alpine-linux-amd64 entry in the embedded catalog")
+	}
+	if !alpine.Unavailable {
+		t.Fatalf("expected alpine-linux-amd64 to be marked Unavailable, got: %+v", alpine)
+	}
+	if !strings.Contains(alpine.UnavailableReason, "incompatible with the autonomous installer") {
+		t.Fatalf(`expected UnavailableReason to say "incompatible with the autonomous installer", got %q`, alpine.UnavailableReason)
+	}
+
+	// Hidden from the TUI's catalog listing — same mechanism as
+	// gentoo-stage3-amd64/macOS (discovery/availability_test.go), checked
+	// here against the REAL embedded catalog rather than a synthetic one.
+	for _, e := range cat.GetEntriesByCategory(alpine.Category) {
+		if e.ID == "alpine-linux-amd64" {
+			t.Fatalf("expected alpine-linux-amd64 to be hidden from GetEntriesByCategory(%q), but it was listed", alpine.Category)
+		}
+	}
+}
