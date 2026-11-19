@@ -1822,6 +1822,12 @@ signatures are not backfilled for any catalog entry. `engine/rootfs.go`'s dead c
 found and flagged, not removed. Windows, macOS, and real arm64 hardware were never driven
 end-to-end from this (Linux-only) development sandbox. `test/os-matrix` is not merged.
 
+> **Superseded, 2026-11-19**: 2.4 and 2.6 are both now closed (items 42-49 above; see
+> `READINESS_GATE.md`, verdict now 🟢 GREEN) and `test/os-matrix` is now merged into this
+> branch (`679dc6d`). The rest of this paragraph is left as-written, as the honest record
+> of what was true at item 41's checkpoint — not edited in place, since that would erase
+> the actual history of what was and wasn't done at the time.
+
 **The discipline that was actually followed, not just stated at the top of this file:**
 every single "Done" item above has a real commit hash; every bug fix has a test verified
 failing before the fix and passing after (via `git stash`/temporary reversion, checked

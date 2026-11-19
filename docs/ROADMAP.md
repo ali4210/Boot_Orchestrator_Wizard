@@ -13,12 +13,12 @@ effort works through).
   confirmation gating, revert swap-recreation + injectable ESP/NVRAM, USB mount retry
   hardening, the ISO-picker wiring fixes, journal test isolation + step-name completeness
   checks, and the download-verify.yml/bug-repro documentation.
-- **Phase 3 (OS verification matrix)** — complete on branch `test/os-matrix`, **not yet
-  merged into this branch**. All four tiers (catalog reachability, Docker ISO-structure
-  check, QEMU/OVMF boot, Windows/macOS native build+test) have a real, working
-  implementation, each proven against at least one real case — see `OS_STATUS_MATRIX.md`
-  for the actual results and the real bugs it found (two dead manifest URLs, one catalog
-  entry incompatible with the current install pipeline).
+- **Phase 3 (OS verification matrix)** — complete, and merged into this branch
+  (`679dc6d`). All four tiers (catalog reachability, Docker ISO-structure check, QEMU/OVMF
+  boot, Windows/macOS native build+test) have a real, working implementation, each proven
+  against at least one real case — see `OS_STATUS_MATRIX.md` for the actual results and
+  the real bugs it found (two dead manifest URLs, one catalog entry incompatible with the
+  current install pipeline).
 - **Phase 4 (remaining audit items 2.7/2.12-2.17 + open-source readiness, items 20-30)** —
   complete: OpenPGP signature verification (built and wired into the real download flow),
   the image-deploy rollback limitation documented, the unsupported Windows XP entry
@@ -43,8 +43,6 @@ effort works through).
   installer menu (`testing/qemu/boot-and-verify-aarch64.sh`,
   `testing/reports/tier3-debian-netboot-arm64-*`). Never run on real arm64 hardware — see
   `MANUAL_TEST_PLAN.md` section 8.
-- **Merge `test/os-matrix`** into the main line — it's currently a parallel branch, not yet
-  integrated. Not blocking anything; purely a housekeeping/integration task.
 - **Final deliverables**: `MANUAL_TEST_PLAN.md`, `AUDIT_REPORT.md`'s "Remediation
   Progress" section, and `READINESS_GATE.md` all exist and are kept current — see
   `READINESS_GATE.md` for this project's own honest verdict on itself, re-checked each

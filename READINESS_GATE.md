@@ -120,8 +120,10 @@ rather than as blocking the gate (neither is Critical/High on its own):
   entry — but never on real arm64 hardware, and the autonomous-USB-staging fix (item 36)
   has only a unit-level proof, not a real-hardware one (see `MANUAL_TEST_PLAN.md` section
   8).
-- **`test/os-matrix` (Phase 3) is not merged** into this branch — `OS_STATUS_MATRIX.md`,
-  `cmd/catalog-verify`, and the Docker/QEMU-x86_64 tooling it describes live there, not here.
+- ~~`test/os-matrix` (Phase 3) is not merged into this branch~~ — merged (`679dc6d`).
+  `OS_STATUS_MATRIX.md`, `cmd/catalog-verify`, and the Docker/QEMU-x86_64 tooling it
+  describes now live on this branch too; `go build`/`vet`/`test` confirmed green
+  afterward, not assumed.
 
 ## What every closed item IS backed by
 
