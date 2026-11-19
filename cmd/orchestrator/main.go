@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"boot-orchestrator/engine"
 	"boot-orchestrator/preflight"
 	"boot-orchestrator/ui"
 )
@@ -14,60 +15,56 @@ import (
 // CustomISOPath holds any direct image path provided via the command line
 var CustomISOPath string
 
-// dryRunRefusalMessage is printed by --dry-run instead of running the real
-// provisioning flow in a simulated mode.
+// dryRunBanner is printed to stderr once --dry-run actually enables
+// simulation, so the operator can see at a glance that this run is
+// intercepted rather than silently trusting the flag did something.
 //
-// Phase 5 (items 31-34) built real interception infrastructure —
-// engine.Runner (pre-existing) plus the new engine.FS, both switchable via
-// engine.SetDryRun(true) — and migrated one real batch onto it (see
-// docs/dryrun-inventory.md, PROGRESS.md items 32/33). That is genuine
-// progress, not nothing. It is still not safe to let --dry-run run the real
-// RunProvision flow, for a reason more specific than "not enough call sites
-// migrated yet": RunProvision's actual code path interleaves
-// Runner/FS-routed calls with hundreds of raw, uncovered exec.Command/os.*
-// calls throughout the SAME functions (partition, mount, bootloader, USB,
-// backup/revert, WIM/BCD). Flipping SetDryRun(true) and then running that
-// path for real would intercept only some of what each function does and
-// let the rest execute for real — worse than refusing outright, because it
-// would look like protection while still writing to the real disk partway
-// through. A second, independent limitation surfaced while testing item
-// 32's own migrated batch: a dry-run can't always even claim "success" for
-// a fully-intercepted function, if that function's own correctness check
-// depends on a real side effect the simulation never produced (see
-// assertDefaultCredentials's documented dry-run behavior in
-// engine/dryrun_test.go — it correctly returns an error in dry-run mode,
-// not a fabricated success). Faking that away would mean inventing a
-// result dry-run has no way to actually know. Until enough of the
-// genuinely destructive call sites are migrated that running the real flow
-// under SetDryRun(true) is accurate start-to-finish (not just "doesn't
-// crash"), --dry-run keeps refusing rather than offer partial, misleading
-// protection. See docs/ROADMAP.md's Phase 5 section for what's left.
-const dryRunRefusalMessage = `--dry-run requested, but refusing to start: a full, honest dry-run isn't safe to offer yet.
+// Phase 5 (items 31-34) built real interception infrastructure
+// (engine.Runner, engine.FS, engine.SetDryRun) but only migrated one
+// proof-of-concept batch onto it, so --dry-run used to refuse to start
+// rather than run a partial, misleading simulation — RunProvision's call
+// sites interleaved covered and uncovered operations inside the same
+// functions, so flipping the flag on would have let some real disk writes
+// through while looking like protection. Item 45 closed that gap: every
+// exec.Command/filesystem-write call site this tool can reach (excluding
+// engine/rootfs.go, confirmed dead code — see docs/ROADMAP.md) is now
+// routed through engine.Runner, engine.FS, or the newer execCommand var,
+// all three switched together by engine.SetDryRun. --dry-run now runs the
+// real flow with that switch on, instead of refusing.
+//
+// One known, inherent limitation remains, and is called out here rather
+// than hidden: a command whose real OUTPUT a later step depends on (a
+// UUID from blkid, a filesystem type, ...) reports empty output in
+// dry-run, since the disk state it would report on was never actually
+// created. A step whose own success check relies on that real output (for
+// example assertDefaultCredentials verifying an account was actually
+// created inside a chroot — see engine/dryrun_test.go) will correctly
+// report failure in dry-run rather than fabricate a result it has no way
+// to know. This is a documented tradeoff of simulating a query against
+// state that doesn't exist, not a bug.
+const dryRunBanner = `--dry-run: simulation mode enabled (engine.SetDryRun). Every exec.Command
+and filesystem-write call site this tool can reach is intercepted — each
+would-be mutating operation is logged to stderr, prefixed "[DRY-RUN]",
+instead of actually running. Nothing on this run will touch a real disk,
+partition table, bootloader, or NVRAM entry.
 
-Real interception infrastructure now exists (engine.Runner, engine.FS,
-engine.SetDryRun — see docs/dryrun-inventory.md) and covers one real batch
-end-to-end. It does NOT cover the hundreds of remaining partition,
-bootloader, USB, backup/revert, and WIM/BCD call sites, and those are
-interleaved with the covered ones inside the same functions RunProvision
-calls — so running the real flow under dry-run today would intercept only
-part of what happens and let the rest execute for real. That is worse than
-refusing: it would look like protection while still touching the real disk.
-
-Until enough of the remaining call sites are migrated that the real flow is
-accurate under simulation from start to finish, this flag refuses to start
-rather than offer partial, misleading protection. Test this tool only in a
-disposable VM against a virtual disk you are prepared to lose.
+Known limitation: a step whose own success check depends on a command's
+real output (a UUID, a filesystem type, ...) may correctly report failure
+in dry-run, since that output was never really produced — see
+docs/dryrun-inventory.md and engine/dryrun_test.go.
 `
 
-// checkDryRun reports whether --dry-run was requested and, if so, the
-// message that should be printed before refusing to start. Kept separate
-// from main() so the fail-closed behavior is unit-testable without a
-// subprocess.
-func checkDryRun(requested bool) (refuse bool, message string) {
+// applyDryRunFlag enables engine.SetDryRun when --dry-run was passed and
+// returns the banner to print; the caller then keeps running the real
+// flow (headless or TUI) exactly as it would without the flag, with every
+// reachable mutation now intercepted. Kept separate from main() so this
+// is unit-testable without a subprocess.
+func applyDryRunFlag(requested bool) (message string) {
 	if !requested {
-		return false, ""
+		return ""
 	}
-	return true, dryRunRefusalMessage
+	_ = engine.SetDryRun(true)
+	return dryRunBanner
 }
 
 // runPreflightGate decides whether to refuse to continue given an already-
@@ -93,7 +90,7 @@ func runPreflightGate(report preflight.Report, skip bool) (refuse bool, message 
 
 func main() {
 	isoFlag := flag.String("iso", "", "Direct local path to an ISO or raw disk image")
-	dryRunFlag := flag.Bool("dry-run", false, "Refuse to start (see --help); full dry-run simulation is not implemented yet")
+	dryRunFlag := flag.Bool("dry-run", false, "Run the real flow with every reachable exec.Command/filesystem-write call intercepted and logged instead of actually executed (see docs/dryrun-inventory.md for the one known limitation)")
 
 	headlessFlag := flag.Bool("headless", false, "Run non-interactively instead of launching the TUI; requires --yes")
 	osIDFlag := flag.String("os-id", "", "Headless: catalog entry ID to provision (mutually exclusive with --iso-path)")
@@ -109,9 +106,8 @@ func main() {
 	preflightTargetFlag := flag.String("preflight-target-path", ".", "Path to check disk headroom against during the pre-flight check")
 	flag.Parse()
 
-	if refuse, message := checkDryRun(*dryRunFlag); refuse {
+	if message := applyDryRunFlag(*dryRunFlag); message != "" {
 		fmt.Fprint(os.Stderr, message)
-		os.Exit(1)
 	}
 
 	if *revertFlag {
@@ -127,10 +123,12 @@ func main() {
 	// standalone diagnostic that nothing ever invoked — a genuinely
 	// useful check that protected zero actual users. Now runs before
 	// either real entry point that's about to provision something
-	// (headless or the TUI) gets going. --revert and --dry-run already
-	// returned above by this point if requested, and don't need this
-	// check anyway (revert doesn't download/write a new OS; --dry-run
-	// exits before doing anything regardless).
+	// (headless or the TUI) gets going. --revert already returned above
+	// by this point if requested, and doesn't need this check anyway
+	// (revert doesn't download/write a new OS). --dry-run deliberately
+	// still runs this gate: it's a read-only disk-headroom/catalog-load
+	// check, not a mutation, and a dry run should surface a real
+	// pre-flight problem the same way a real run would.
 	{
 		report, pfErr := preflight.Run(*preflightTargetFlag)
 		if pfErr != nil {

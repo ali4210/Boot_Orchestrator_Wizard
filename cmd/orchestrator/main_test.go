@@ -3,36 +3,44 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"boot-orchestrator/engine"
 )
 
-// TestCheckDryRun_RefusesClosed is the regression test for --dry-run's
-// fail-closed design: it must refuse to start with a clear message rather
-// than silently run a partial, misleading simulation. Phase 5 (items
-// 31-34) built real interception infrastructure (engine.Runner,
-// engine.FS, engine.SetDryRun) and migrated one batch onto it, but
-// RunProvision's real call sites still interleave covered and uncovered
-// operations within the same functions — so the refusal, and this test,
-// remain in place; only the message's explanation of *why* was updated to
-// reflect that real (if partial) progress instead of claiming nothing had
-// been built at all.
-func TestCheckDryRun_RefusesClosed(t *testing.T) {
-	refuse, message := checkDryRun(true)
-	if !refuse {
-		t.Fatalf("expected --dry-run to refuse to start")
+// TestApplyDryRunFlag_EnablesSimulationAndReturnsBanner is the regression
+// test for item 45's closure of audit 2.4: --dry-run used to refuse to
+// start outright (Phase 5 left RunProvision's call sites only partially
+// migrated onto engine.Runner/engine.FS). Now that every reachable
+// exec.Command/filesystem-write call site is intercepted (see
+// docs/dryrun-inventory.md), --dry-run instead enables engine.SetDryRun
+// and lets the real flow run — this proves the flag actually flips that
+// switch and returns a banner explaining what's happening, rather than
+// silently doing nothing or silently refusing.
+func TestApplyDryRunFlag_EnablesSimulationAndReturnsBanner(t *testing.T) {
+	defer engine.SetDryRun(false)
+
+	message := applyDryRunFlag(true)
+	if !engine.IsDryRun() {
+		t.Fatalf("expected --dry-run to enable engine.SetDryRun")
 	}
-	if !strings.Contains(message, "refusing to start") {
-		t.Fatalf("expected a clear refusal message, got: %s", message)
+	if !strings.Contains(message, "DRY-RUN") {
+		t.Fatalf("expected the banner to mention the [DRY-RUN] log prefix, got: %s", message)
 	}
-	if !strings.Contains(message, "engine.Runner") || !strings.Contains(message, "engine.FS") || !strings.Contains(message, "SetDryRun") {
-		t.Fatalf("expected the message to reference the real interception infrastructure that now exists, got: %s", message)
-	}
-	if !strings.Contains(message, "call sites") {
-		t.Fatalf("expected the message to explain why (uncovered call sites), got: %s", message)
+	if !strings.Contains(message, "intercepted") {
+		t.Fatalf("expected the banner to explain interception, got: %s", message)
 	}
 }
 
-func TestCheckDryRun_NoOpWhenNotRequested(t *testing.T) {
-	if refuse, message := checkDryRun(false); refuse || message != "" {
-		t.Fatalf("expected no refusal when --dry-run was not passed, got refuse=%v message=%q", refuse, message)
+func TestApplyDryRunFlag_NoOpWhenNotRequested(t *testing.T) {
+	defer engine.SetDryRun(false)
+
+	if engine.IsDryRun() {
+		t.Fatalf("test setup bug: dry-run should be off before this assertion")
+	}
+	if message := applyDryRunFlag(false); message != "" {
+		t.Fatalf("expected no banner when --dry-run was not passed, got %q", message)
+	}
+	if engine.IsDryRun() {
+		t.Fatalf("expected dry-run to remain off when not requested")
 	}
 }

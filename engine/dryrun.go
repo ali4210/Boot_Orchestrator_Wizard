@@ -38,7 +38,7 @@ import (
 //
 // cmd/orchestrator/main.go's --dry-run flag now runs the real flow under
 // SetDryRun(true) instead of refusing to start — see that file's
-// dryRunRefusalMessage history and docs/ROADMAP.md's Phase 5 section for
+// applyDryRunFlag/dryRunBanner and docs/ROADMAP.md's Phase 5 section for
 // what's still a known, inherent limitation even with this in place (query
 // commands return empty output in dry-run, since the disk state they'd
 // report on was never actually created).

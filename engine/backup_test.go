@@ -152,6 +152,40 @@ func TestRestoreHostFromBackup_AbortsOnPartitionTableFailure(t *testing.T) {
 	}
 }
 
+// TestRestoreHostFromBackup_DryRunNeverTouchesRealDiskAndSucceeds is the
+// end-to-end regression test for item 45's closure of audit 2.4 (no real
+// dry-run mode), using the exact same bogus-disk fixture as
+// TestRestoreHostFromBackup_AbortsOnPartitionTableFailure above. In real
+// mode, that fixture makes parted's very first call fail immediately
+// (proven above). Under engine.SetDryRun(true), every exec.Command call
+// in RestoreHostFromBackup's entire chain — partition, format, mount,
+// extract, fstab, grub-install — is intercepted and reports synthetic
+// success instead, so the function should sail all the way through to a
+// nil error. If even one exec.Command call inside this function had been
+// missed by item 45's migration, it would still try to run real parted
+// against the nonexistent disk and fail with the same "partition table"
+// error the real-mode test above expects — making this test a genuine,
+// specific proof of full coverage for this function, not just a smoke
+// test of the dry-run switch itself.
+func TestRestoreHostFromBackup_DryRunNeverTouchesRealDiskAndSucceeds(t *testing.T) {
+	restore := SetDryRun(true)
+	defer restore()
+
+	const bogusDisk = "/dev/orch-test-nonexistent-disk-for-backup-test-xyz"
+	if _, statErr := os.Stat(bogusDisk); statErr == nil {
+		t.Skipf("unexpectedly found a real device at %s, refusing to risk touching it", bogusDisk)
+	}
+
+	err := RestoreHostFromBackup("/nonexistent/archive-for-test.tar", bogusDisk, nil)
+	if err != nil {
+		t.Fatalf("expected RestoreHostFromBackup to report synthetic success under dry-run (every mutating call intercepted), got: %v", err)
+	}
+
+	if _, statErr := os.Stat(bogusDisk); statErr == nil {
+		t.Fatalf("dry-run run somehow caused %s to exist afterward", bogusDisk)
+	}
+}
+
 // TestBuildGrubReinstallScript_MatchesHostArchNotHardcodedAmd64 is the
 // regression test for audit finding 2.6 (x86_64 hardcoded despite ARM64
 // support), as it applies to disaster-recovery restore: before this fix,
