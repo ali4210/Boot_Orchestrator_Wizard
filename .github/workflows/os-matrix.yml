@@ -1,0 +1,132 @@
+name: OS Status Matrix
+
+# Phase 3's four-tier OS verification matrix. Like download-verify.yml,
+# this touches real multi-gigabyte downloads and (for Tier 3) boots real
+# ISOs under emulation, so it is workflow_dispatch-only — never on push or
+# pull_request. Each tier is a separate job so a slow/flaky Tier 3 boot
+# doesn't block Tier 1's cheap catalog reachability check from reporting.
+#
+# GitHub-hosted runners do not have /dev/kvm by default, so Tier 3 runs
+# QEMU with -accel tcg (software emulation) rather than assuming KVM —
+# slower, but it actually starts instead of failing at launch. This
+# mirrors testing/qemu/boot-and-verify.sh, which was proven locally (no
+# KVM in that sandbox either) before this workflow was written.
+
+on:
+  workflow_dispatch:
+    inputs:
+      entry_ids:
+        description: 'Space-separated catalog entry IDs to run Tiers 2/3 against (e.g. "alpine-linux-amd64 debian-netboot-amd64"). Leave empty for every reachable Linux entry — slow and bandwidth-heavy.'
+        required: false
+        default: 'alpine-linux-amd64'
+
+permissions:
+  contents: read
+
+jobs:
+  tier1-catalog-reachability:
+    name: "Tier 1: catalog reachability"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run catalog-verify
+        run: go run ./cmd/catalog-verify -out tier1-catalog-report.json
+        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tier1-catalog-report
+          path: tier1-catalog-report.json
+          retention-days: 90
+
+  tier2-docker-iso-structure:
+    name: "Tier 2: Docker ISO-structure check"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the iso-structure-verify image
+        run: docker build -t os-matrix-iso-structure-verify testing/docker/iso-structure-verify
+      - name: Download selected entries and check their structure
+        run: |
+          set -euo pipefail
+          mkdir -p isos reports
+          entries="${{ github.event.inputs.entry_ids }}"
+          for id in $entries; do
+            url=$(python3 testing/scripts/entry_download_url.py "$id")
+            echo "Downloading $id from $url"
+            curl -fL --retry 3 -o "isos/$id.iso" "$url"
+            docker run --rm -v "$PWD/isos:/data:ro" os-matrix-iso-structure-verify "/data/$id.iso" \
+              | tee "reports/$id.json"
+            rm -f "isos/$id.iso"
+          done
+          python3 -c "
+          import glob, json
+          out = [json.load(open(f)) for f in sorted(glob.glob('reports/*.json'))]
+          json.dump(out, open('tier2-docker-report.json', 'w'), indent=2)
+          "
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tier2-docker-report
+          path: tier2-docker-report.json
+          retention-days: 90
+
+  tier3-qemu-boot-matrix:
+    name: "Tier 3: QEMU/OVMF boot matrix"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU + OVMF
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf
+      - name: Boot selected entries under QEMU (software emulation, no KVM)
+        run: |
+          set -euo pipefail
+          mkdir -p isos reports
+          entries="${{ github.event.inputs.entry_ids }}"
+          for id in $entries; do
+            url=$(python3 testing/scripts/entry_download_url.py "$id")
+            regex=$(python3 testing/scripts/boot_success_pattern.py "$id")
+            echo "Downloading $id from $url"
+            curl -fL --retry 3 -o "isos/$id.iso" "$url"
+            bash testing/qemu/boot-and-verify.sh "isos/$id.iso" "$regex" 300 | tee "reports/$id.json"
+            rm -f "isos/$id.iso"
+          done
+          python3 -c "
+          import glob, json
+          out = [json.load(open(f)) for f in sorted(glob.glob('reports/*.json'))]
+          json.dump(out, open('tier3-qemu-report.json', 'w'), indent=2)
+          "
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tier3-qemu-report
+          path: tier3-qemu-report.json
+          retention-days: 90
+
+  tier4-windows-macos-build:
+    name: "Tier 4: build+test on ${{ matrix.os }}"
+    # Build/test only — this NEVER boots a macOS (or Windows) guest image.
+    # It runs this project's own Go code natively on GitHub's Windows and
+    # macOS runner hardware, which is the only way the Windows-specific
+    # (BCD/WIM) and Darwin-specific (revert_darwin.go) code paths actually
+    # get compiled and unit-tested on their real target OS at all.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...

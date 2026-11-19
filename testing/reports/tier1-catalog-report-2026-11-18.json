@@ -1,0 +1,530 @@
+[
+  {
+    "id": "win11-workstation-amd64",
+    "family": "windows",
+    "distro": "Windows 11 Workstation (Pro/Enterprise)",
+    "version": "24H2 LTSC",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://software-static.download.prss.microsoft.com/dbazure/888969d5-f34g-4e03-ac9d-1f9786c66749/26100.1742.240906-0331.ge_release_svc_refresh_CLIENT_LTSC_EVAL_x64FRE_en-us.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 5112850432,
+        "method": "HEAD",
+        "latency_ms": 438
+      }
+    ]
+  },
+  {
+    "id": "win10-workstation-amd64",
+    "family": "windows",
+    "distro": "Windows 10 Workstation (Pro/Enterprise)",
+    "version": "22H2 LTSC",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://software-static.download.prss.microsoft.com/dbazure/988969d5-f34g-4e03-ac9d-1f9786c66750/19045.2006.220908-0225.22h2_release_svc_refresh_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 5550497792,
+        "size_mismatch": true,
+        "method": "HEAD",
+        "latency_ms": 211
+      }
+    ]
+  },
+  {
+    "id": "winsrv2022-server-amd64",
+    "family": "windows",
+    "distro": "Windows Server",
+    "version": "2022 Standard Eval",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://software-static.download.prss.microsoft.com/sg/download/888969d5-f34g-4e03-ac9d-1f9786c66749/SERVER_EVAL_x64FRE_en-us.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 5044094976,
+        "method": "HEAD",
+        "latency_ms": 209
+      }
+    ]
+  },
+  {
+    "id": "winxp-pro-i386",
+    "family": "windows",
+    "distro": "Windows XP Professional",
+    "version": "SP3 Original MSDN",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://archive.org/download/WinXPProSP3x86/en_windows_xp_professional_with_service_pack_3_x86_cd_vl_x14-73974.iso",
+        "reachable": true,
+        "status_code": 206,
+        "method": "GET-RANGE",
+        "latency_ms": 14583
+      }
+    ]
+  },
+  {
+    "id": "kali-gui-amd64",
+    "family": "linux",
+    "distro": "Kali Linux",
+    "version": "2026.2 Installer",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://cdimage.kali.org/kali-2026.2/kali-linux-2026.2-installer-amd64.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 4802531328,
+        "size_mismatch": true,
+        "method": "HEAD",
+        "latency_ms": 1268
+      }
+    ]
+  },
+  {
+    "id": "kali-netinst-amd64",
+    "family": "linux",
+    "distro": "Kali Linux",
+    "version": "2026.2 NetInst",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://cdimage.kali.org/kali-2026.2/kali-linux-2026.2-installer-netinst-amd64.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 779091968,
+        "method": "HEAD",
+        "latency_ms": 548
+      }
+    ]
+  },
+  {
+    "id": "parrot-security-gui-amd64",
+    "family": "linux",
+    "distro": "Parrot Security Edition (MATE)",
+    "version": "7.3 Security",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://deb.parrot.sh/parrot/iso/7.3/Parrot-security-7.3_amd64.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 8555526144,
+        "method": "HEAD",
+        "latency_ms": 852
+      },
+      {
+        "url": "https://mirrors.mit.edu/parrot/iso/7.3/Parrot-security-7.3_amd64.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 8555526144,
+        "method": "HEAD",
+        "latency_ms": 1275
+      }
+    ]
+  },
+  {
+    "id": "parrot-home-gui-amd64",
+    "family": "linux",
+    "distro": "Parrot Home Edition (MATE)",
+    "version": "7.3 Home",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://deb.parrot.sh/parrot/iso/7.3/Parrot-home-7.3_amd64.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 4056121344,
+        "size_mismatch": true,
+        "method": "HEAD",
+        "latency_ms": 93
+      }
+    ]
+  },
+  {
+    "id": "parrot-core-tty-amd64",
+    "family": "linux",
+    "distro": "Parrot OS Minimal Core",
+    "version": "latest",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://deb.parrot.sh/direct/parrot/iso/latest/parrot-amd64.tar.xz",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 116533720,
+        "size_mismatch": true,
+        "method": "HEAD",
+        "latency_ms": 40
+      }
+    ]
+  },
+  {
+    "id": "ubuntu-desktop-amd64",
+    "family": "linux",
+    "distro": "Ubuntu Desktop",
+    "version": "24.04.4 LTS",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://releases.ubuntu.com/24.04/ubuntu-24.04.4-desktop-amd64.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 6655619072,
+        "size_mismatch": true,
+        "method": "HEAD",
+        "latency_ms": 1165
+      }
+    ]
+  },
+  {
+    "id": "ubuntu-server-amd64",
+    "family": "linux",
+    "distro": "Ubuntu Server",
+    "version": "24.04.4 LTS",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://releases.ubuntu.com/24.04/ubuntu-24.04.4-live-server-amd64.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 3405469696,
+        "size_mismatch": true,
+        "method": "HEAD",
+        "latency_ms": 280
+      }
+    ]
+  },
+  {
+    "id": "linux-mint-cinnamon-amd64",
+    "family": "linux",
+    "distro": "Linux Mint Cinnamon",
+    "version": "22",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://mirrors.kernel.org/linuxmint/stable/22/linuxmint-22-cinnamon-64bit.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 2907832320,
+        "method": "HEAD",
+        "latency_ms": 4279
+      }
+    ]
+  },
+  {
+    "id": "debian-netboot-amd64",
+    "family": "linux",
+    "distro": "Debian GNU/Linux",
+    "version": "12 Netboot",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/mini.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 65011712,
+        "method": "HEAD",
+        "latency_ms": 253
+      }
+    ]
+  },
+  {
+    "id": "fedora-workstation-amd64",
+    "family": "linux",
+    "distro": "Fedora Workstation Live",
+    "version": "43 (GNOME)",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://mirror.imt-systems.com/fedora/linux/releases/43/Workstation/x86_64/iso/Fedora-Workstation-Live-43-1.6.x86_64.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 2742190080,
+        "method": "HEAD",
+        "latency_ms": 1036
+      },
+      {
+        "url": "https://ftp.jaist.ac.jp/pub/Linux/Fedora/releases/43/Workstation/x86_64/iso/Fedora-Workstation-Live-43-1.6.x86_64.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 2742190080,
+        "method": "HEAD",
+        "latency_ms": 874
+      }
+    ]
+  },
+  {
+    "id": "fedora-server-amd64",
+    "family": "linux",
+    "distro": "Fedora Server Netinst",
+    "version": "43",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://mirror.imt-systems.com/fedora/linux/releases/43/Workstation/x86_64/iso/Fedora-Workstation-Live-43-1.6.x86_64.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 2742190080,
+        "size_mismatch": true,
+        "method": "HEAD",
+        "latency_ms": 198
+      }
+    ]
+  },
+  {
+    "id": "opensuse-tumbleweed-gui-amd64",
+    "family": "linux",
+    "distro": "openSUSE Tumbleweed Live",
+    "version": "GNOME Desktop",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://ftp.gwdg.de/pub/linux/suse/opensuse/tumbleweed/iso/openSUSE-Tumbleweed-DVD-x86_64-Current.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 4667211776,
+        "size_mismatch": true,
+        "method": "HEAD",
+        "latency_ms": 1257
+      }
+    ]
+  },
+  {
+    "id": "opensuse-tumbleweed-netinst-amd64",
+    "family": "linux",
+    "distro": "openSUSE Tumbleweed Netinst",
+    "version": "Rolling Netinst",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://ftp.gwdg.de/pub/linux/suse/opensuse/tumbleweed/iso/openSUSE-Tumbleweed-NET-x86_64-Current.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 421527552,
+        "method": "HEAD",
+        "latency_ms": 202
+      }
+    ]
+  },
+  {
+    "id": "arch-linux-amd64",
+    "family": "linux",
+    "distro": "Arch Linux",
+    "version": "Rolling Release",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 1317568512,
+        "method": "HEAD",
+        "latency_ms": 971
+      }
+    ]
+  },
+  {
+    "id": "alpine-linux-amd64",
+    "family": "linux",
+    "distro": "Alpine Linux",
+    "version": "3.20 Standard",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-standard-3.20.3-x86_64.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 219152384,
+        "method": "HEAD",
+        "latency_ms": 188
+      }
+    ]
+  },
+  {
+    "id": "centos-7-dvd-amd64",
+    "family": "linux",
+    "distro": "CentOS Linux (Vault Legacy)",
+    "version": "7.9 Full DVD",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://archive.kernel.org/centos-vault/7.9.2009/isos/x86_64/CentOS-7-x86_64-DVD-2009.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 4712300544,
+        "method": "HEAD",
+        "latency_ms": 1163
+      }
+    ]
+  },
+  {
+    "id": "centos-7-minimal-amd64",
+    "family": "linux",
+    "distro": "CentOS Linux (Vault Legacy)",
+    "version": "7.9 Minimal",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://archive.kernel.org/centos-vault/7.9.2009/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 1020264448,
+        "method": "HEAD",
+        "latency_ms": 275
+      }
+    ]
+  },
+  {
+    "id": "centos-stream-9-amd64",
+    "family": "linux",
+    "distro": "CentOS Stream",
+    "version": "9 Latest",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/iso/CentOS-Stream-9-latest-x86_64-boot.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 1605894144,
+        "size_mismatch": true,
+        "method": "HEAD",
+        "latency_ms": 872
+      }
+    ]
+  },
+  {
+    "id": "rocky-9-workstation-amd64",
+    "family": "linux",
+    "distro": "Rocky Linux Workstation",
+    "version": "9.4 (GNOME)",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://download.rockylinux.org/pub/rocky/9/live/x86_64/Rocky-9-Workstation-x86_64-latest.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 2750693376,
+        "size_mismatch": true,
+        "method": "HEAD",
+        "latency_ms": 774
+      }
+    ]
+  },
+  {
+    "id": "rocky-9-minimal-amd64",
+    "family": "linux",
+    "distro": "Rocky Linux Minimal",
+    "version": "9.4 Minimal",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://download.rockylinux.org/pub/rocky/9/isos/x86_64/Rocky-9-latest-x86_64-minimal.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 2950234112,
+        "size_mismatch": true,
+        "method": "HEAD",
+        "latency_ms": 228
+      }
+    ]
+  },
+  {
+    "id": "almalinux-9-minimal-amd64",
+    "family": "linux",
+    "distro": "AlmaLinux Minimal",
+    "version": "9.4 Minimal",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://repo.almalinux.org/almalinux/9/isos/x86_64/AlmaLinux-9-latest-x86_64-minimal.iso",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 2985295872,
+        "size_mismatch": true,
+        "method": "HEAD",
+        "latency_ms": 106
+      }
+    ]
+  },
+  {
+    "id": "gentoo-stage3-amd64",
+    "family": "linux",
+    "distro": "Gentoo Linux (Minimal Install)",
+    "version": "Rolling Minimal",
+    "any_reachable": false,
+    "mirrors": [
+      {
+        "url": "https://distfiles.gentoo.org/releases/amd64/autobuilds/current-install-amd64-minimal/install-amd64-minimal-20260830T151604Z.iso",
+        "reachable": false,
+        "status_code": 404,
+        "method": "GET-RANGE",
+        "error": "HTTP 404",
+        "latency_ms": 1851
+      },
+      {
+        "url": "https://gentoo.osuosl.org/releases/amd64/autobuilds/current-livegui-amd64/livegui-amd64-20260830T151604Z.iso",
+        "reachable": false,
+        "status_code": 404,
+        "method": "GET-RANGE",
+        "error": "HTTP 404",
+        "latency_ms": 1804
+      }
+    ]
+  },
+  {
+    "id": "slackware-15-amd64",
+    "family": "linux",
+    "distro": "Slackware Linux (Mini Install)",
+    "version": "15.0",
+    "any_reachable": true,
+    "mirrors": [
+      {
+        "url": "https://mirrors.kernel.org/slackware/slackware64-15.0/usb-and-pxe-installers/usbboot.img",
+        "reachable": true,
+        "status_code": 200,
+        "content_length": 62727168,
+        "method": "HEAD",
+        "latency_ms": 436
+      }
+    ]
+  },
+  {
+    "id": "macos-sonoma-virt-amd64",
+    "family": "macos",
+    "distro": "macOS Sonoma (Recovery BaseSystem)",
+    "version": "14.x",
+    "any_reachable": false,
+    "mirrors": [
+      {
+        "url": "http://oscdn.apple.com/content/downloads/11/58/062-53943/of12aseueo2jnehp03qh5g3o17lx4139t1/RecoveryImage/BaseSystem.dmg",
+        "reachable": false,
+        "status_code": 403,
+        "method": "GET-RANGE",
+        "error": "HTTP 403",
+        "latency_ms": 141
+      }
+    ]
+  },
+  {
+    "id": "macos-sequoia-virt-amd64",
+    "family": "macos",
+    "distro": "macOS Sequoia (Recovery BaseSystem)",
+    "version": "15.x",
+    "any_reachable": false,
+    "mirrors": [
+      {
+        "url": "http://oscdn.apple.com/content/downloads/11/58/062-53943/of12aseueo2jnehp03qh5g3o17lx4139t1/RecoveryImage/BaseSystem.dmg",
+        "reachable": false,
+        "status_code": 403,
+        "method": "GET-RANGE",
+        "error": "HTTP 403",
+        "latency_ms": 100
+      }
+    ]
+  }
+]
