@@ -111,7 +111,18 @@ func TestCheckRootOwnedFiles_BinOwnedByRootBlocks(t *testing.T) {
 	}
 
 	if err := exec.Command("sudo", "-n", "chown", "root:root", binPath).Run(); err != nil {
-		t.Fatalf("chowning fixture to root: %v", err)
+		// hasPasswordlessSudo (sudo -n true) succeeding doesn't guarantee
+		// -n chown specifically is also allowed — observed for real on
+		// GitHub's macos-latest runner, where sudo -n true passes but
+		// sudo -n chown root:root <fixture> fails outright (exit status
+		// 1, no stderr captured). Skip rather than fail: this is an
+		// environment-permission gap in the test's own setup, not a
+		// failure of check_root_owned_files (the function under test is
+		// never even reached). Linux is unaffected — this sudo call has
+		// always succeeded there, so this branch stays effectively dead
+		// on Linux and the real chown-blocks-it assertion below still
+		// runs for real.
+		t.Skipf("could not chown fixture to root (passwordless sudo allowed `sudo -n true` but not `sudo -n chown`): %v", err)
 	}
 	t.Cleanup(func() {
 		_ = exec.Command("sudo", "-n", "chown", os.Getenv("USER")+":"+os.Getenv("USER"), binPath).Run()
@@ -195,7 +206,12 @@ func TestCheckRootOwnedFiles_RuntimeDirOwnedByRootBlocks(t *testing.T) {
 	}
 
 	if err := exec.Command("sudo", "-n", "chown", "root:root", statePath).Run(); err != nil {
-		t.Fatalf("chowning fixture to root: %v", err)
+		// Same environment-permission gap as TestCheckRootOwnedFiles_BinOwnedByRootBlocks
+		// above (observed for real on GitHub's macos-latest runner: sudo -n
+		// true succeeds but sudo -n chown does not) — skip rather than
+		// fail, since check_root_owned_files itself is never reached.
+		// Linux is unaffected.
+		t.Skipf("could not chown fixture to root (passwordless sudo allowed `sudo -n true` but not `sudo -n chown`): %v", err)
 	}
 	t.Cleanup(func() {
 		_ = exec.Command("sudo", "-n", "chown", os.Getenv("USER")+":"+os.Getenv("USER"), statePath).Run()
