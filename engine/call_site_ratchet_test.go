@@ -168,11 +168,15 @@ func checkRatchet(t *testing.T, label string, baseline, actual map[string]int) {
 	}
 }
 
-// scannedDirs are the directories this ratchet covers — the same two
-// docs/dryrun-inventory.md's counts were drawn from. Resolved relative to
-// this test file's own package directory (engine/), so the test works
-// regardless of which directory `go test` is invoked from.
-var scannedDirs = []string{".", "../ui"}
+// scannedDirs are the directories this ratchet covers. engine/ and ui/ are
+// the two docs/dryrun-inventory.md's counts were drawn from; cmd/orchestrator
+// was added in item 49 after a full-repo sweep for 2.4's closure found a
+// real, unintercepted os.Remove call site there (cmd/orchestrator/revert.go)
+// that this ratchet would not have caught otherwise — the ratchet itself
+// hadn't been extended to look. Resolved relative to this test file's own
+// package directory (engine/), so the test works regardless of which
+// directory `go test` is invoked from.
+var scannedDirs = []string{".", "../ui", "../cmd/orchestrator"}
 
 func TestCallSiteRatchet_ExecCommand(t *testing.T) {
 	actual := make(map[string]int)

@@ -1,50 +1,88 @@
 # Readiness Gate
 
-## Verdict: 🔴 NOT GREEN
+## Verdict: 🟢 GREEN
 
 The gate is green only if there are no known open Critical or High issues and every claim
 made about this tool is backed by a real test or a real, reproducible run. As of this pass,
-**two findings from the original audit remain open at Critical/High severity**, and they are
-listed below rather than papered over. This is not a failure of the remediation effort — it
-is the effort correctly refusing to claim more than what was actually verified, the same
-discipline every item in `PROGRESS.md` was held to individually.
+**both findings that previously kept this gate NOT GREEN (2.4 and 2.6) are closed**, with
+real commits and real tests, and no other Critical/High finding from the original audit is
+open. This verdict is re-checked against the actual current state each time something
+material changes — not left stale — and the known, non-blocking gaps below are stated
+plainly rather than omitted now that the headline verdict is green.
 
-## What's open (the reason this isn't green)
+## What closed since the last NOT GREEN verdict
 
-### Critical: 2.4 — No real dry-run/simulation mode
+### Critical: 2.4 — No real dry-run/simulation mode — now Fixed
 
-**Status: genuinely open, not fixed.** Phase 5 (`PROGRESS.md` items 31-34) built real,
-tested interception infrastructure (`engine.Runner`, `engine.FS`, `engine.SetDryRun`) and
-proved it against one real migration batch end-to-end. That is real progress — but
-`RunProvision`'s actual call sites interleave covered and uncovered operations **inside the
-same functions** (partition, mount, bootloader, USB, backup/revert, WIM/BCD). Flipping
-`SetDryRun(true)` and running the real flow today would intercept only part of what each
-function does and let the rest execute for real against the actual disk — which is worse
-than refusing, because it would look like protection while still writing to real hardware
-partway through. `--dry-run` correctly still refuses to start. Closing this requires
-migrating enough of the remaining ~400 call sites (`docs/dryrun-inventory.md` has the real
-count and the recommended order) that the real flow is accurate under simulation from start
-to finish — not a quick fix.
+Phase 5 (`PROGRESS.md` items 31-34) built real, tested interception infrastructure
+(`engine.Runner`, `engine.FS`, `engine.SetDryRun`) and proved it against one real batch,
+but deliberately stopped there: `RunProvision`'s call sites interleaved covered and
+uncovered operations inside the same functions, so flipping the switch on at that point
+would have intercepted only part of what happens. Items 45-49 went back and finished it:
+every remaining raw `exec.Command`/filesystem-write call site reachable from a real entry
+point (provision, revert, backup, autonomous USB staging) across `engine/`, `ui/`, and
+`cmd/orchestrator/` — ~294 `exec.Command` sites, ~160 filesystem-write sites, 20+ files —
+is now routed through `engine.Runner`, `engine.FS`, or the new `execCommand` var, all
+switched together by `engine.SetDryRun`. `--dry-run` now enables that switch and runs the
+real flow, instead of refusing to start.
 
-### High: 2.6 — x86_64 hardcoded despite ARM64 support
+Two things are deliberately still NOT intercepted — stated here, not buried:
+- **The payload download itself** (`engine/streamer.go`'s real `net/http` GET plus
+  `os.Create`/`io.Copy`) still happens for real. It never touches the target disk/
+  bootloader/NVRAM — the actual safety concern 2.4 was about — and skipping it would make
+  the rest of a dry run (checksum verification, free-space headroom) unrealistic. A dry
+  run still uses real bandwidth and real local scratch disk space for this one step.
+- **`safety.Journal`'s own bookkeeping writes** are not intercepted. `safety` cannot
+  import `engine` (the reverse import already exists, so this would be a cycle); covering
+  it would need an independent dry-run switch kept in sync with `engine.SetDryRun`, which
+  wasn't built. A journal file at `safety.DefaultJournalPath()` is operational metadata,
+  not a disk/bootloader/NVRAM write — a materially lower-risk category than everything
+  else this finding was about.
 
-**Status: partially fixed.** The one confirmed-broken case this pass found —
-`engine/usb_manager.go`'s autonomous USB-staging bootloader generator, which would have
-produced a completely unbootable stick on real arm64 host hardware — is fixed and tested
-(`PROGRESS.md` items 35-37). `engine/bcd_qemu.go` (the Windows-BCD-via-QEMU helper, which
-hardcodes `qemu-system-x86_64` and `bootx64.efi`) and the other x86_64/amd64 string literals
-catalogued in `docs/dryrun-inventory.md`'s category breakdown were **explicitly not
-audited** this pass (judged lower priority: Windows-on-ARM is a vanishingly rare target for
-this tool, and item 36's scope was "Debian/Ubuntu family only"). A full close requires
-auditing every remaining hardcoded-architecture site, not just the one found.
+See `docs/dryrun-inventory.md`'s "Update (item 45)" section for the complete account,
+including the real end-to-end proof
+(`TestRestoreHostFromBackup_DryRunNeverTouchesRealDiskAndSucceeds`): the exact bogus-disk
+fixture that makes real mode fail fast on its very first `parted` call instead returns nil
+under dry-run, because every mutating call in that function's entire chain is genuinely
+intercepted — not a claim resting on the switch alone.
+
+### High: 2.6 — x86_64 hardcoded despite ARM64 support — now Fixed
+
+The one confirmed-broken case from the earlier pass (`engine/usb_manager.go`'s autonomous
+USB-staging bootloader generator, which would have produced a completely unbootable stick
+on real arm64 host hardware) was fixed and tested first (`PROGRESS.md` items 35-37). Items
+42-44 then ran a full-repo grep for `x86_64`/`amd64`/`BOOTX64` and found three more live
+instances of the same bug class, all now fixed and tested:
+
+- `engine/orchestrator.go`'s autonomous-USB NVRAM one-shot boot entry (hardcoded
+  `BOOTX64.EFI` independently of `usb_manager.go`'s own fix).
+- `engine/backup.go`'s disaster-recovery restore (`grub-install --target=x86_64-efi`).
+- `engine/bootloader.go`'s no-kernel self-heal (`apt-get install linux-image-amd64`).
+
+`engine/bcd_qemu.go` (the Windows-BCD-via-QEMU helper, hardcoding `qemu-system-x86_64` and
+`bootx64.efi`) is the one case left deliberately unfixed rather than unaudited: no arm64
+Windows catalog entry exists or can be tested against (Windows-on-ARM was never in
+scope — item 36's arm64 support is "Debian/Ubuntu family only"), so implementing untestable
+arm64 BCD logic would be guesswork. Instead, `writeWindowsBCD` now calls
+`validateBCDHostArch(runtime.GOARCH)` and refuses loudly with a clear explanation on any
+non-amd64 host, rather than silently attempting x86_64-only logic that would fail
+confusingly deep inside a QEMU invocation. This removes the "silently" from the original
+finding without pretending to support a target that doesn't exist. See
+`docs/ARCH_SUPPORT.md`.
+
+Also audited and **intentionally** left alone, documented rather than silently skipped:
+`orchestrator.go`'s/`rootfs.go`'s `"arch", "x86_64"` ISO path components (Arch Linux's own
+on-disk directory layout, not host-arch logic — Arch Linux ARM isn't in the catalog), and
+the `User-Agent` header strings in `sentinel.go`/`streamer.go` (cosmetic HTTP header text,
+no functional effect).
 
 ## Everything else: no other open Critical/High issues
 
 Every other finding from the original audit (`AUDIT_REPORT.md` section 2, items 2.1-2.3,
 2.5, 2.8-2.19) is fixed with a real commit and test — see `AUDIT_REPORT.md`'s own
-"Remediation Progress" section (item 39) for the full table, and `PROGRESS.md` for each
-one's actual evidence. Two findings have a real but incomplete fix, tracked here for
-transparency rather than as blocking the gate (neither is Critical/High on its own):
+"Remediation Progress" section for the full table, and `PROGRESS.md` for each one's actual
+evidence. Two findings have a real but incomplete fix, tracked here for transparency
+rather than as blocking the gate (neither is Critical/High on its own):
 
 - **2.7 (High in the original audit, now downgraded in practice)**: OpenPGP signature
   verification is real, tested, and wired into the download flow — but **no catalog entry
@@ -68,16 +106,20 @@ transparency rather than as blocking the gate (neither is Critical/High on its o
 - **`alpine-linux-amd64` is incompatible with the current autonomous install pipeline**
   (no squashfs, no `/live` directory) — found by `OS_STATUS_MATRIX.md`'s real Tier 2 run,
   not fixed this pass.
-- **`engine/rootfs.go`** (~780 lines) has zero callers anywhere in the repo — confirmed dead
-  code, not deleted (a deliberate decision deferred to `docs/ROADMAP.md`, not an oversight).
+- **`engine/rootfs.go`** (~780 lines) and **`hypervisor/compact.go`** (~150 lines) have
+  zero callers anywhere in the repo — both confirmed dead code, neither deleted (a
+  deliberate decision deferred to `docs/ROADMAP.md`, not an oversight; `compact.go` was
+  found newly dead during item 45's full-repo sweep, not previously documented).
+- **The dry-run scope boundaries noted above** (payload download, `safety.Journal`
+  bookkeeping) — deliberate, documented, not silently gapped.
 - **Windows and macOS have never been driven end-to-end against real or VM hardware** from
   this project's own (Linux-only) development sandbox. Both cross-compile cleanly and have
   CI running `go build`/`go vet`/`go test` natively on `windows-latest`/`macos-latest`
   (item 29), but no actual install has been observed completing on either platform. ARM64
-  similarly: cross-compiles clean, and (new this pass) a real QEMU/AAVMF boot was proven for
-  one catalog entry — but never on real arm64 hardware, and the autonomous-USB-staging fix
-  (item 36) has only a unit-level proof, not a real-hardware one (see `MANUAL_TEST_PLAN.md`
-  section 8).
+  similarly: cross-compiles clean, and a real QEMU/AAVMF boot was proven for one catalog
+  entry — but never on real arm64 hardware, and the autonomous-USB-staging fix (item 36)
+  has only a unit-level proof, not a real-hardware one (see `MANUAL_TEST_PLAN.md` section
+  8).
 - **`test/os-matrix` (Phase 3) is not merged** into this branch — `OS_STATUS_MATRIX.md`,
   `cmd/catalog-verify`, and the Docker/QEMU-x86_64 tooling it describes live there, not here.
 
@@ -86,19 +128,24 @@ transparency rather than as blocking the gate (neither is Critical/High on its o
 Every item marked "Done" in `PROGRESS.md` has, at minimum, a real commit hash and a test
 that was verified failing before the fix and passing after (the project's own
 reproduce-first discipline, followed without exception across every single item — checked
-by re-reading `PROGRESS.md` while writing this gate, not assumed). Several items go further:
-real loop-device disk-image tests (not mocked) for partition/filesystem operations, real
-`httptest`-server tests for network code, real OpenPGP cryptographic operations (not
-stubbed) for signature verification, a real cross-platform build matrix that found two
-previously-undetected Windows/macOS compile breakages, and a real QEMU boot (both x86_64
-and now aarch64) reaching an actual bootloader/installer screen, not a prediction of one.
+by re-reading `PROGRESS.md` while writing this gate, not assumed). Several items go
+further: real loop-device disk-image tests (not mocked) for partition/filesystem
+operations, real `httptest`-server tests for network code, real OpenPGP cryptographic
+operations (not stubbed) for signature verification, a real cross-platform build matrix
+that found two previously-undetected Windows/macOS compile breakages, a real QEMU boot
+(both x86_64 and aarch64) reaching an actual bootloader/installer screen, and — for 2.4's
+closure specifically — a real end-to-end proof that a representative function's entire
+call chain is genuinely intercepted under simulation, not just that the switch itself
+flips.
 
-## What would make this green
+## What would make this NOT green again
 
-1. Close 2.4: migrate enough of the remaining exec.Command/filesystem-write call sites
-   (`docs/dryrun-inventory.md`) that `RunProvision` is accurate under `SetDryRun(true)`
-   from start to finish, then implement the real flag.
-2. Close 2.6: audit and fix every remaining hardcoded-architecture site, not just
-   `usb_manager.go`'s.
-3. Re-run this gate's own checklist after both, and update this document's verdict — don't
-   leave it stale once the underlying state changes.
+This verdict is accurate as of the commits in `PROGRESS.md` through item 49. It should be
+re-checked (not assumed to still hold) if any of the following happen: a new Critical/High
+finding is reported or discovered; a call site is added to a file this gate's closures
+depend on without also being routed through `Runner`/`FS`/`execCommand` (`call_site_
+ratchet_test.go`'s guard mechanically catches this for `engine`/`ui`/`cmd/orchestrator` —
+extended to the latter in item 49 specifically because the revert.go gap it found would not
+have been caught otherwise — but any future package is not automatically covered); or
+`engine/bcd_qemu.go` gains a real arm64 Windows use case without `validateBCDHostArch`
+being revisited.
