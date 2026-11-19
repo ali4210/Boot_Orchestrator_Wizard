@@ -1521,7 +1521,7 @@ linux/arm64, windows/amd64, and darwin/arm64 throughout.
       `OS_STATUS_MATRIX.md` to avoid re-testing the already-confirmed-incompatible
       `alpine-linux-amd64` entry, names `docs/ARCH_SUPPORT.md`'s explicit gap that real
       arm64 hardware was never tested this session).
-- [x] 39. AUDIT_REPORT.md progress section update — Done (`PENDING_HASH`). New "## 7.
+- [x] 39. AUDIT_REPORT.md progress section update — Done (`60258a5`). New "## 7.
       Remediation Progress" section appended to `AUDIT_REPORT.md` (original findings left
       untouched) with a status table for all 19 numbered 2.x findings plus Section 6's
       open-source-readiness list, cross-referencing `PROGRESS.md`'s real commit hashes —
