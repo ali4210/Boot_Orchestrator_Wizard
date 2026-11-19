@@ -33,3 +33,23 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./...
+
+  # Audit follow-up G2: engine/revert_linux_loopimage_test.go's real
+  # loop-device tests (ExecuteDecommissionWithOptions against an actual
+  # mkfs'd/mounted disk image, not mocked) check os.Geteuid() == 0 and
+  # t.Skip otherwise — meaning the build-vet-test job above, which runs
+  # `go test` as the normal unprivileged runner user, has always silently
+  # skipped them in CI. This job runs the exact same packages under sudo
+  # (-E preserves GOCACHE/GOPATH/PATH so `go` itself is still found and
+  # writes to the same, already-permissioned cache) so this real coverage
+  # actually executes on every push/PR, not only when a human happens to
+  # run `sudo go test` locally.
+  test-root-gated-loopdevice:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: sudo -E go test ./engine/... ./safety/...
