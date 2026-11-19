@@ -1509,7 +1509,18 @@ functional bug found and fixed (autonomous USB staging was completely broken on 
 linux/arm64, windows/amd64, and darwin/arm64 throughout.
 
 ## Final deliverables
-- [ ] 38. MANUAL_TEST_PLAN.md — Not started
+- [x] 38. MANUAL_TEST_PLAN.md — Done (`PENDING_HASH`). 9 sections covering what automated
+      tests structurally cannot (real destructive operations against real/disposable-VM
+      hardware): pre-flight gate, catalog reachability, the TUI's unverified-download gate,
+      headless mode's refusal cases, a full dual-boot install, revert (both modes),
+      backup/restore, autonomous USB staging (including the new arm64
+      `BOOTAA64.EFI`-vs-`BOOTX64.EFI` check from Phase 6), and Windows/macOS targets —
+      each with concrete expected results and specific regressions to re-check (bug G's
+      "written to local disk not the USB stick," item 25's partition-table abort, item 27's
+      Panther cleanup). Grounded in this session's own real findings throughout (points at
+      `OS_STATUS_MATRIX.md` to avoid re-testing the already-confirmed-incompatible
+      `alpine-linux-amd64` entry, names `docs/ARCH_SUPPORT.md`'s explicit gap that real
+      arm64 hardware was never tested this session).
 - [ ] 39. AUDIT_REPORT.md progress section update — Not started
 - [ ] 40. READINESS_GATE.md — Not started
 - [ ] 41. Final summary — Not started
