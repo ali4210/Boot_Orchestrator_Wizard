@@ -5,9 +5,27 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// skipIfWindowsAutonomousScriptUnreachable skips a test that runs a real
+// fragment of the Linux autonomous-USB-staging worker script
+// (transient_resize.sh) under a real bash. That script is unreachable on
+// a Windows host: ArmAutonomousUSBBootloader/ProbeRemovableTargets (the
+// code that stages and arms it) require lsblk, which doesn't exist on
+// Windows — confirmed elsewhere in this branch (usb_manager_test.go,
+// backup_test.go) by the exact same "executable file not found"
+// failure. Beyond that unreachability, Git Bash's translation of
+// t.TempDir()'s Windows-native paths when embedded in these scripts'
+// mount/mkdir/file-path arguments breaks them regardless.
+func skipIfWindowsAutonomousScriptUnreachable(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("exercises a fragment of the Linux-only autonomous-USB-staging worker script (transient_resize.sh) via real bash execution; unreachable on a Windows host (ArmAutonomousUSBBootloader/ProbeRemovableTargets require lsblk, which doesn't exist there) — see usb_manager_test.go/backup_test.go for the same reasoning applied to the staging/discovery side")
+	}
+}
 
 func sampleScriptParams() autonomousInstallerScriptParams {
 	return autonomousInstallerScriptParams{
@@ -167,6 +185,7 @@ func runUSBStorageMountRetryBlock(t *testing.T, mountStubBody string, extraEnv .
 // failed the install. With the fix, a mount stub that fails twice and
 // succeeds on its third call must be tolerated by the retry loop.
 func TestUSBStorageMountRetryBlock_SucceedsOnThirdAttempt(t *testing.T) {
+	skipIfWindowsAutonomousScriptUnreachable(t)
 	dir := t.TempDir()
 	counterFile := filepath.Join(dir, "mount_calls")
 	mountStub := `
@@ -201,6 +220,7 @@ exit 1
 // instead of letting the caller script silently proceed with a
 // non-existent payload path.
 func TestUSBStorageMountRetryBlock_FailsLoudlyAfterTenAttempts(t *testing.T) {
+	skipIfWindowsAutonomousScriptUnreachable(t)
 	dir := t.TempDir()
 	counterFile := filepath.Join(dir, "mount_calls")
 	mountStub := `
@@ -230,6 +250,7 @@ exit 1
 // UUID-succeeds fallback path actually works: mount -L always fails, but
 // mount -U with the expected UUID succeeds.
 func TestUSBStorageMountRetryBlock_FallsBackToUUID(t *testing.T) {
+	skipIfWindowsAutonomousScriptUnreachable(t)
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available, skipping")
 	}
@@ -401,6 +422,7 @@ func TestDetectInstallerLayoutOrAbort_UnsupportedLayoutAbortsBeforeAnyDiskWrite(
 // casper/filesystem.squashfs is accepted, SQUASH_FILE is set to it, and
 // the script continues past detection instead of aborting.
 func TestDetectInstallerLayoutOrAbort_SquashfsLayoutProceeds(t *testing.T) {
+	skipIfWindowsAutonomousScriptUnreachable(t)
 	sourceDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(sourceDir, "casper"), 0755); err != nil {
 		t.Fatalf("mkdir casper: %v", err)
@@ -427,6 +449,7 @@ func TestDetectInstallerLayoutOrAbort_SquashfsLayoutProceeds(t *testing.T) {
 // exists (the cp -a fallback's precondition) — detection must accept this
 // too, not just the squashfs case.
 func TestDetectInstallerLayoutOrAbort_BareLiveDirProceeds(t *testing.T) {
+	skipIfWindowsAutonomousScriptUnreachable(t)
 	sourceDir := t.TempDir()
 	liveDir := filepath.Join(sourceDir, "live")
 	if err := os.MkdirAll(liveDir, 0755); err != nil {
