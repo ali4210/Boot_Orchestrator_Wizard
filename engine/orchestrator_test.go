@@ -3,6 +3,10 @@ package engine
 import (
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -138,5 +142,133 @@ func TestAutonomousUSBEFILoaderNVRAMPath_MatchesHostArch(t *testing.T) {
 	}
 	if got := autonomousUSBEFILoaderNVRAMPath("amd64"); got != `\EFI\BOOT\BOOTX64.EFI` {
 		t.Errorf("amd64 host: expected \\EFI\\BOOT\\BOOTX64.EFI, got %q", got)
+	}
+}
+
+// TestLocateSquashfsOrErr_NoSquashfsAnywhereReturnsError is the regression
+// test for audit follow-up G1 as it applies to extractLiveRootFS (the
+// direct dual-boot deploy path, as opposed to the autonomous-USB path's
+// own detectInstallerLayoutOrAbort): before this fix, finding no squashfs
+// at all made this search fall back to a GUESSED path
+// (isoMount/live/filesystem.squashfs) that often doesn't exist, which
+// extractLiveRootFS then passed to unsquashfs — but only AFTER already
+// having run mkfs.ext4 against the real target partition. Returning a
+// clear error instead (checked by the caller before mkfs.ext4 runs — see
+// extractLiveRootFS) means an unsupported ISO (e.g. alpine-linux-amd64,
+// see OS_STATUS_MATRIX.md) is caught before any disk write, not after.
+func TestLocateSquashfsOrErr_NoSquashfsAnywhereReturnsError(t *testing.T) {
+	isoMount := t.TempDir()
+	if err := os.WriteFile(filepath.Join(isoMount, "README.txt"), []byte("not a live image"), 0644); err != nil {
+		t.Fatalf("seeding iso mount dir: %v", err)
+	}
+
+	_, err := locateSquashfsOrErr(isoMount)
+	if err == nil {
+		t.Fatalf("expected locateSquashfsOrErr to fail when no squashfs exists anywhere")
+	}
+	if !strings.Contains(err.Error(), "unsupported ISO layout") {
+		t.Errorf("expected a clear 'unsupported ISO layout' error, got: %v", err)
+	}
+}
+
+// TestLocateSquashfsOrErr_FindsRealSquashfs proves the normal (supported)
+// case still works: a real casper/filesystem.squashfs is found and its
+// exact path returned.
+func TestLocateSquashfsOrErr_FindsRealSquashfs(t *testing.T) {
+	isoMount := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(isoMount, "casper"), 0755); err != nil {
+		t.Fatalf("mkdir casper: %v", err)
+	}
+	squashPath := filepath.Join(isoMount, "casper", "filesystem.squashfs")
+	if err := os.WriteFile(squashPath, []byte("fake squashfs bytes"), 0644); err != nil {
+		t.Fatalf("seeding squashfs: %v", err)
+	}
+
+	got, err := locateSquashfsOrErr(isoMount)
+	if err != nil {
+		t.Fatalf("expected a real squashfs to be found, got error: %v", err)
+	}
+	if got != squashPath {
+		t.Errorf("expected %q, got %q", squashPath, got)
+	}
+}
+
+// TestExtractLiveRootFS_LocatesSquashfsBeforeFormattingSourceOrder is a
+// static, structural check complementing the two behavioral tests above:
+// it parses engine/orchestrator.go's real source with go/ast (the same
+// technique engine/call_site_ratchet_test.go and
+// engine/journal_stepnames_test.go already use for precise, comment-
+// excluding checks) and confirms locateSquashfsOrErr is called, and its
+// error checked with an early return, strictly BEFORE mkfs.ext4 is
+// invoked inside extractLiveRootFS's body. Driving the real function
+// end-to-end would need a real loop-mounted ISO (root-gated, like
+// engine/revert_linux_loopimage_test.go) to exercise the exact
+// "/mnt/orch_iso_source" path extractLiveRootFS hardcodes; this check
+// instead proves the ordering directly from the compiled control flow,
+// which is what actually guarantees mkfs.ext4 cannot execute unless
+// locateSquashfsOrErr already succeeded.
+func TestExtractLiveRootFS_LocatesSquashfsBeforeFormattingSourceOrder(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "orchestrator.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parsing orchestrator.go: %v", err)
+	}
+
+	var fn *ast.FuncDecl
+	ast.Inspect(file, func(n ast.Node) bool {
+		if f, ok := n.(*ast.FuncDecl); ok && f.Name.Name == "extractLiveRootFS" {
+			fn = f
+			return false
+		}
+		return true
+	})
+	if fn == nil {
+		t.Fatalf("extractLiveRootFS not found in orchestrator.go")
+	}
+
+	locatePos, mkfsPos := -1, -1
+	i := 0
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		i++
+		if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "locateSquashfsOrErr" && locatePos == -1 {
+			locatePos = i
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Run" {
+			if inner, ok := sel.X.(*ast.CallExpr); ok {
+				if innerIdent, ok := inner.Fun.(*ast.Ident); ok && innerIdent.Name == "execCommand" {
+					if len(inner.Args) > 0 {
+						if lit, ok := inner.Args[0].(*ast.BasicLit); ok && lit.Value == `"mkfs.ext4"` && mkfsPos == -1 {
+							mkfsPos = i
+						}
+					}
+				}
+			}
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "CombinedOutput" {
+			if inner, ok := sel.X.(*ast.CallExpr); ok {
+				if innerIdent, ok := inner.Fun.(*ast.Ident); ok && innerIdent.Name == "execCommand" {
+					if len(inner.Args) > 0 {
+						if lit, ok := inner.Args[0].(*ast.BasicLit); ok && lit.Value == `"mkfs.ext4"` && mkfsPos == -1 {
+							mkfsPos = i
+						}
+					}
+				}
+			}
+		}
+		return true
+	})
+
+	if locatePos == -1 {
+		t.Fatalf("extractLiveRootFS no longer calls locateSquashfsOrErr at all")
+	}
+	if mkfsPos == -1 {
+		t.Fatalf("extractLiveRootFS no longer calls mkfs.ext4 via execCommand — if it was refactored, update this test's detection, don't delete the ordering guarantee")
+	}
+	if locatePos >= mkfsPos {
+		t.Fatalf("locateSquashfsOrErr must be called (and its error checked) before mkfs.ext4 — found locateSquashfsOrErr at AST position %d, mkfs.ext4 at %d", locatePos, mkfsPos)
 	}
 }

@@ -62,6 +62,47 @@ if [ -z "$MOUNTED" ]; then
 fi`, vaultDir, storageUUIDVar)
 }
 
+// detectInstallerLayoutOrAbort returns the bash fragment that searches the
+// already-mounted sourceDir for a supported "live" layout (a *.squashfs
+// file in one of the usual locations, or a bare "live" subdirectory) and
+// aborts loudly — before any write to the target disk — if neither is
+// found. Sets $SQUASH_FILE for the caller to branch on afterward
+// (extraction uses unsquashfs when it's set, "cp -a $sourceDir/live/*"
+// otherwise). Production call sites pass "/mnt/source" (the real mount
+// point this script uses); tests pass a real temp directory so the search
+// can be exercised against a synthetic tree without touching /mnt at all.
+//
+// Extracted into its own function (audit follow-up G1), exactly like
+// usbStorageMountRetryBlock above, so it's independently testable under
+// bash against synthetic source trees with stubbed mkfs/sgdisk/parted
+// binaries — without needing the rest of this script's real partition/
+// chroot/reboot operations. Before this fix, this search ran AFTER
+// mkfs.ext4 had already formatted the target partition, and an
+// unsupported layout (neither pattern — e.g. alpine-linux-amd64, see
+// OS_STATUS_MATRIX.md) fell through to a blind "rsync the whole mounted
+// ISO" that doesn't error, it just copies boot/efi/other top-level ISO
+// files into what's supposed to be a root filesystem, producing a
+// formatted-but-unbootable target partition. Checking first means an
+// unsupported ISO aborts with nothing on the target disk touched at all.
+func detectInstallerLayoutOrAbort(sourceDir string) string {
+	return fmt.Sprintf(`SQUASH_FILE=""
+for cand in %[1]s/casper/filesystem.squashfs %[1]s/live/filesystem.squashfs %[1]s/install/filesystem.squashfs; do
+    if [ -f "$cand" ]; then
+        SQUASH_FILE="$cand"
+        break
+    fi
+done
+if [ -z "$SQUASH_FILE" ]; then
+    SQUASH_FILE=$(find %[1]s -name "*.squashfs" 2>/dev/null | head -n 1)
+fi
+
+if [ -z "$SQUASH_FILE" ] && [ ! -d %[1]s/live ]; then
+    echo "ERROR: unsupported installer media layout — neither a *.squashfs file nor a /live directory was found under the mounted source media. Refusing to format $TARGET_PART or modify $DISK; nothing has been written to disk." >&2
+    umount %[1]s 2>/dev/null || true
+    exit 1
+fi`, sourceDir)
+}
+
 // renderAutonomousInstallerScript builds the body of transient_resize.sh: the
 // autonomous installer that runs unattended after the machine reboots into
 // the USB staging environment. It embeds the user's password hash (never the
@@ -99,6 +140,17 @@ STORAGE_UUID="%[11]s"
 swapoff -a || true
 e2fsck -fy "$HOST_PART" || true
 
+mkdir -p /mnt/target /mnt/source /mnt/vault
+
+PAYLOAD_PATH=$(find / -name "os_image.payload" 2>/dev/null | head -n 1)
+if [ -z "$PAYLOAD_PATH" ] || [ ! -f "$PAYLOAD_PATH" ]; then
+%[12]s
+    PAYLOAD_PATH="/mnt/vault/os_image.payload"
+fi
+mount -o loop,ro "$PAYLOAD_PATH" /mnt/source
+
+%[13]s
+
 sgdisk -e "$DISK" || true
 if [ ! -b "$TARGET_PART" ]; then
     parted -s -a optimal "$DISK" mkpart primary ext4 50%% 100%% || true
@@ -108,33 +160,12 @@ if [ ! -b "$TARGET_PART" ]; then
 fi
 
 mkfs.ext4 -F -q -L "${DISTRO_LABEL}_ROOT" "$TARGET_PART"
-mkdir -p /mnt/target /mnt/source /mnt/vault
 mount "$TARGET_PART" /mnt/target
 
-PAYLOAD_PATH=$(find / -name "os_image.payload" 2>/dev/null | head -n 1)
-if [ -z "$PAYLOAD_PATH" ] || [ ! -f "$PAYLOAD_PATH" ]; then
-%[12]s
-    PAYLOAD_PATH="/mnt/vault/os_image.payload"
-fi
-mount -o loop,ro "$PAYLOAD_PATH" /mnt/source
-
-SQUASH_FILE=""
-for cand in /mnt/source/casper/filesystem.squashfs /mnt/source/live/filesystem.squashfs /mnt/source/install/filesystem.squashfs; do
-    if [ -f "$cand" ]; then
-        SQUASH_FILE="$cand"
-        break
-    fi
-done
-if [ -z "$SQUASH_FILE" ]; then
-    SQUASH_FILE=$(find /mnt/source -name "*.squashfs" 2>/dev/null | head -n 1)
-fi
-
-if [ -n "$SQUASH_FILE" ] && [ -f "$SQUASH_FILE" ]; then
+if [ -n "$SQUASH_FILE" ]; then
     unsquashfs -f -d /mnt/target "$SQUASH_FILE"
-elif [ -d /mnt/source/live ]; then
-    cp -a /mnt/source/live/* /mnt/target/
 else
-    rsync -aHAX --exclude="/proc" --exclude="/sys" --exclude="/dev" /mnt/source/ /mnt/target/
+    cp -a /mnt/source/live/* /mnt/target/
 fi
 
 tune2fs -m 1 "$TARGET_PART"
@@ -204,7 +235,7 @@ umount /mnt/source 2>/dev/null || true
 umount /mnt/target 2>/dev/null || true
 sleep 2
 reboot -f
-`, p.Disk, p.HostPartDev, p.TargetPartDev, p.HostESP, p.HostPartNum, p.TargetPartNum, p.DistroLabel, p.Username, p.PasswordHash, p.RootCmd, p.StorageUUID, usbStorageMountRetryBlock("/mnt/vault", "STORAGE_UUID"))
+`, p.Disk, p.HostPartDev, p.TargetPartDev, p.HostESP, p.HostPartNum, p.TargetPartNum, p.DistroLabel, p.Username, p.PasswordHash, p.RootCmd, p.StorageUUID, usbStorageMountRetryBlock("/mnt/vault", "STORAGE_UUID"), detectInstallerLayoutOrAbort("/mnt/source"))
 }
 
 // transientScriptMode is the permission transient_resize.sh is written with.

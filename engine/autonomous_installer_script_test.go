@@ -311,3 +311,136 @@ func TestRenderAutonomousInstallerScript_HashNeverLoggedToStdout(t *testing.T) {
 		}
 	}
 }
+
+// runDetectInstallerLayoutOrAbort runs detectInstallerLayoutOrAbort's real
+// bash output against sourceDir (a real, caller-populated directory
+// standing in for /mnt/source), with mkfs.ext4/sgdisk/parted/partprobe/
+// udevadm/sync stubbed to each append their own name to callLogFile —
+// so a test can assert, from the log's contents, whether any of those
+// target-disk-mutating commands ran at all, not just inspect the
+// fragment's text. TARGET_PART/DISK are set to fixed, obviously-fake
+// values so the (expected, on failure) error message is deterministic.
+func runDetectInstallerLayoutOrAbort(t *testing.T, sourceDir string) (out string, err error, callLog []string) {
+	t.Helper()
+	if _, lookErr := exec.LookPath("bash"); lookErr != nil {
+		t.Skip("bash not available, skipping")
+	}
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if mkErr := os.MkdirAll(binDir, 0755); mkErr != nil {
+		t.Fatalf("mkdir bin: %v", mkErr)
+	}
+	callLogFile := filepath.Join(dir, "calls.log")
+	for _, name := range []string{"mkfs.ext4", "sgdisk", "parted", "partprobe", "udevadm", "sync"} {
+		writeStubBin(t, binDir, name, `echo "`+name+`" >> "`+callLogFile+`"
+exit 0`)
+	}
+
+	scriptPath := filepath.Join(dir, "run.sh")
+	script := fmt.Sprintf("#!/usr/bin/env bash\nset -u\n%s\necho REACHED_AFTER_DETECTION\n",
+		detectInstallerLayoutOrAbort(sourceDir))
+	if writeErr := os.WriteFile(scriptPath, []byte(script), 0755); writeErr != nil {
+		t.Fatalf("writing script: %v", writeErr)
+	}
+
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"), "TARGET_PART=/dev/orch-test-fake-target", "DISK=/dev/orch-test-fake-disk")
+	outBytes, runErr := cmd.CombinedOutput()
+
+	if logBytes, readErr := os.ReadFile(callLogFile); readErr == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(logBytes)), "\n") {
+			if line != "" {
+				callLog = append(callLog, line)
+			}
+		}
+	}
+	return string(outBytes), runErr, callLog
+}
+
+// TestDetectInstallerLayoutOrAbort_UnsupportedLayoutAbortsBeforeAnyDiskWrite
+// is the regression test for audit follow-up G1: before this fix, the
+// squashfs/live search ran AFTER mkfs.ext4 had already formatted the
+// target partition, and an installer media with neither a *.squashfs file
+// nor a /live directory (e.g. alpine-linux-amd64 — see
+// OS_STATUS_MATRIX.md) fell through to a blind rsync of the whole mounted
+// ISO, producing a formatted-but-unbootable target partition instead of a
+// clear failure. This test builds a source tree with neither pattern and
+// proves two things at once: the script exits nonzero with a clear error
+// naming $TARGET_PART, and — the actual safety property, not just a
+// message check — mkfs.ext4/sgdisk/parted were never invoked at all
+// (confirmed via the real call log, not inferred from exit status alone).
+func TestDetectInstallerLayoutOrAbort_UnsupportedLayoutAbortsBeforeAnyDiskWrite(t *testing.T) {
+	sourceDir := t.TempDir()
+	// Deliberately empty: no casper/live/install dirs, no *.squashfs
+	// anywhere, no bare "live" subdirectory — the exact alpine-linux-amd64
+	// shape from OS_STATUS_MATRIX.md.
+	if err := os.WriteFile(filepath.Join(sourceDir, "README.txt"), []byte("not a live image"), 0644); err != nil {
+		t.Fatalf("seeding source dir: %v", err)
+	}
+
+	out, err, callLog := runDetectInstallerLayoutOrAbort(t, sourceDir)
+	if err == nil {
+		t.Fatalf("expected detectInstallerLayoutOrAbort to fail for an unsupported layout, got success:\n%s", out)
+	}
+	if !strings.Contains(out, "unsupported installer media layout") {
+		t.Errorf("expected a clear 'unsupported installer media layout' error, got:\n%s", out)
+	}
+	if !strings.Contains(out, "/dev/orch-test-fake-target") {
+		t.Errorf("expected the error to name the target partition it's refusing to format, got:\n%s", out)
+	}
+	if strings.Contains(out, "REACHED_AFTER_DETECTION") {
+		t.Fatalf("expected the script to exit before reaching the line after detection, got:\n%s", out)
+	}
+	if len(callLog) != 0 {
+		t.Fatalf("expected mkfs.ext4/sgdisk/parted to never be invoked for an unsupported layout, but got real calls: %v", callLog)
+	}
+}
+
+// TestDetectInstallerLayoutOrAbort_SquashfsLayoutProceeds proves the
+// normal (supported) case still works: a source tree with a real
+// casper/filesystem.squashfs is accepted, SQUASH_FILE is set to it, and
+// the script continues past detection instead of aborting.
+func TestDetectInstallerLayoutOrAbort_SquashfsLayoutProceeds(t *testing.T) {
+	sourceDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(sourceDir, "casper"), 0755); err != nil {
+		t.Fatalf("mkdir casper: %v", err)
+	}
+	squashPath := filepath.Join(sourceDir, "casper", "filesystem.squashfs")
+	if err := os.WriteFile(squashPath, []byte("fake squashfs bytes"), 0644); err != nil {
+		t.Fatalf("seeding squashfs: %v", err)
+	}
+
+	out, err, callLog := runDetectInstallerLayoutOrAbort(t, sourceDir)
+	if err != nil {
+		t.Fatalf("expected a supported squashfs layout to pass detection, got error %v\noutput:\n%s", err, out)
+	}
+	if !strings.Contains(out, "REACHED_AFTER_DETECTION") {
+		t.Fatalf("expected the script to continue past detection, got:\n%s", out)
+	}
+	if len(callLog) != 0 {
+		t.Fatalf("detection itself should never call mkfs/sgdisk/parted (that's the caller's job afterward), got: %v", callLog)
+	}
+}
+
+// TestDetectInstallerLayoutOrAbort_BareLiveDirProceeds proves the other
+// supported case: no *.squashfs anywhere, but a bare "live" subdirectory
+// exists (the cp -a fallback's precondition) — detection must accept this
+// too, not just the squashfs case.
+func TestDetectInstallerLayoutOrAbort_BareLiveDirProceeds(t *testing.T) {
+	sourceDir := t.TempDir()
+	liveDir := filepath.Join(sourceDir, "live")
+	if err := os.MkdirAll(liveDir, 0755); err != nil {
+		t.Fatalf("mkdir live: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(liveDir, "some-rootfs-file"), []byte("x"), 0644); err != nil {
+		t.Fatalf("seeding live dir: %v", err)
+	}
+
+	out, err, _ := runDetectInstallerLayoutOrAbort(t, sourceDir)
+	if err != nil {
+		t.Fatalf("expected a bare /live directory to pass detection, got error %v\noutput:\n%s", err, out)
+	}
+	if !strings.Contains(out, "REACHED_AFTER_DETECTION") {
+		t.Fatalf("expected the script to continue past detection, got:\n%s", out)
+	}
+}

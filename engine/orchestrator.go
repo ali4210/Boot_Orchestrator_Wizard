@@ -579,48 +579,20 @@ menuentry "macOS Recovery (OpenCore)" {
 	return nil
 }
 
-func extractLiveRootFS(isoPath, targetPart string, creds Credentials, logFn func(string)) error {
-	if logFn == nil {
-		logFn = func(string) {}
-	}
-
-	sizeBytes, _ := QueryBlockDeviceBytes(filepath.Base(targetPart))
-	minRequired := uint64(20 * 1024 * 1024 * 1024)
-	if sizeBytes > 0 && sizeBytes < minRequired {
-		return fmt.Errorf("target partition %s capacity (%.1f GB) is critically below the 20 GB safety threshold", targetPart, float64(sizeBytes)/(1024*1024*1024))
-	}
-
-	logFn(fmt.Sprintf("=> [ROOTFS DEPLOY] Formatting target partition %s as ext4 [LINUX_ROOT]...", targetPart))
-	if out, err := execCommand("mkfs.ext4", "-F", "-q", "-L", "LINUX_ROOT", targetPart).CombinedOutput(); err != nil {
-		return fmt.Errorf("formatting %s: %w (%s)", targetPart, err, string(out))
-	}
-	_ = execCommand("sync").Run()
-
-	targetMount := "/mnt/orch_target_root"
-	_ = fsRunner.MkdirAll(targetMount, 0755)
-	_ = execCommand("umount", "-l", targetMount).Run()
-
-	logFn(fmt.Sprintf("=> [ROOTFS DEPLOY] Mounting target %s at %s...", targetPart, targetMount))
-	if out, err := execCommand("mount", targetPart, targetMount).CombinedOutput(); err != nil {
-		return fmt.Errorf("mounting %s to %s: %w (%s)", targetPart, targetMount, err, string(out))
-	}
-	defer func() {
-		_ = execCommand("sync").Run()
-		_ = execCommand("umount", "-l", targetMount).Run()
-	}()
-
-	isoMount := "/mnt/orch_iso_source"
-	_ = fsRunner.MkdirAll(isoMount, 0755)
-	_ = execCommand("umount", "-l", isoMount).Run()
-
-	logFn("=> [ROOTFS DEPLOY] Mounting source ISO loopback: " + isoPath)
-	if out, err := execCommand("mount", "-o", "loop,ro", isoPath, isoMount).CombinedOutput(); err != nil {
-		return fmt.Errorf("mounting loop iso %s: %w (%s)", isoPath, err, string(out))
-	}
-	defer func() {
-		_ = execCommand("umount", "-l", isoMount).Run()
-	}()
-
+// locateSquashfsOrErr searches isoMount (an already-mounted, read-only ISO
+// loopback) for a squashfs file the way extractLiveRootFS's live-rootfs
+// deploy expects: casper/live/install/arch-x86_64 subdirectories first,
+// preferring an exact "filesystem.squashfs"-style name, falling back to
+// the largest *.squashfs found in any of those directories. Returns a
+// clear error — not a guessed, possibly-nonexistent path — when nothing
+// is found at all, so the caller can abort before formatting the target
+// partition instead of discovering the incompatibility only after
+// unsquashfs fails against a path that was never real (audit follow-up
+// G1; see OS_STATUS_MATRIX.md's alpine-linux-amd64 finding, which has
+// neither a squashfs nor a /live directory). Extracted as a pure function
+// (real directory in, real result out) so it's directly unit-testable
+// against a synthetic ISO tree without mounting anything for real.
+func locateSquashfsOrErr(isoMount string) (string, error) {
 	squashPath := ""
 	candidateDirs := []string{
 		filepath.Join(isoMount, "casper"),
@@ -659,8 +631,67 @@ func extractLiveRootFS(isoPath, targetPart string, creds Credentials, logFn func
 	}
 
 	if squashPath == "" {
-		squashPath = filepath.Join(isoMount, "live", "filesystem.squashfs")
+		return "", fmt.Errorf("unsupported ISO layout: no *.squashfs file found under %s (checked casper/live/install/arch-x86_64) — refusing to format the target partition for media this installer cannot deploy", isoMount)
 	}
+	return squashPath, nil
+}
+
+func extractLiveRootFS(isoPath, targetPart string, creds Credentials, logFn func(string)) error {
+	if logFn == nil {
+		logFn = func(string) {}
+	}
+
+	sizeBytes, _ := QueryBlockDeviceBytes(filepath.Base(targetPart))
+	minRequired := uint64(20 * 1024 * 1024 * 1024)
+	if sizeBytes > 0 && sizeBytes < minRequired {
+		return fmt.Errorf("target partition %s capacity (%.1f GB) is critically below the 20 GB safety threshold", targetPart, float64(sizeBytes)/(1024*1024*1024))
+	}
+
+	isoMount := "/mnt/orch_iso_source"
+	_ = fsRunner.MkdirAll(isoMount, 0755)
+	_ = execCommand("umount", "-l", isoMount).Run()
+
+	logFn("=> [ROOTFS DEPLOY] Mounting source ISO loopback: " + isoPath)
+	if out, err := execCommand("mount", "-o", "loop,ro", isoPath, isoMount).CombinedOutput(); err != nil {
+		return fmt.Errorf("mounting loop iso %s: %w (%s)", isoPath, err, string(out))
+	}
+	defer func() {
+		_ = execCommand("umount", "-l", isoMount).Run()
+	}()
+
+	// G1: locate the squashfs BEFORE formatting targetPart, not after.
+	// Before this fix, mkfs.ext4 ran unconditionally first, and only then
+	// did this search run — a media layout with no squashfs anywhere (e.g.
+	// alpine-linux-amd64, see OS_STATUS_MATRIX.md) made this fall back to
+	// a GUESSED, nonexistent path (isoMount/live/filesystem.squashfs),
+	// which then failed at the unsquashfs step — but only after the
+	// target partition had already been destructively reformatted for an
+	// install that was never going to succeed. Checking first means an
+	// unsupported ISO aborts with the target partition completely
+	// untouched.
+	squashPath, findErr := locateSquashfsOrErr(isoMount)
+	if findErr != nil {
+		return findErr
+	}
+
+	logFn(fmt.Sprintf("=> [ROOTFS DEPLOY] Formatting target partition %s as ext4 [LINUX_ROOT]...", targetPart))
+	if out, err := execCommand("mkfs.ext4", "-F", "-q", "-L", "LINUX_ROOT", targetPart).CombinedOutput(); err != nil {
+		return fmt.Errorf("formatting %s: %w (%s)", targetPart, err, string(out))
+	}
+	_ = execCommand("sync").Run()
+
+	targetMount := "/mnt/orch_target_root"
+	_ = fsRunner.MkdirAll(targetMount, 0755)
+	_ = execCommand("umount", "-l", targetMount).Run()
+
+	logFn(fmt.Sprintf("=> [ROOTFS DEPLOY] Mounting target %s at %s...", targetPart, targetMount))
+	if out, err := execCommand("mount", targetPart, targetMount).CombinedOutput(); err != nil {
+		return fmt.Errorf("mounting %s to %s: %w (%s)", targetPart, targetMount, err, string(out))
+	}
+	defer func() {
+		_ = execCommand("sync").Run()
+		_ = execCommand("umount", "-l", targetMount).Run()
+	}()
 
 	logFn("=> [ROOTFS DEPLOY] Extracting live root filesystem tree via unsquashfs (2-4 min)...")
 	unsquashCmd := execCommand("unsquashfs", "-f", "-d", targetMount, squashPath)
