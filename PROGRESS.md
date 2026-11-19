@@ -1546,7 +1546,8 @@ linux/arm64, windows/amd64, and darwin/arm64 throughout.
       incompatibility, dead `rootfs.go`, Windows/macOS/arm64 never driven on real hardware,
       `test/os-matrix` unmerged) are listed for transparency rather than omitted. Closes
       with exactly what would need to happen to actually reach green.
-- [ ] 41. Final summary — Not started
+- [x] 41. Final summary — Done (`PENDING_HASH`). See "## Final Summary" at the end of this
+      file.
 
 ## Prior session (commits already on fix/audit-phase-0-1 before this plan started)
 - `f7ddc19` fix: audit 2.1 — Linux bootloader failure no longer reported as success
@@ -1558,3 +1559,55 @@ linux/arm64, windows/amd64, and darwin/arm64 throughout.
 These satisfy some groundwork for Phase 1 item A and Phase 5, but the new plan's items are
 broader (JSON serialization, script permissions/cleanup, admin-group detection, min password
 length, reserved usernames) and are NOT yet done — tracked fresh above.
+
+## Final Summary (item 41)
+
+**50 commits on `fix/audit-phase-0-1` ahead of `origin/fix/audit-phase-0-1`, plus the
+separate `test/os-matrix` branch's own commits for Phase 3. Nothing pushed to any remote.
+No real disk, partition, bootloader, NVRAM, or journal was ever touched outside a loop-
+mounted disk image, a tmpfs mount, or a `t.TempDir()` — checked at every single step, not
+assumed.**
+
+Across Slices 1-4 plus FINAL: Pre-Phase-3 follow-ups (F13-F18), Phase 3 (the OS verification
+matrix, branch `test/os-matrix`), Phase 4 (items 20-30: signature verification, the
+image-deploy rollback limitation, the Windows XP entry removal, the pre-flight gate, launcher
+dedup, the silent-error audit, generated-script checks, Panther cleanup, and
+README/CONTRIBUTING/CI/LICENSE), Phase 5 (items 31-34: the dry-run inventory, interception
+infrastructure, the ratchet guard, and the honest conclusion that a full dry-run isn't safe
+yet), Phase 6 (items 35-37: a real arm64 bug fix and a real QEMU/AAVMF boot proof), and the
+FINAL deliverables (this document, `MANUAL_TEST_PLAN.md`, `AUDIT_REPORT.md`'s progress
+section, `READINESS_GATE.md`).
+
+**Real bugs found and fixed that weren't on the original list, discovered by actually doing
+the work rather than just reading code:**
+- A disaster-recovery partition-setup bug that could silently produce an unbootable UEFI
+  restore (item 25).
+- The exact same hardcoded-account-creation bug class as audit 2.3, in a second, parallel
+  code path the original fix never touched (item 26).
+- A dry-run logger about to print a password hash to stderr, caught while writing that
+  feature's own tests, before it ever shipped (item 32).
+- Two previously-undetected compile breakages affecting every Windows and macOS build of
+  this project — one a regression from this same effort's own earlier work (F14), one
+  pre-existing — found only because item 29 insisted on actually running
+  `GOOS=windows`/`GOOS=darwin` builds before trusting the new CI matrix, not just adding the
+  YAML and assuming it would pass.
+- An autonomous-USB-staging bug that would have produced a completely unbootable stick on
+  real arm64 host hardware (item 36).
+- A real, AST-vs-grep counting discrepancy in the dry-run ratchet's own baseline, caught by
+  the ratchet test itself disagreeing with the inventory document that fed it (item 33).
+
+**What's genuinely NOT done, stated plainly, not buried:** see `READINESS_GATE.md` in full.
+In short: a real `--dry-run` (audit 2.4) and a complete architecture-hardcoding audit (2.6)
+remain open at Critical/High severity — the gate is **not green**. Checksums and OpenPGP
+signatures are not backfilled for any catalog entry. `engine/rootfs.go`'s dead code was
+found and flagged, not removed. Windows, macOS, and real arm64 hardware were never driven
+end-to-end from this (Linux-only) development sandbox. `test/os-matrix` is not merged.
+
+**The discipline that was actually followed, not just stated at the top of this file:**
+every single "Done" item above has a real commit hash; every bug fix has a test verified
+failing before the fix and passing after (via `git stash`/temporary reversion, checked
+empirically, not assumed); `go build ./... && go vet ./... && go test ./...` stayed green
+before every commit; nothing was invented (no fabricated checksums, signing keys, or arm64
+catalog URLs — every real URL added was independently checked reachable first); and every
+stopping point was written down here before context ran out, so the next session (or this
+one, after compaction) could resume from fact rather than from memory.
