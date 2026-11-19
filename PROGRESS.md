@@ -1891,6 +1891,30 @@ See `READINESS_GATE.md`'s own re-check note. No new Critical/High finding surfac
 work, not left open. The gate's verdict remains 🟢 GREEN, with `docs/dryrun-inventory.md`
 updated to record the new depth this real proof actually reaches.
 
+## Post-PR follow-up: G5 (requested after the PR was opened)
+
+### Item 57: G5 — autorun root-ownership tests skip correctly under sudo — commits fbefc02/dac4ba4
+
+`sudo -E go test ./...` failed `TestCheckRootOwnedFiles_BinOwnedByRootBlocks` and
+`TestCheckRootOwnedFiles_RuntimeDirOwnedByRootBlocks` (empty output). Read
+`check_root_owned_files` (`autorun.sh`) first, per the request, before touching anything: it
+intentionally `return 0`s immediately when `$EUID -eq 0` — root can read/write/purge
+anything regardless of file ownership, so there's genuinely nothing to block. That's
+correct, existing behavior, not a script bug. The two tests assert the opposite premise (a
+root-owned fixture blocks the check), which only holds when the test *process* itself isn't
+root — and `sourceAutorunAndRun` runs the sourced bash with no privilege change, so under
+`sudo -E go test` the sourced script's own `$EUID` is also 0. Reproduced first (ran both
+tests under sudo, got the exact reported empty-output failure) before fixing. Fixed by
+skipping both when `os.Geteuid() == 0`, with a message naming the real reason. Verified both
+`go test ./...` (both tests actually run and pass, against a real root-owned fixture) and
+`sudo -E go test ./...` (both skip cleanly) are green.
+
+`CONTRIBUTING.md` now documents the two supported test commands (`go test ./...` as a
+normal user; `sudo -E go test ./engine/... ./safety/...` for the root-gated loop-image
+tests) and the reverse-skip relationship these two autorun tests have with that second
+command. `.github/workflows/ci.yml`'s `test-root-gated-loopdevice` job already had a
+20-minute timeout (>= the requested 15-minute floor) — confirmed, no change needed.
+
 ## Final Summary (item 41)
 
 **50 commits on `fix/audit-phase-0-1` ahead of `origin/fix/audit-phase-0-1`, plus the
