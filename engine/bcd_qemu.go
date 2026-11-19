@@ -12,9 +12,32 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
+
+// validateBCDHostArch refuses loudly, before touching anything, when this
+// helper is run on a host architecture it was never built or verified for.
+// Every piece of this file is x86_64-specific by construction: it hardcodes
+// qemu-system-x86_64, a bootx64.efi lookup on the install media, and a
+// q35 QEMU machine whose KVM acceleration cannot cross architectures — none
+// of that can be swapped for an arm64 equivalent (qemu-system-aarch64,
+// bootaa64.efi, AAVMF) without real Windows-on-ARM install media and a real
+// test, neither of which exists in this catalog (see docs/ARCH_SUPPORT.md
+// and item 36's scope: arm64 support here covers Debian/Ubuntu only). Audit
+// finding 2.6 flagged this file's hardcoded strings as unaudited; this is
+// the deliberate, honest resolution — fail loudly and explain why, rather
+// than silently attempt amd64-only logic on arm64 host hardware and fail
+// confusingly deep inside a QEMU invocation, or worse, partially succeed.
+func validateBCDHostArch(goarch string) error {
+	if goarch != "amd64" {
+		return fmt.Errorf("Windows BCD generation via QEMU is only supported on amd64 hosts (got GOARCH=%s): "+
+			"this file hardcodes qemu-system-x86_64/bootx64.efi/OVMF and has no arm64 equivalent "+
+			"(no Windows-on-ARM catalog entry exists to need one — see docs/ARCH_SUPPORT.md)", goarch)
+	}
+	return nil
+}
 
 // writeWindowsBCD is the entry point called from registerWindowsInGRUB.
 // isoPath is the original Windows install ISO (or install.wim's parent ISO),
@@ -23,6 +46,10 @@ import (
 func writeWindowsBCD(isoPath, targetDiskPath, targetPart string, logFn func(string)) error {
 	if logFn == nil {
 		logFn = func(string) {}
+	}
+
+	if err := validateBCDHostArch(runtime.GOARCH); err != nil {
+		return err
 	}
 
 	if err := ensureQEMUInstalled(logFn); err != nil {
