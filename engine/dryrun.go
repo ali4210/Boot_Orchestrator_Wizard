@@ -120,29 +120,41 @@ func FSRunner() FS { return fsRunner }
 func ExecCommand(name string, args ...string) *exec.Cmd { return execCommand(name, args...) }
 
 // diskReadRunner is the Runner that genuinely read-only disk-geometry
-// queries — blockDeviceSectorSize, blockDeviceSizeBytes, readDiskRegion
-// (engine/partition.go) — should use instead of cmdRunner directly.
-// These three never write anything regardless of SetDryRun, by
-// construction (not by inspecting arguments): blockdev --getss/
-// --getsize64 and a `dd if=... status=none` read. That matches
+// queries should use instead of cmdRunner directly: blockDeviceSectorSize/
+// blockDeviceSizeBytes/readDiskRegion (blockdev --getss/--getsize64, a
+// `dd if=... status=none` read), and — as of the PR #2 full-dry-run-flow
+// follow-up — every bare `parted ... print`/`parted ... print free`
+// query in engine/partition.go (CheckUnallocatedHeadroom,
+// CarvePartitionInFreeSpace, CarveHardwarePartitionAtBoundary's own
+// partition-map read, FindESPPartition). None of these ever write
+// anything regardless of SetDryRun, by construction (not by inspecting
+// arguments) — "print"/"print free" never mutates a disk. That matches
 // docs/dryrun-inventory.md's own "read-only queries... already safe to
 // run for real... do NOT need interception" principle — a principle the
 // blanket cmdRunner/execCommand swap in SetDryRun doesn't actually honor
 // on its own, since it has no way to tell a read-only invocation from a
-// mutating one by command name alone (parted and dd are each used both
-// ways elsewhere in this codebase, which is why this isn't a general
-// allowlist of command names, only these three specific, unambiguous
-// call sites).
+// mutating one by command name alone (parted is used both ways in this
+// codebase — "print" here, "mkpart"/"rm" elsewhere, each at their own
+// call site, still correctly faked — which is why this isn't a general
+// allowlist of command names, only specific, unambiguous call sites).
 //
-// Found and added while building item 50 (audit follow-up G3)'s real
-// dry-run proof: BackupPartitionTable (called unconditionally at the
-// start of every provision/revert, dry-run or not) depends on these
-// three for the disk's real sector size/byte count/GPT bytes — under the
-// blanket swap, DryRunRunner returned empty output for all of them,
-// which failed to parse, which made BackupPartitionTable error out, which
-// made the whole operation abort at "partition-shrink" on literally every
-// dry run, before any of the disk-mutating code this flag exists to
-// protect against was ever reached at all.
+// Originally added while building item 50 (audit follow-up G3)'s real
+// dry-run proof, for exactly the blockdev/dd trio: BackupPartitionTable
+// depends on them for the disk's real sector size/byte count, and under
+// the blanket swap they returned empty output, which failed to parse,
+// which aborted every dry run at "partition-shrink" before any
+// disk-mutating code was reached. The PR #2 follow-up found the SAME
+// root cause one layer deeper: with the blockdev/dd fix alone,
+// BackupPartitionTable succeeded, but CarveHardwarePartitionAtBoundary's
+// own `parted ... unit s print` (reading the EXISTING partition map) was
+// still faked — returning empty output made the code treat a disk that
+// actually has partitions as completely blank, skipping the shrink logic
+// entirely and miscomputing the next free partition number, which then
+// tripped a DIFFERENT, correct verification (the newly-"created"
+// partition's /dev node never appearing, since the mkpart that would
+// have created it was ALSO faked) — see logDryRunSimulated for that half
+// of the fix. Routing the read through here fixes the root cause (wrong
+// branch taken from fake data) rather than only the symptom.
 //
 // If cmdRunner has been replaced by a test's own mock (as
 // TestReadDiskRegion_UsesStdoutOnly already does), that mock is still
@@ -197,4 +209,33 @@ func logDryRun(kind, name string, args ...string) {
 		}
 	}
 	fmt.Fprintf(os.Stderr, "[DRY-RUN] would %s: %s %v\n", kind, name, shown)
+}
+
+// logDryRunSimulated records that a verification step — one that checks
+// for a REAL side effect of an earlier command (a partition node
+// appearing in /dev, a bootloader entry showing up in a real query, an
+// NVRAM boot entry existing) — was skipped and treated as successful in
+// dry-run, because the command that would have produced that real state
+// was itself intercepted (see execCommand/cmdRunner above) and therefore
+// never actually ran. Deliberately a different log shape from logDryRun
+// ("would <kind>: <name> <args>", which announces an intercepted
+// mutating command about to not-run): this announces a VERIFICATION
+// decision instead — "the thing we'd normally check for isn't really
+// there, and that's expected, so here's what we're assuming instead of
+// actually checking."
+//
+// Added for audit follow-up (full dry-run flow, PR #2): before this,
+// RunProvision's own verification that a just-"created" partition node
+// appeared in /dev — correct and necessary in real mode, where the node
+// genuinely must exist before mkfs can run against it — retried for 5
+// real seconds against a node that could never appear (the mkpart that
+// would have created it was itself faked) and then failed the whole
+// dry-run with "partition ... created in table but node missing in
+// /dev", stopping before mkfs, the bootloader, NVRAM, or USB staging
+// were ever reached. This is the general-purpose fix for that entire
+// class of problem, used at every such checkpoint from here on — see
+// each call site's own comment for why that SPECIFIC check is safe to
+// simulate rather than weaken.
+func logDryRunSimulated(what string) {
+	fmt.Fprintf(os.Stderr, "[DRY-RUN] simulated: %s\n", what)
 }

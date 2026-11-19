@@ -669,9 +669,25 @@ func extractLiveRootFS(isoPath, targetPart string, creds Credentials, logFn func
 	// install that was never going to succeed. Checking first means an
 	// unsupported ISO aborts with the target partition completely
 	// untouched.
-	squashPath, findErr := locateSquashfsOrErr(isoMount)
-	if findErr != nil {
-		return findErr
+	// This search depends on the mount above having actually made the
+	// ISO's real contents appear under isoMount — in dry-run, mount is
+	// itself intercepted (execCommand), so isoMount stays empty no matter
+	// what the ISO really contains, and a real, well-formed image would
+	// incorrectly report "unsupported ISO layout" here. Real mode is
+	// unchanged: locateSquashfsOrErr still runs for real and still aborts
+	// (correctly) on a genuinely unsupported layout, untouched by this
+	// branch. The placeholder path below is never read — unsquashfs,
+	// the only thing that would read it, is itself faked next.
+	var squashPath string
+	if IsDryRun() {
+		squashPath = filepath.Join(isoMount, "casper", "filesystem.squashfs")
+		logDryRunSimulated(fmt.Sprintf("located a live squashfs at %s (mount above was intercepted, so isoMount was never really populated to search)", squashPath))
+	} else {
+		var findErr error
+		squashPath, findErr = locateSquashfsOrErr(isoMount)
+		if findErr != nil {
+			return findErr
+		}
 	}
 
 	logFn(fmt.Sprintf("=> [ROOTFS DEPLOY] Formatting target partition %s as ext4 [LINUX_ROOT]...", targetPart))

@@ -141,7 +141,7 @@ func isConfirmedSwapPartition(devPath, partedFSName string) bool {
 }
 
 func CheckUnallocatedHeadroom(diskDevice string) (uint64, error) {
-	out, err := cmdRunner.Run("parted", "-s", "-m", diskDevice, "unit", "B", "print", "free")
+	out, err := diskReadRunner().Run("parted", "-s", "-m", diskDevice, "unit", "B", "print", "free")
 	if err != nil {
 		return 0, fmt.Errorf("querying disk geometry: %w\n%s", err, string(out))
 	}
@@ -167,7 +167,7 @@ func CheckUnallocatedHeadroom(diskDevice string) (uint64, error) {
 }
 
 func CarvePartitionInFreeSpace(diskPath, fsType string, sizeGB int) (*PartitionResult, error) {
-	out, err := cmdRunner.Run("parted", "-s", diskPath, "unit", "s", "print")
+	out, err := diskReadRunner().Run("parted", "-s", diskPath, "unit", "s", "print")
 	if err != nil {
 		return nil, fmt.Errorf("reading partition boundaries from %s: %w\n%s", diskPath, err, string(out))
 	}
@@ -218,8 +218,18 @@ func CarvePartitionInFreeSpace(diskPath, fsType string, sizeGB int) (*PartitionR
 
 	newDevPath := JoinDiskAndPartition(diskPath, fmt.Sprintf("%d", targetPartNum))
 
-	nodeReady := false
-	for i := 0; i < 20; i++ {
+	// This check verifies a REAL side effect of the mkpart call above
+	// (the kernel re-reading the partition table and creating a /dev
+	// node) — in dry-run, that mkpart was itself intercepted and never
+	// ran for real, so the node can never appear no matter how long this
+	// polls. Real mode is completely unchanged below: the retry loop
+	// still runs for real, and a genuinely-missing node still fails
+	// loudly there.
+	nodeReady := IsDryRun()
+	if nodeReady {
+		logDryRunSimulated(fmt.Sprintf("partition node %s exists (mkpart above was intercepted, so it never really appeared)", newDevPath))
+	}
+	for i := 0; !nodeReady && i < 20; i++ {
 		if _, statErr := os.Stat(newDevPath); statErr == nil {
 			nodeReady = true
 			break
@@ -265,7 +275,7 @@ func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint6
 	}
 
 	// 2. Read partition map
-	out, err := cmdRunner.Run("parted", "-s", diskPath, "unit", "s", "print")
+	out, err := diskReadRunner().Run("parted", "-s", diskPath, "unit", "s", "print")
 	if err != nil {
 		return nil, fmt.Errorf("reading partition table on %s: %w\n%s", diskPath, err, string(out))
 	}
@@ -791,7 +801,7 @@ func FindESPPartition(diskPath string) (string, error) {
 		}
 	}
 
-	partedOut, err := cmdRunner.Run("parted", "-s", "-m", diskPath, "print")
+	partedOut, err := diskReadRunner().Run("parted", "-s", "-m", diskPath, "print")
 	if err == nil {
 		for _, line := range strings.Split(string(partedOut), "\n") {
 			if strings.Contains(line, "esp") || strings.Contains(line, "boot") {

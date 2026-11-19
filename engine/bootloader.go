@@ -474,7 +474,14 @@ func assertDefaultCredentials(rootPath string, creds Credentials, logFn func(str
 
 	out, runErr := cmdRunner.Run("chroot", rootPath, "/bin/sh", "-c", script)
 	outStr := string(out)
-	if runErr != nil || !strings.Contains(outStr, "ORCH_ACCOUNT_VERIFIED") {
+	// This verification depends on the chroot call above having actually
+	// run useradd/id -u for real — in dry-run, chroot is itself
+	// intercepted (cmdRunner), so it never produces ORCH_ACCOUNT_VERIFIED
+	// no matter how correct the real account-provisioning logic is. Real
+	// mode is unchanged: the exact same condition still aborts there.
+	if IsDryRun() {
+		logDryRunSimulated(fmt.Sprintf("account %q provisioned and verified inside %s (chroot above was intercepted, so useradd/id -u never really ran)", creds.Username, rootPath))
+	} else if runErr != nil || !strings.Contains(outStr, "ORCH_ACCOUNT_VERIFIED") {
 		return fmt.Errorf("account %q was not verified to exist after provisioning (id -u failed): %v (%s)", creds.Username, runErr, outStr)
 	}
 	if strings.Contains(outStr, "admin_group=none") {
