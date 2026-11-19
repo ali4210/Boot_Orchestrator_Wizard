@@ -110,7 +110,12 @@ if [ "$FORCE_REBUILD" -eq 1 ] || [ ! -f "$BIN_PATH" ]; then
     export GOOS=darwin
     export GOARCH="$GOARCH"
 
-    TMPDIR="$LOCAL_TMP" go build -ldflags="-s -w" -o "$BIN_PATH" "$DIR/cmd/orchestrator/main.go"
+    # Builds the whole cmd/orchestrator PACKAGE (a directory), not a
+    # single file: `go build pkg/main.go` compiles ONLY that one file,
+    # silently excluding every sibling file in the same package
+    # (headless.go, revert.go, version.go) — found while fixing the same
+    # bug in autorun.sh (banner follow-up, Part A).
+    TMPDIR="$LOCAL_TMP" go build -ldflags="-s -w" -o "$BIN_PATH" "$DIR/cmd/orchestrator"
     rm -rf "$LOCAL_TMP" 2>/dev/null || true
 
     if [ -n "$SUDO_USER" ]; then

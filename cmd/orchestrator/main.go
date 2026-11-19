@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -100,7 +101,30 @@ func runPreflightGate(report preflight.Report, skip bool) (refuse bool, message 
 	return true, msg
 }
 
+// maybePrintBuildCommit checks for --print-build-commit as a bare
+// os.Args scan, before flag.Parse() itself, so a launcher script can
+// query it with zero risk of colliding with, or being blocked by, any
+// other flag's parsing rules — this must stay usable even if every other
+// flag on the command line is garbage. Prints BuildCommit alone (no
+// banner, no other output) and reports true so the caller exits
+// immediately: autorun.sh/.ps1 capture this verbatim and compare it
+// against `git rev-parse HEAD` to decide whether the binary is stale
+// (see version.go).
+func maybePrintBuildCommit(args []string, w io.Writer) bool {
+	for _, arg := range args {
+		if arg == "--print-build-commit" {
+			fmt.Fprintln(w, BuildCommit)
+			return true
+		}
+	}
+	return false
+}
+
 func main() {
+	if maybePrintBuildCommit(os.Args[1:], os.Stdout) {
+		return
+	}
+
 	isoFlag := flag.String("iso", "", "Direct local path to an ISO or raw disk image")
 	dryRunFlag := flag.Bool("dry-run", false, "Run the real flow with every reachable exec.Command/filesystem-write call intercepted and logged instead of actually executed (see docs/dryrun-inventory.md for the one known limitation)")
 
@@ -176,6 +200,8 @@ func main() {
 	if *isoFlag != "" {
 		CustomISOPath = *isoFlag
 	}
+
+	ui.SetVersion(Version)
 
 	// Initialize TUI with Alternate Screen buffer and Mouse Cell Motion support
 	p := tea.NewProgram(
