@@ -173,7 +173,12 @@ try {
         New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     }
 
-    go build -ldflags="-s -w" -o $BinPath .\cmd\orchestrator\main.go
+    # Builds the whole cmd/orchestrator PACKAGE (a directory), not a
+    # single file: `go build pkg\main.go` compiles ONLY that one file,
+    # silently excluding every sibling file in the same package
+    # (headless.go, revert.go, version.go) — found while fixing the same
+    # bug in autorun.sh (banner follow-up, Part A).
+    go build -ldflags="-s -w" -o $BinPath .\cmd\orchestrator
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[-] Compilation failed." -ForegroundColor Red
         Read-Host "Press Enter to exit"

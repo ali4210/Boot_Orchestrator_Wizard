@@ -207,6 +207,59 @@ check_root_owned_files() {
     fi
 }
 
+# needs_rebuild (banner follow-up, Part A). Before this, the ONLY rebuild
+# trigger anywhere in this script was `[ ! -f "$BIN_PATH" ]` — once a
+# binary existed from any previous build, autorun.sh launched it
+# unconditionally, forever, even after real source changes (a new
+# banner, a bug fix, anything) until the caller remembered to pass
+# -f/--hard by hand. That is the exact bug reported: the new banner only
+# appeared after a manual rebuild.
+#
+# Checks two independent signals, either of which means the binary is
+# stale; sets REBUILD_REASON as a side effect for the one-line build
+# message below.
+#   1. Any .go file, go.mod, or an embedded asset (ui/*.txt, go:embed'd
+#      by ui/banner.go) has a modification time newer than the binary's.
+#   2. The binary's own embedded build commit (queried via
+#      --print-build-commit, cmd/orchestrator/version.go) differs from
+#      the working tree's current HEAD. This catches cases (1) misses —
+#      a `git pull`/checkout that changes file CONTENT but not mtimes in
+#      a way find can see reliably across all filesystems, or a binary
+#      built from a different commit than what's currently checked out.
+#      Skipped gracefully (not an error) when git isn't available or
+#      this isn't a git checkout at all (e.g. a source tarball).
+needs_rebuild() {
+    REBUILD_REASON=""
+
+    if [ ! -f "$BIN_PATH" ]; then
+        REBUILD_REASON="no existing binary at $BIN_PATH"
+        return 0
+    fi
+
+    local newer_file
+    newer_file=$(find "${SCRIPT_DIR:?}" \
+        -path '*/.git' -prune -o \
+        \( -name '*.go' -o -name 'go.mod' -o -path '*/ui/*.txt' \) \
+        -newer "$BIN_PATH" -print \
+        2>/dev/null | head -n 1)
+    if [ -n "$newer_file" ]; then
+        REBUILD_REASON="$newer_file is newer than the built binary"
+        return 0
+    fi
+
+    if command -v git >/dev/null 2>&1 && [ -d "${SCRIPT_DIR:?}/.git" ]; then
+        local current_commit built_commit
+        current_commit="$(git -C "${SCRIPT_DIR:?}" rev-parse HEAD 2>/dev/null || true)"
+        built_commit="$("$BIN_PATH" --print-build-commit 2>/dev/null || true)"
+        if [ -n "$current_commit" ] && [ "$current_commit" != "$built_commit" ]; then
+            REBUILD_REASON="built commit (${built_commit:-unknown, likely an older binary built before this check existed}) differs from the current HEAD ($current_commit)"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
 main() {
     cd "${SCRIPT_DIR:?}"
 
@@ -264,7 +317,17 @@ main() {
     # Dependency Sync & Build — runs as the invoking user (never root), so
     # no build artifact, module cache entry, or compiled binary is ever
     # root-owned (audit 1D.9).
-    if [ "$FORCE_REBUILD" -eq 1 ] || [ ! -f "$BIN_PATH" ]; then
+    REBUILD_NEEDED=0
+    if [ "$FORCE_REBUILD" -eq 1 ]; then
+        REBUILD_NEEDED=1
+        REBUILD_REASON="forced rebuild requested (-f/--force/--hard)"
+    elif needs_rebuild; then
+        REBUILD_NEEDED=1
+    fi
+
+    if [ "$REBUILD_NEEDED" -eq 1 ]; then
+        echo "=> [BUILD] building... ($REBUILD_REASON)"
+
         echo "======================================================================"
         echo "=> Resolving Go dependencies (go mod download; go.mod/go.sum are not"
         echo "   modified — run 'go mod tidy' yourself if you intend that)..."
@@ -277,8 +340,29 @@ main() {
         mkdir -p "${SCRIPT_DIR:?}/bin" "$LOCAL_TMP"
         rm -f "$BIN_PATH" 2>/dev/null || true
 
-        # Redirect TMPDIR to physical disk storage to prevent tmpfs RAM exhaustion
-        TMPDIR="$LOCAL_TMP" go build -ldflags="-s -w" -o "$BIN_PATH" "${SCRIPT_DIR:?}/cmd/orchestrator/main.go"
+        # Embeds the exact commit this binary was built from
+        # (cmd/orchestrator/version.go's BuildCommit) so a LATER run of
+        # this same script can tell whether the checked-out source has
+        # since moved on — see needs_rebuild above. "unknown" when this
+        # isn't a git checkout at all (e.g. a source tarball); that
+        # disables the commit-based check gracefully (needs_rebuild
+        # already requires current_commit to be non-empty before
+        # comparing), relying on the file-mtime check alone instead.
+        BUILD_COMMIT="unknown"
+        if command -v git >/dev/null 2>&1 && [ -d "${SCRIPT_DIR:?}/.git" ]; then
+            BUILD_COMMIT="$(git -C "${SCRIPT_DIR:?}" rev-parse HEAD 2>/dev/null || echo unknown)"
+        fi
+
+        # Builds the whole cmd/orchestrator PACKAGE (a directory), not a
+        # single file: `go build pkg/main.go` compiles ONLY that one
+        # file, silently excluding every sibling file in the same
+        # package (headless.go, revert.go, version.go — this is what
+        # "undefined: BuildCommit"/"undefined: runHeadless" look like
+        # when hit; found and fixed as part of this same follow-up, since
+        # the rebuild this script now correctly triggers would otherwise
+        # immediately fail to compile at all). Redirect TMPDIR to
+        # physical disk storage to prevent tmpfs RAM exhaustion.
+        TMPDIR="$LOCAL_TMP" go build -ldflags="-s -w -X main.BuildCommit=$BUILD_COMMIT" -o "$BIN_PATH" "${SCRIPT_DIR:?}/cmd/orchestrator"
         rm -rf "$LOCAL_TMP" 2>/dev/null || true
 
         echo "=> Compilation successful."
