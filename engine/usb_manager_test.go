@@ -3,6 +3,7 @@ package engine
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -43,6 +44,9 @@ const fakeLsblkWithInternalSDC = `{
 // removable target, even though the pre-fix code treated any sdc/sdd/sde
 // name as USB unconditionally.
 func TestProbeRemovableTargets_InternalSDCNotTreatedAsUSB(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("ProbeRemovableTargets shells out to lsblk (util-linux), which has no Windows/macOS equivalent and is not reachable on those hosts in this codebase; withFakeLsblk's #!/bin/sh stub also only works on a real POSIX shell, which is why this failed with \"executable file not found\" on windows-latest rather than exercising the fixture")
+	}
 	withFakeLsblk(t, fakeLsblkWithInternalSDC)
 
 	targets, err := ProbeRemovableTargets()
@@ -90,6 +94,9 @@ func writeSparsePayloadFile(t *testing.T, path string) {
 // already-mounted path (here, a temp directory this test controls) looking
 // for payload files.
 func TestProbeUSBPayloads_InternalSDCNotScanned(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("ProbeUSBPayloads shells out to lsblk (util-linux), which has no Windows/macOS equivalent and is not reachable on those hosts in this codebase; same reason as TestProbeRemovableTargets_InternalSDCNotTreatedAsUSB above")
+	}
 	internalMount := t.TempDir()
 	writeSparsePayloadFile(t, filepath.Join(internalMount, "internal-data.iso"))
 

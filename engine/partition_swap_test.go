@@ -1,3 +1,12 @@
+// Audit follow-up (Windows CI): CarveHardwarePartitionAtBoundary's
+// swap-detection logic (what this file tests) is part of the same
+// Linux-only ext4/parted/mkswap disk-shrink flow as partition_test.go —
+// see that file's own //go:build comment for the full investigation.
+// Also shares partition_test.go's calledPartedRemove/partedFreeNoHeadroom
+// helpers, so this file must carry the same tag or those would be
+// undefined on a non-Linux build.
+//go:build linux
+
 package engine
 
 import (

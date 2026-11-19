@@ -1,23 +1,29 @@
+// Audit follow-up (Windows CI): every test in this file exercises
+// resize2fs/mkfs.ext4/parted/mtab/dd/blockdev-based disk-shrink logic
+// (CarveHardwarePartitionAtBoundary, ApplyShrink, ensureMtabSymlink,
+// readDiskRegion) — real Linux ext4/util-linux tooling with no Windows
+// equivalent, and no code path in this repo ever invokes it on a
+// non-Linux host (RunProvision's partition-shrink step is Linux-only in
+// practice; see PROGRESS.md for the full investigation). Tagging the
+// whole file linux-only, rather than fixing the production code to be
+// cross-platform, since there is no real cross-platform behavior to
+// make correct here — unlike SplitDiskAndPartition/JoinDiskAndPartition
+// (disk_naming_test.go), which model a fixed string format with an
+// actual, correct cross-platform fix (see the "path" vs "path/filepath"
+// commit).
+//go:build linux
+
 package engine
 
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"boot-orchestrator/safety"
 )
-
-// fakeExitError returns a genuine *exec.ExitError reporting exit code code,
-// produced by actually running `sh -c "exit N"` — a real, safe, no-op
-// subprocess. Used so mocks can simulate exact exit codes for exitCodeOf
-// without needing a hand-rolled error type. Returns nil for code 0.
-func fakeExitError(code int) error {
-	return exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
-}
 
 // calledPartedRemove reports whether any call in calls was a `parted ... rm
 // ...` invocation (the destructive step that must never run before all
