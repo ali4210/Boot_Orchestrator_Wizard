@@ -27,6 +27,24 @@ func skipIfWindowsAutonomousScriptUnreachable(t *testing.T) {
 	}
 }
 
+// skipIfNoWindowsCallerForWriteScriptSecurely: confirmed via grep
+// (audit follow-up) that writeScriptSecurely's only callers are
+// orchestrator.go's autonomous-USB-staging branch (transient_resize.sh,
+// the same Linux-only lsblk-dependent feature
+// skipIfWindowsAutonomousScriptUnreachable above covers) — there is no
+// Windows caller to test against. (The real Windows-reachable
+// "equivalent" these tests' own doc comments asked about —
+// injectAutounattend's Windows setup answer file, which DOES write a
+// secret on a real, functional native-Windows code path — got a real
+// ACL fix instead; see engine/wim_deployer.go and
+// engine/wim_deployer_windows_test.go.)
+func skipIfNoWindowsCallerForWriteScriptSecurely(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("writeScriptSecurely has no Windows caller (confirmed via grep) — its only callers are orchestrator.go's autonomous-USB-staging branch, which requires lsblk and is unreachable on Windows")
+	}
+}
+
 func sampleScriptParams() autonomousInstallerScriptParams {
 	return autonomousInstallerScriptParams{
 		Disk:          "/dev/sdz",
@@ -48,6 +66,7 @@ func sampleScriptParams() autonomousInstallerScriptParams {
 // group/world-readable. Before this fix it was written with os.OpenFile(...,
 // 0755) and re-chmod'd to 0755 — both group- and world-readable.
 func TestWriteScriptSecurely_UsesOwnerOnlyMode(t *testing.T) {
+	skipIfNoWindowsCallerForWriteScriptSecurely(t)
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "transient_resize.sh")
 
@@ -73,6 +92,7 @@ func TestWriteScriptSecurely_UsesOwnerOnlyMode(t *testing.T) {
 // after every write — this test is the regression guard for why that extra
 // chmod is required, not optional.
 func TestWriteScriptSecurely_DoesNotNarrowModeOnExistingFile(t *testing.T) {
+	skipIfNoWindowsCallerForWriteScriptSecurely(t)
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "transient_resize.sh")
 
