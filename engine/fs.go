@@ -18,6 +18,8 @@ type FS interface {
 	MkdirAll(path string, perm os.FileMode) error
 	Remove(name string) error
 	RemoveAll(path string) error
+	Symlink(oldname, newname string) error
+	Rename(oldpath, newpath string) error
 }
 
 // DefaultFS is the real, production FS backed by the os package.
@@ -37,6 +39,14 @@ func (DefaultFS) Remove(name string) error {
 
 func (DefaultFS) RemoveAll(path string) error {
 	return os.RemoveAll(path)
+}
+
+func (DefaultFS) Symlink(oldname, newname string) error {
+	return os.Symlink(oldname, newname)
+}
+
+func (DefaultFS) Rename(oldpath, newpath string) error {
+	return os.Rename(oldpath, newpath)
 }
 
 // DryRunFS logs what it would have written/removed and returns success
@@ -60,6 +70,16 @@ func (DryRunFS) Remove(name string) error {
 
 func (DryRunFS) RemoveAll(path string) error {
 	logDryRun("remove -r", path)
+	return nil
+}
+
+func (DryRunFS) Symlink(oldname, newname string) error {
+	logDryRun("symlink", newname, "->", oldname)
+	return nil
+}
+
+func (DryRunFS) Rename(oldpath, newpath string) error {
+	logDryRun("rename", oldpath, "->", newpath)
 	return nil
 }
 

@@ -3,57 +3,98 @@ package engine
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"sync"
 )
 
-// Phase 5 (items 32/34): dry-run interception. See docs/dryrun-inventory.md
-// for the real scope this covers (and, just as importantly, doesn't yet
-// cover) — this file is deliberately NOT a claim that every destructive
-// operation in this engine is simulatable. It covers:
+// Phase 5 (items 32/34/45): dry-run interception. See
+// docs/dryrun-inventory.md for the real scope this covers. As of item 45,
+// this covers every exec.Command/os.WriteFile/os.MkdirAll/os.Remove/
+// os.RemoveAll/os.Symlink/os.Rename call site in the engine and ui
+// packages reachable from a real user-facing entry point (provision,
+// revert, backup, autonomous USB staging) — engine/rootfs.go is the one
+// deliberate exception (confirmed dead code, zero callers anywhere in the
+// repo; see docs/ROADMAP.md) — via three mechanisms:
 //
-//  1. Every one of the ~73 exec.Command call sites already routed through
-//     the injectable Runner interface (engine/runner.go) — for free, with
+//  1. The ~73 exec.Command call sites already routed through the
+//     injectable Runner interface (engine/runner.go) — covered for free,
 //     no call-site changes, since SetDryRun swaps the same cmdRunner var
 //     tests already use.
-//  2. The filesystem-write call sites explicitly migrated onto the new FS
-//     interface below (currently: assertDefaultCredentials's sudoers.d
-//     write — see that function in engine/bootloader.go). This is a
-//     proof-of-concept batch, not an exhaustive migration; the bulk of
-//     this engine's ~149 filesystem-write call sites still call os.*
-//     directly and are NOT covered.
+//  2. Filesystem writes routed through the FS interface (engine/fs.go) —
+//     every remaining os.WriteFile/MkdirAll/Remove/RemoveAll/Symlink/
+//     Rename call site was mechanically migrated onto fsRunner.
+//  3. Every remaining raw exec.Command call site — including the ones
+//     that set cmd.Stdin/Dir/Env after construction (credentials.go,
+//     partition.go, engine_linux.go, backup.go), which Runner's two-method
+//     interface cannot model at all, per its own doc comment — was
+//     mechanically migrated onto the execCommand var below instead. This
+//     is deliberately a *second*, simpler interception point rather than
+//     forcing every site through Runner's Run/RunStdout split: execCommand
+//     has the exact same signature as exec.Command itself (returns a real
+//     *exec.Cmd), so the migration was a pure rename with no restructuring
+//     — the caller can still set .Stdin/.Dir/.Env on the result exactly as
+//     before, dry-run or not.
 //
-// cmd/orchestrator/main.go's --dry-run flag refuses to start rather than
-// claim more than this actually simulates — see dryRunRefusalMessage
-// there, and docs/ROADMAP.md's Phase 5 section for what's left before a
-// real, honest --dry-run can be offered to users.
+// cmd/orchestrator/main.go's --dry-run flag now runs the real flow under
+// SetDryRun(true) instead of refusing to start — see that file's
+// dryRunRefusalMessage history and docs/ROADMAP.md's Phase 5 section for
+// what's still a known, inherent limitation even with this in place (query
+// commands return empty output in dry-run, since the disk state they'd
+// report on was never actually created).
 
 var dryRunMu sync.Mutex
 var dryRunEnabled bool
 
-// SetDryRun switches every Runner- and FS-routed operation between the
-// real implementation and one that logs what it would have done and
-// returns synthetic success without touching anything. Returns a restore
-// function so callers (and tests) can cleanly revert, mirroring the
-// pattern safety.SetJournalCandidateDirsForTesting already uses for the
-// same reason: these are shared, process-wide vars.
+// execCommand constructs an *exec.Cmd exactly like exec.Command — a
+// package-level var (not a direct call) so SetDryRun can swap it. See the
+// file-level doc comment above for why this exists alongside (not instead
+// of) the older Runner interface.
+var execCommand = exec.Command
+
+// SetDryRun switches every Runner-, FS-, and execCommand-routed operation
+// between the real implementation and one that logs what it would have
+// done and returns synthetic success without touching anything. Returns a
+// restore function so callers (and tests) can cleanly revert, mirroring
+// the pattern safety.SetJournalCandidateDirsForTesting already uses for
+// the same reason: these are shared, process-wide vars.
 func SetDryRun(enabled bool) (restore func()) {
 	dryRunMu.Lock()
 	defer dryRunMu.Unlock()
 
-	origRunner, origFS, origEnabled := cmdRunner, fsRunner, dryRunEnabled
+	origRunner, origFS, origExec, origEnabled := cmdRunner, fsRunner, execCommand, dryRunEnabled
 	dryRunEnabled = enabled
 	if enabled {
 		cmdRunner = DryRunRunner{}
 		fsRunner = DryRunFS{}
+		execCommand = dryRunExecCommand
 	} else {
 		cmdRunner = DefaultRunner
 		fsRunner = DefaultFS{}
+		execCommand = exec.Command
 	}
 	return func() {
 		dryRunMu.Lock()
 		defer dryRunMu.Unlock()
-		cmdRunner, fsRunner, dryRunEnabled = origRunner, origFS, origEnabled
+		cmdRunner, fsRunner, execCommand, dryRunEnabled = origRunner, origFS, origExec, origEnabled
 	}
+}
+
+// dryRunExecCommand logs the command that would have run and returns a
+// real, harmless, already-no-op *exec.Cmd instead — a genuine *exec.Cmd is
+// required (not a stub) because callers are free to set .Stdin/.Dir/.Env
+// on the result and then call .Run()/.Output()/.CombinedOutput(), exactly
+// as they would on a real command. "true" (POSIX, present on both Linux
+// and macOS) genuinely executes, touches nothing, and always exits 0;
+// Windows has no equivalent single binary, so cmd.exe's own null command
+// is used there instead — untested on real Windows hardware, consistent
+// with this project's other Windows caveats (see docs/ARCH_SUPPORT.md).
+func dryRunExecCommand(name string, args ...string) *exec.Cmd {
+	logDryRun("exec", name, args...)
+	if runtime.GOOS == "windows" {
+		return exec.Command("cmd", "/c", "exit", "0")
+	}
+	return exec.Command("true")
 }
 
 // IsDryRun reports whether dry-run mode is currently active.

@@ -118,12 +118,12 @@ func TestLogDryRun_TruncatesLongArguments(t *testing.T) {
 }
 
 // TestSetDryRun_SwapsBothRunnerAndFSAndRestores proves the single toggle
-// actually switches both cmdRunner and fsRunner together, and that the
-// returned restore function puts the real implementations back —
-// mirroring safety.SetJournalCandidateDirsForTesting's own contract.
+// actually switches cmdRunner, fsRunner, AND execCommand together, and
+// that the returned restore function puts the real implementations back
+// — mirroring safety.SetJournalCandidateDirsForTesting's own contract.
 func TestSetDryRun_SwapsBothRunnerAndFSAndRestores(t *testing.T) {
-	origRunner, origFS := cmdRunner, fsRunner
-	t.Cleanup(func() { cmdRunner, fsRunner = origRunner, origFS })
+	origRunner, origFS, origExec := cmdRunner, fsRunner, execCommand
+	t.Cleanup(func() { cmdRunner, fsRunner, execCommand = origRunner, origFS, origExec })
 
 	if IsDryRun() {
 		t.Fatalf("expected dry-run to be off before this test touches it")
@@ -146,6 +146,14 @@ func TestSetDryRun_SwapsBothRunnerAndFSAndRestores(t *testing.T) {
 		t.Fatalf("a write through fsRunner during dry-run actually touched disk")
 	}
 
+	execMarker := filepath.Join(t.TempDir(), "exec-should-not-create-this")
+	if _, err := execCommand("touch", execMarker).CombinedOutput(); err != nil {
+		t.Errorf("expected execCommand's dry-run stand-in to report success, got: %v", err)
+	}
+	if _, statErr := os.Stat(execMarker); statErr == nil {
+		t.Fatalf("execCommand during dry-run actually ran the real command — %s was created", execMarker)
+	}
+
 	restore()
 	if IsDryRun() {
 		t.Errorf("expected IsDryRun() to report false after restore()")
@@ -155,6 +163,35 @@ func TestSetDryRun_SwapsBothRunnerAndFSAndRestores(t *testing.T) {
 	}
 	if _, ok := fsRunner.(DefaultFS); !ok {
 		t.Errorf("expected fsRunner to be restored to DefaultFS, got %T", fsRunner)
+	}
+}
+
+// TestDryRunExecCommand_NeverExecutesButSatisfiesStdinDirEnv proves
+// dryRunExecCommand both (a) never runs the real command, the same way
+// TestDryRunRunner_NeverExecutes proves it for Runner, and (b) returns a
+// genuine *exec.Cmd that callers can still set .Stdin/.Dir/.Env on and
+// then call .Run()/.Output()/.CombinedOutput() without panicking — the
+// exact capability engine.Runner's own doc comment says it cannot offer,
+// and the reason this second interception mechanism exists at all
+// (credentials.go, partition.go, engine_linux.go, backup.go all set one of
+// these fields on a raw exec.Command result).
+func TestDryRunExecCommand_NeverExecutesButSatisfiesStdinDirEnv(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "dry-run-exec-should-not-create-this")
+
+	cmd := dryRunExecCommand("touch", marker)
+	cmd.Stdin = strings.NewReader("irrelevant stdin")
+	cmd.Dir = t.TempDir()
+	cmd.Env = append(os.Environ(), "ORCH_TEST=1")
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("expected dryRunExecCommand's stand-in to succeed even with Stdin/Dir/Env set, got: %v", err)
+	}
+	if len(out) != 0 {
+		t.Errorf("expected empty output, got %q", out)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatalf("dryRunExecCommand actually executed touch — %s was created for real", marker)
 	}
 }
 

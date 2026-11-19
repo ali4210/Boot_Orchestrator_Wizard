@@ -52,6 +52,7 @@ var execCommandBaseline = map[string]int{
 	"isolate.go":                     5,
 	"engine_windows.go":              5,
 	"runner.go":                      2, // the Runner interception point itself (its own 2 doc comments mention "exec.Command(" as example text — a naive grep count would say 4; this baseline reflects the real, AST-parsed code count, same as what this test actually measures)
+	"dryrun.go":                      2, // item 45: the execCommand interception point itself — dryRunExecCommand's two real, harmless stand-in commands ("true" and "cmd /c exit 0"), same exemption pattern as runner.go above
 	"slipstream.go":                  3,
 	"partition.go":                   3,
 	"model.go":                       3, // ui/model.go
@@ -82,7 +83,7 @@ var fsWriteBaseline = map[string]int{
 	"scp_streamer.go":       5,
 	"revert_windows.go":     5,
 	"isolate.go":            5,
-	"fs.go":                 4, // the FS interception point itself
+	"fs.go":                 6, // the FS interception point itself (item 45 extended it with Symlink/Rename, +2)
 	"wim_deployer.go":       3,
 	"resilient_streamer.go": 3,
 	"uefi.go":               2,
