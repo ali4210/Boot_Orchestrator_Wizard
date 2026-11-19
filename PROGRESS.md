@@ -1536,7 +1536,16 @@ linux/arm64, windows/amd64, and darwin/arm64 throughout.
       class. Confirmed the audit's own flagged stray `orchestrator_journal.json` was never
       actually committed (`.gitignore`-covered, `git log --all` on it returns nothing) —
       that specific concern turned out to already be handled.
-- [ ] 40. READINESS_GATE.md — Not started
+- [x] 40. READINESS_GATE.md — Done (`PENDING_HASH`). **Verdict: NOT GREEN** — stated
+      honestly per the gate's own explicit rule ("green only if there are no known open
+      Critical or High issues"). Two findings remain open at that severity: 2.4 (dry-run —
+      genuinely open, not fixed, for the specific reason item 34 documented) and 2.6 (arch
+      hardcoding — partially fixed, `bcd_qemu.go` and others explicitly not audited).
+      Every other original finding is closed with real evidence; non-blocking data/coverage
+      gaps (unbackfilled checksums/signatures, the 2 dead manifest URLs, Alpine's install
+      incompatibility, dead `rootfs.go`, Windows/macOS/arm64 never driven on real hardware,
+      `test/os-matrix` unmerged) are listed for transparency rather than omitted. Closes
+      with exactly what would need to happen to actually reach green.
 - [ ] 41. Final summary — Not started
 
 ## Prior session (commits already on fix/audit-phase-0-1 before this plan started)
