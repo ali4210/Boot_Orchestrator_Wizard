@@ -28,28 +28,28 @@ effort works through).
   bypassing the hardened credential path), the Panther plaintext-password cleanup, and
   README/CONTRIBUTING/CI/LICENSE.
 
-## Next
-
-- **Phase 5 — a real `--dry-run`.** `--dry-run` currently refuses to start rather than
-  simulate (see `cmd/orchestrator/main.go`'s `dryRunRefusalMessage`): a 2026 audit found
-  roughly 350 direct `exec.Command` call sites and 140 direct filesystem-write call sites
-  across `engine/`/`ui/` that bypass the one interception point that exists so far
-  (`engine.Runner`). A real dry-run needs those routed through `engine.Runner` (or an
-  equivalent) first — simulating only some of several hundred write paths would be actively
-  misleading, not safer. Planned shape: `docs/dryrun-inventory.md` (catalog every
-  call site), a filesystem interface alongside the existing command `Runner`, migrated in
-  batches (not all at once), a guard test asserting no new unintercepted call site is added,
-  then the real `--dry-run` implementation.
-- **Phase 6 — ARM64.** Builds today (`GOOS=linux GOARCH=arm64 go build ./...`); never run.
-  Needs real hardware or QEMU-emulated ARM64 testing (the `OS_STATUS_MATRIX.md` QEMU
-  pipeline is x86_64/OVMF-specific right now — extending it to `qemu-system-aarch64` +
-  AAVMF would be the natural way to get real boot-level coverage without new hardware).
-- **Merge `test/os-matrix`** into the main line once Phase 5/6 land, or independently if
-  that's preferred — it's currently a parallel branch, not yet integrated.
-- **Final deliverables** (not started): `MANUAL_TEST_PLAN.md`, an `AUDIT_REPORT.md` progress
-  section cross-referencing `PROGRESS.md`'s item-by-item record, and `READINESS_GATE.md`
-  (green only if there are no known open Critical/High issues and every claim is
-  test-backed — otherwise it lists exactly what's open).
+- **Phase 5 — a real `--dry-run`** — complete: every `exec.Command`/filesystem-write call
+  site reachable from a real entry point (provision, revert, backup, autonomous USB
+  staging) across `engine/`, `ui/`, and `cmd/orchestrator/` is now routed through
+  `engine.Runner`, `engine.FS`, or the `execCommand` var, all switched together by
+  `engine.SetDryRun`. `--dry-run` runs the real flow with that switch on instead of
+  refusing to start. See `docs/dryrun-inventory.md`'s "Update (item 45)" section for the
+  full account, including what's deliberately still NOT intercepted (the payload download
+  itself, and `safety.Journal`'s own bookkeeping writes — both explained there, not hidden).
+- **Phase 6 — ARM64** — complete for the scope this catalog actually has: `usb_manager.go`'s
+  autonomous-USB-staging bootloader generator (the one confirmed-broken case) is fixed and
+  tested; two real arm64 catalog entries were added (`debian-netboot-arm64`,
+  `ubuntu-server-arm64`); a real QEMU/AAVMF boot was proven reaching Debian's actual GRUB
+  installer menu (`testing/qemu/boot-and-verify-aarch64.sh`,
+  `testing/reports/tier3-debian-netboot-arm64-*`). Never run on real arm64 hardware — see
+  `MANUAL_TEST_PLAN.md` section 8.
+- **Merge `test/os-matrix`** into the main line — it's currently a parallel branch, not yet
+  integrated. Not blocking anything; purely a housekeeping/integration task.
+- **Final deliverables**: `MANUAL_TEST_PLAN.md`, `AUDIT_REPORT.md`'s "Remediation
+  Progress" section, and `READINESS_GATE.md` all exist and are kept current — see
+  `READINESS_GATE.md` for this project's own honest verdict on itself, re-checked each
+  time the underlying state changes (most recently when 2.4 and 2.6 were both closed —
+  see `PROGRESS.md` items 42-45).
 
 ## Known structural gaps worth a deliberate decision (not silently sitting there)
 
@@ -58,6 +58,21 @@ effort works through).
   deploy pipeline, apparently superseded by `engine/orchestrator.go`'s
   `extractLiveRootFS`/`deployWindowsPayload`, never removed. Flagged in `PROGRESS.md` item
   26; not deleted yet.
+- **`hypervisor/compact.go`** (`ZeroFillGuestLinux`/`ZeroFillGuestWindows`/
+  `PlanHostCompact`, ~150 lines) has zero callers anywhere in the repo either — found
+  during item 45's full-repo sweep for exec.Command/filesystem-write call sites, not
+  previously documented as dead. Same treatment as `rootfs.go`: flagged, not deleted, not
+  migrated onto the dry-run interception (there is nothing to migrate it *for*, since
+  nothing reaches it).
+- **`safety.Journal`'s own bookkeeping writes are not covered by `--dry-run`** — `safety`
+  cannot import `engine` (the reverse import already exists), so this would need its own,
+  independent dry-run switch kept in sync with `engine.SetDryRun`, which item 45
+  deliberately didn't build: a journal file at `safety.DefaultJournalPath()` is operational
+  metadata, not a disk/bootloader/NVRAM write, and is a materially different, lower-risk
+  category than everything else 2.4 was about.
+- **The payload download itself is not covered by `--dry-run`** — deliberately: it never
+  touches the target disk, and skipping it would make the rest of a dry run (checksum
+  verification, free-space headroom) unrealistic. See `docs/dryrun-inventory.md`.
 - **No catalog entry has a SHA256 checksum or OpenPGP signature.** The verification
   machinery for both is real and tested (`discovery.Catalog.Audit()`,
   `engine.VerifyDetachedSignature`/`verifyEntrySignature`); the data itself needs a human

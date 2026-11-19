@@ -106,3 +106,68 @@ Highest value, lowest risk first:
    anything beyond what's covered in this pass.
 5. **`engine/rootfs.go`'s 47+21 sites are excluded from this count's priority entirely** —
    dead code, not reachable from any real flow (see `docs/ROADMAP.md`).
+
+## Update (item 45): the remaining ~294/~160 sites are now migrated
+
+Phase 5 originally stopped here deliberately — see the "highest value, lowest risk first"
+list above, written when migrating the full remaining count in one pass was judged too
+large and too risky to attempt without per-file verification. Item 45 (prompted by an
+explicit request to close this finding rather than leave it partially done) went back and
+did exactly that, file by file, with `go build/vet/test` green after every file and the
+full suite green at the end:
+
+- **Every remaining raw `exec.Command` call site** (`orchestrator.go`, `revert_linux.go`,
+  `usb_manager.go`, `backup.go`, `bcd_qemu.go`, `engine_linux.go`, `uefi.go`,
+  `engine_darwin.go`, `wim_deployer.go`, `revert_darwin.go`, `revert_windows.go`,
+  `isolate.go`, `engine_windows.go`, `slipstream.go`, `partition.go`, `file_dialog.go`,
+  `autodiscover.go`, `efi_bootentry.go`, `credentials.go`,
+  `autonomous_installer_script.go`, plus `ui/model.go`) is now routed through a new
+  `execCommand` package var (`engine/dryrun.go`) instead of being forced through the older
+  `Runner` interface's `Run`/`RunStdout` split. This matters beyond being "more coverage":
+  `Runner`'s own doc comment says it can't model a call site that sets
+  `cmd.Stdin`/`cmd.Dir`/`cmd.Env` after construction, and a real grep confirmed several
+  genuinely do (`credentials.go`'s password-hash pipe, `engine_linux.go`'s
+  `DEBIAN_FRONTEND` env var, `partition.go`'s three `parted`/`dd` confirmation prompts).
+  `execCommand` has the exact same signature as `exec.Command` itself (returns a real
+  `*exec.Cmd`), so migrating a call site was a pure rename with zero restructuring, and
+  every one of those `.Stdin`/`.Dir`/`.Env` assignments keeps working unchanged.
+- **Every remaining filesystem-write call site** (`bootloader.go`, `orchestrator.go`,
+  `usb_manager.go`, `revert_linux.go`, `backup.go`, `bcd_qemu.go`, `streamer.go`,
+  `stream_decoder.go`, `scp_streamer.go`, `revert_windows.go`, `isolate.go`,
+  `wim_deployer.go`, `resilient_streamer.go`, `uefi.go`, `partition.go`, `slipstream.go`,
+  `revert_darwin.go`, `payload_normalizer.go`, plus `ui/model.go`/`ui/provision.go`) is now
+  routed through `fsRunner`, extended with `Symlink`/`Rename` (7 real call sites needed
+  them; the interface only had `WriteFile`/`MkdirAll`/`Remove`/`RemoveAll` before).
+- `ui`/`cmd/orchestrator` can't reach `engine`'s package-private `fsRunner`/`execCommand`
+  directly, so `engine.FSRunner()`/`engine.ExecCommand()` were added as the narrow,
+  always-call-fresh accessors those packages need (`cmd/orchestrator/revert.go`'s headless
+  `--revert` cleanup needed this too — a real gap this sweep found, not hypothetical).
+- `--dry-run` (`cmd/orchestrator/main.go`) now enables `engine.SetDryRun(true)` and runs
+  the real flow, instead of refusing to start.
+
+**What's still, deliberately, not intercepted** — stated plainly, not buried:
+- `engine/rootfs.go` (confirmed dead code, zero callers) and `hypervisor/compact.go`
+  (ditto — found newly dead during this same sweep; see `docs/ROADMAP.md`) are excluded
+  entirely, since neither is reachable from any real entry point.
+- The payload **download** itself (`engine/streamer.go`'s real `net/http` GET plus
+  `os.Create`/`io.Copy`) is not intercepted — it never touches the target disk/bootloader/
+  NVRAM, and a dry run deliberately still performs it for real so the rest of the
+  simulated flow (checksum verification, free-space headroom) stays realistic. A dry run
+  still uses real bandwidth and real local scratch disk space for this one step.
+- `safety.Journal`'s own bookkeeping writes (`safety/journal.go`: the transaction journal
+  written during every real provision/revert) are not intercepted. `safety` cannot import
+  `engine` (the reverse import already exists, so this would be a cycle), so covering this
+  would need its own, independent dry-run switch kept in sync with `engine.SetDryRun`
+  rather than reusing `fsRunner`/`execCommand` directly. Judged lower priority: a journal
+  file in `safety.DefaultJournalPath()` is bookkeeping metadata, not a disk/bootloader/
+  NVRAM write, and is the one named exception in `MANUAL_TEST_PLAN.md`'s own "never touch
+  this in a test" rule for the same path — left open as a known, minor, non-blocking gap
+  rather than rushed through a cross-package refactor.
+
+Verified behavior-preserving throughout, not just compiling: `go test ./...` (every
+loop-device, httptest, and mocked-PATH integration test already in this repo) stayed green
+across every single migration commit, and a new end-to-end test
+(`TestRestoreHostFromBackup_DryRunNeverTouchesRealDiskAndSucceeds`) reuses the exact
+bogus-disk fixture the real-mode regression test for item 25 already established, proving
+the *entire* call chain of a representative function is genuinely intercepted — not just
+that the dry-run switch itself works in isolation.
