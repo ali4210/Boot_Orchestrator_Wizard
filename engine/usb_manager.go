@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -254,8 +255,21 @@ func ArmAutonomousUSBBootloader(bootPart, isoPayloadPath, targetDisk string, log
 	bootGrubDir := filepath.Join(bootMount, "boot", "grub")
 	_ = os.MkdirAll(bootGrubDir, 0755)
 
-	targetShim := filepath.Join(efiBootDir, "BOOTX64.EFI")
-	targetGrub := filepath.Join(efiBootDir, "grubx64.efi")
+	// Phase 6 item 36: this stages the orchestrator's OWN autonomous
+	// installer USB, which boots on whatever firmware the HOST machine
+	// actually has — architecture-specific regardless of which OS the
+	// user is installing, since you can't boot an x86_64 EFI binary on
+	// arm64 UEFI firmware or vice versa. Previously hardcoded to x86_64
+	// unconditionally, silently producing a USB stick that could never
+	// boot on arm64 host hardware (a Raspberry Pi, an ARM server, Asahi
+	// Linux, ...) even though the rest of this tool builds and runs fine
+	// there (confirmed: `GOOS=linux GOARCH=arm64 go build ./...` is
+	// clean). Branches on runtime.GOARCH — the architecture this binary
+	// itself was built for, i.e. the host it's actually running on.
+	shimName, grubName, mokName, grubEFIFormat := efiBootNamesForArch(runtime.GOARCH)
+
+	targetShim := filepath.Join(efiBootDir, shimName)
+	targetGrub := filepath.Join(efiBootDir, grubName)
 
 	logFn("=> [UNIVERSAL EFI] Injecting autonomous zero-touch orchestration boot configuration...")
 
@@ -285,12 +299,12 @@ normal
 	defer os.Remove(earlyCfg)
 
 	builtMonolithic := false
-	grubModDir := "/usr/lib/grub/x86_64-efi"
+	grubModDir := "/usr/lib/grub/" + grubEFIFormat
 	if fi, err := os.Stat(grubModDir); err == nil && fi.IsDir() {
 		logFn("=> [UNIVERSAL EFI] Compiling monolithic standalone EFI core via grub-mkimage...")
 		mkimageArgs := []string{
 			"-d", grubModDir,
-			"-O", "x86_64-efi",
+			"-O", grubEFIFormat,
 			"-o", targetShim,
 			"-c", earlyCfg,
 			"-p", "/EFI/BOOT",
@@ -302,7 +316,7 @@ normal
 		if out, err := exec.Command("grub-mkimage", mkimageArgs...).CombinedOutput(); err == nil {
 			if sFi, sErr := os.Stat(targetShim); sErr == nil && sFi.Size() > 0 {
 				builtMonolithic = true
-				logFn(fmt.Sprintf("=> [UNIVERSAL EFI] Monolithic BOOTX64.EFI compiled successfully (%d KB).", sFi.Size()/1024))
+				logFn(fmt.Sprintf("=> [UNIVERSAL EFI] Monolithic %s compiled successfully (%d KB).", shimName, sFi.Size()/1024))
 			}
 		} else {
 			logFn(fmt.Sprintf("=> [WARNING] grub-mkimage failed: %s", string(out)))
@@ -312,16 +326,16 @@ normal
 	if !builtMonolithic || fileIsEmpty(targetShim) {
 		logFn("=> [UNIVERSAL EFI] Staging verified EFI bootloader from host system...")
 		candidates := []string{
-			"/boot/efi/EFI/kali/grubx64.efi",
-			"/boot/efi/EFI/BOOT/BOOTX64.EFI",
-			"/boot/efi/EFI/debian/grubx64.efi",
-			"/usr/lib/shim/shimx64.efi.signed",
-			"/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed",
+			"/boot/efi/EFI/kali/" + grubName,
+			"/boot/efi/EFI/BOOT/" + shimName,
+			"/boot/efi/EFI/debian/" + grubName,
+			"/usr/lib/shim/shim" + grubEFIArchSuffix(grubEFIFormat) + ".efi.signed",
+			"/usr/lib/grub/" + grubEFIFormat + "-signed/" + grubName + ".signed",
 		}
 		for _, c := range candidates {
 			if fi, err := os.Stat(c); err == nil && fi.Size() > 0 {
 				if err := copyFile(c, targetShim); err == nil {
-					logFn(fmt.Sprintf("=> [UNIVERSAL EFI] Populated BOOTX64.EFI from: %s (%d KB)", c, fi.Size()/1024))
+					logFn(fmt.Sprintf("=> [UNIVERSAL EFI] Populated %s from: %s (%d KB)", shimName, c, fi.Size()/1024))
 					break
 				}
 			}
@@ -333,11 +347,11 @@ normal
 	}
 
 	mokSources := []string{
-		"/usr/lib/shim/mmx64.efi.signed",
-		"/boot/efi/EFI/kali/mmx64.efi",
-		"/boot/efi/EFI/debian/mmx64.efi",
+		"/usr/lib/shim/mm" + grubEFIArchSuffix(grubEFIFormat) + ".efi.signed",
+		"/boot/efi/EFI/kali/" + mokName,
+		"/boot/efi/EFI/debian/" + mokName,
 	}
-	targetMok := filepath.Join(efiBootDir, "mmx64.efi")
+	targetMok := filepath.Join(efiBootDir, mokName)
 	for _, src := range mokSources {
 		if _, err := os.Stat(src); err == nil {
 			_ = copyFile(src, targetMok)
@@ -352,8 +366,36 @@ normal
 		return fmt.Errorf("fatal: failed to populate non-zero byte EFI binary at %s", targetShim)
 	}
 
-	logFn(fmt.Sprintf("=> [UNIVERSAL EFI] Stack armed: BOOTX64.EFI (%d KB verified)", fi.Size()/1024))
+	logFn(fmt.Sprintf("=> [UNIVERSAL EFI] Stack armed: %s (%d KB verified)", shimName, fi.Size()/1024))
 	return nil
+}
+
+// efiBootNamesForArch returns the standard EFI boot-shim/GRUB-binary/MOK
+// filenames and GRUB target format for goarch (Go's GOARCH naming, e.g.
+// "amd64"/"arm64" — the same values runtime.GOARCH and `go env GOARCH`
+// use). Extracted as its own pure function so it's directly testable for
+// every architecture without needing to actually build/run this binary
+// on each one.
+func efiBootNamesForArch(goarch string) (shimName, grubName, mokName, grubEFIFormat string) {
+	if goarch == "arm64" {
+		return "BOOTAA64.EFI", "grubaa64.efi", "mmaa64.efi", "arm64-efi"
+	}
+	return "BOOTX64.EFI", "grubx64.efi", "mmx64.efi", "x86_64-efi"
+}
+
+// grubEFIArchSuffix maps a GRUB EFI target format (e.g. "x86_64-efi") to
+// the matching shim/mok filename architecture suffix ("x64", "aa64", ...)
+// Debian/Ubuntu's shim packaging uses — the same two-letter-ish codes
+// GRUB's own target names already embed, just without the "-efi" suffix.
+func grubEFIArchSuffix(grubEFIFormat string) string {
+	switch grubEFIFormat {
+	case "arm64-efi":
+		return "aa64"
+	case "x86_64-efi":
+		return "x64"
+	default:
+		return "x64"
+	}
 }
 
 func fileIsEmpty(path string) bool {

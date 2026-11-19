@@ -123,6 +123,24 @@
     ]
   },
   {
+    "id": "ubuntu-server-arm64",
+    "category": "Ubuntu / Debian",
+    "family": "linux",
+    "distro": "Ubuntu Server",
+    "version": "24.04.4 LTS",
+    "codename": "noble",
+    "flavor": "tty",
+    "arch": "arm64",
+    "min_disk_gb": 15,
+    "approx_size_bytes": 3059724288,
+    "requires_license": false,
+    "download_url": "https://cdimage.ubuntu.com/ubuntu/releases/24.04/release/ubuntu-24.04.4-live-server-arm64.iso",
+    "mirrors": [
+      "https://cdimage.ubuntu.com/ubuntu/releases/24.04/release/ubuntu-24.04.4-live-server-arm64.iso"
+    ],
+    "notes": "Phase 6 (item 36): arm64 host dual-boot support, verified reachable."
+  },
+  {
     "id": "linux-mint-cinnamon-amd64",
     "category": "Ubuntu / Debian",
     "family": "linux",
@@ -155,6 +173,24 @@
     "mirrors": [
       "https://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/mini.iso"
     ]
+  },
+  {
+    "id": "debian-netboot-arm64",
+    "category": "Ubuntu / Debian",
+    "family": "linux",
+    "distro": "Debian GNU/Linux",
+    "version": "12 Netboot",
+    "codename": "bookworm",
+    "flavor": "tty",
+    "arch": "arm64",
+    "min_disk_gb": 10,
+    "approx_size_bytes": 142913536,
+    "requires_license": false,
+    "download_url": "https://deb.debian.org/debian/dists/bookworm/main/installer-arm64/current/images/netboot/mini.iso",
+    "mirrors": [
+      "https://deb.debian.org/debian/dists/bookworm/main/installer-arm64/current/images/netboot/mini.iso"
+    ],
+    "notes": "Phase 6 (item 36): arm64 host dual-boot support, verified reachable."
   },
   {
     "id": "fedora-workstation-amd64",

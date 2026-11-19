@@ -1450,11 +1450,63 @@ infrastructure proven against one real batch, a ratchet stopping new debt, and a
 ./... && go test ./...` clean throughout.
 
 ## Phase 6: Architecture support (audit 2.6)
-- [ ] 35. Arch table (amd64/arm64) — Not started
-- [ ] 36. arm64 support for Debian/Ubuntu family only — Not started
-- [ ] 37. qemu-system-aarch64 boot tests — Not started
+- [x] 35. Arch table (amd64/arm64) — Done (`PENDING_HASH`). New `docs/ARCH_SUPPORT.md`:
+      what builds, what's actually run, what catalog entries exist, and what has a real
+      boot proof, per architecture — honest about the difference between those (e.g. arm64
+      builds clean and now has a real QEMU boot proof, but this session never ran it on
+      real arm64 hardware). Also precisely defines what "arm64 support" means for a
+      bare-metal provisioning tool (the **host** architecture, not installing an arm64
+      guest from an amd64 host — physically impossible at the firmware level) and lists
+      what was explicitly NOT audited for arch-correctness this pass
+      (`engine/bcd_qemu.go`'s Windows-BCD-via-QEMU helper — Windows-on-ARM is a
+      vanishingly rare target and out of this item's explicit "Debian/Ubuntu family only"
+      scope).
+- [x] 36. arm64 support for Debian/Ubuntu family only — Done (`PENDING_HASH`).
+      - **A real, functional bug found and fixed**: `engine/usb_manager.go`'s
+        `ArmAutonomousUSBBootloader` (which stages this tool's own autonomous-install USB
+        stick) hardcoded x86_64 EFI binary names (`BOOTX64.EFI`, `grubx64.efi`, GRUB's
+        `x86_64-efi` target) unconditionally. On a real arm64 host this would have silently
+        produced a USB stick carrying an EFI binary arm64 UEFI firmware cannot execute at
+        all — autonomous bare-metal staging was completely broken on arm64, even before
+        getting anywhere near installing an actual guest OS. Fixed via new
+        `efiBootNamesForArch(runtime.GOARCH)`, extracted as a pure function specifically so
+        it's testable without needing to actually build/run on each architecture. Test
+        (`engine/usb_manager_test.go`): correct names for `amd64`/`arm64`, safe fallback for
+        an unrecognized arch; verified failing before the fix (temporarily reverted just
+        that function to the old hardcoded return, confirmed the arm64 case produced
+        amd64's names) and passing after.
+      - **2 real catalog entries added** (`discovery/manifests/linux.json`):
+        `debian-netboot-arm64` and `ubuntu-server-arm64` — Debian and Ubuntu specifically,
+        per the item's explicit scope, both resolved to real, independently-verified-reachable
+        URLs (checked via `curl -I`/`-IL` before adding, same discipline as every other
+        catalog entry in this project — never invented).
+- [x] 37. qemu-system-aarch64 boot tests — Done (`PENDING_HASH`). New
+      `testing/qemu/boot-and-verify-aarch64.sh` (the aarch64/AAVMF equivalent of Phase 3's
+      x86_64/OVMF script, which lives on the still-unmerged `test/os-matrix` branch — see
+      `docs/ROADMAP.md`). Installed `qemu-system-arm`/`qemu-efi-aarch64` (AAVMF firmware) in
+      this session's sandbox (neither was present before) and **actually ran it for real**
+      against the real, newly-added `debian-netboot-arm64` ISO: AAVMF UEFI firmware
+      initialized, GRUB loaded ("Welcome to GRUB! GNU GRUB version 2.06-13+deb12u2"), and
+      the real Debian Installer boot menu rendered ("Install", "Graphical install",
+      "Advanced options...", "Install with speech synthesis") — not a mock, not a
+      prediction. Evidence: `testing/reports/tier3-debian-netboot-arm64-*.{txt,json}`.
+      **A real, measured finding, not assumed**: aarch64 TCG emulation (no `/dev/kvm` here,
+      and emulating a *different* ISA than the amd64 host can never use KVM regardless) is
+      markedly slower than x86_64/OVMF+TCG — reaching GRUB's menu took several minutes of
+      QEMU CPU time on the raw manual run (8 seconds on the scripted re-run once the exact
+      success pattern was tuned to match GRUB's own early banner text rather than waiting
+      for the full curses menu redraw) — documented in both the script's own comments and
+      `docs/ARCH_SUPPORT.md` so a future run budgets its timeout accordingly.
+      **Not attempted**: selecting "Install" and running the Debian installer to completion
+      (needs real network access from inside the emulated guest), and real arm64 hardware
+      (this was QEMU/TCG emulation on an amd64 host throughout, not a Raspberry Pi or other
+      real arm64 machine).
 
-**CHECKPOINT 6:** not reached
+**CHECKPOINT 6:** Reached. Items 35-37 done: an honest arch-support table, a real
+functional bug found and fixed (autonomous USB staging was completely broken on arm64),
+2 real catalog entries, and a real, measured QEMU/AAVMF boot proof — not a mock. `go build
+./... && go vet ./... && go test ./...` clean, confirmed cross-compiling for
+linux/arm64, windows/amd64, and darwin/arm64 throughout.
 
 ## Final deliverables
 - [ ] 38. MANUAL_TEST_PLAN.md — Not started

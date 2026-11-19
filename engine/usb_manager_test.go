@@ -128,3 +128,43 @@ func TestProbeUSBPayloads_InternalSDCNotScanned(t *testing.T) {
 		t.Fatalf("expected the genuine USB partition's payload to still be found, got: %+v", payloads)
 	}
 }
+
+// TestEfiBootNamesForArch_SelectsCorrectBinariesPerArch is the regression
+// test for Phase 6 item 36: ArmAutonomousUSBBootloader used to hardcode
+// x86_64 EFI binary names/GRUB target format unconditionally, silently
+// producing a USB stick that could never boot on arm64 host firmware (a
+// Raspberry Pi, an ARM server, Asahi Linux, ...) even though this project
+// builds and runs fine there. Each architecture must get its own,
+// correct set of names — never a mix, and never silently falling back to
+// amd64's names for a real arm64 host.
+func TestEfiBootNamesForArch_SelectsCorrectBinariesPerArch(t *testing.T) {
+	shim, grub, mok, format := efiBootNamesForArch("amd64")
+	if shim != "BOOTX64.EFI" || grub != "grubx64.efi" || mok != "mmx64.efi" || format != "x86_64-efi" {
+		t.Fatalf("amd64: got shim=%q grub=%q mok=%q format=%q", shim, grub, mok, format)
+	}
+
+	shim, grub, mok, format = efiBootNamesForArch("arm64")
+	if shim != "BOOTAA64.EFI" || grub != "grubaa64.efi" || mok != "mmaa64.efi" || format != "arm64-efi" {
+		t.Fatalf("arm64: got shim=%q grub=%q mok=%q format=%q", shim, grub, mok, format)
+	}
+
+	// An unrecognized GOARCH must fall back to the amd64 names (the
+	// common case for this tool's existing user base) rather than
+	// panicking or returning empty/mixed values.
+	shim, grub, mok, format = efiBootNamesForArch("riscv64")
+	if shim != "BOOTX64.EFI" || grub != "grubx64.efi" || mok != "mmx64.efi" || format != "x86_64-efi" {
+		t.Fatalf("unrecognized arch fallback: got shim=%q grub=%q mok=%q format=%q", shim, grub, mok, format)
+	}
+}
+
+// TestGrubEFIArchSuffix_MatchesShimPackagingConventions proves the
+// shim/mok filename suffix helper returns the exact suffixes Debian/
+// Ubuntu's shim packaging actually uses for each architecture.
+func TestGrubEFIArchSuffix_MatchesShimPackagingConventions(t *testing.T) {
+	if got := grubEFIArchSuffix("x86_64-efi"); got != "x64" {
+		t.Errorf("x86_64-efi: got %q, want %q", got, "x64")
+	}
+	if got := grubEFIArchSuffix("arm64-efi"); got != "aa64" {
+		t.Errorf("arm64-efi: got %q, want %q", got, "aa64")
+	}
+}
