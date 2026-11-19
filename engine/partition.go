@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -675,9 +676,18 @@ func RollbackPartitionShrink(rollbackData json.RawMessage) error {
 // misread as disk "loop" + partition "0") and this function has no way to
 // know which disk names are "real" versus partition-bearing, so callers are
 // responsible for only passing genuine partition paths.
+//
+// Uses the "path" package, not "path/filepath": partitionPath is always a
+// Linux device-naming string ("/dev/..."), never a real host filesystem
+// path, so it must always be split/joined on "/" regardless of the
+// compiling/running platform. Using "path/filepath" here was a real bug on
+// Windows builds — filepath.Base/Dir/Join there operate in "\"-separated
+// semantics, which mangles a string like "/dev/mmcblk0p2" into
+// "\dev\mmcblk0p2" instead of correctly splitting it. Found via a real
+// Windows CI test failure (disk_naming_test.go), not by inspection.
 func SplitDiskAndPartition(partitionPath string) (diskPath string, partNum string, err error) {
-	base := filepath.Base(partitionPath)
-	dir := filepath.Dir(partitionPath)
+	base := path.Base(partitionPath)
+	dir := path.Dir(partitionPath)
 
 	i := len(base) - 1
 	for i >= 0 && base[i] >= '0' && base[i] <= '9' {
@@ -691,15 +701,17 @@ func SplitDiskAndPartition(partitionPath string) (diskPath string, partNum strin
 	if i >= 1 && base[i] == 'p' && base[i-1] >= '0' && base[i-1] <= '9' {
 		// The disk name itself ends in a digit, so this "p" is the
 		// partition-number infix, not part of the disk name.
-		return filepath.Join(dir, base[:i]), partNum, nil
+		return path.Join(dir, base[:i]), partNum, nil
 	}
-	return filepath.Join(dir, base[:i+1]), partNum, nil
+	return path.Join(dir, base[:i+1]), partNum, nil
 }
 
 // JoinDiskAndPartition joins a disk path and a partition number, correctly
 // handling NVMe/eMMC "pN" suffixes as well as standard SATA/USB devices.
+// Same "path", not "path/filepath", rationale as SplitDiskAndPartition
+// above — diskPath is always a Linux device-naming string.
 func JoinDiskAndPartition(diskPath, partNum string) string {
-	base := filepath.Base(diskPath)
+	base := path.Base(diskPath)
 	if (len(base) > 0 && base[len(base)-1] >= '0' && base[len(base)-1] <= '9') ||
 		strings.Contains(base, "nvme") || strings.Contains(base, "mmcblk") {
 		return diskPath + "p" + partNum

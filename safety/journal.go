@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -211,6 +212,26 @@ var allowedStepNames = map[string]bool{
 // SessionState separately carries PARTUUID fields for resume to re-resolve
 // against, rather than trusting the raw path). Empty is allowed, since not
 // every session has every field populated.
+//
+// TargetDisk/TargetPartition/ShrunkPartition are ALWAYS "/dev/..."-style
+// Linux device paths today, never a Windows-native form ("Disk 0", "C:",
+// ...): the only code that writes these fields (RunProvision, sourced from
+// --target-disk or the TUI's disk list, both ultimately backed by
+// DetectAllInternalDisks/ProbeRemovableTargets' lsblk-based enumeration)
+// produces that format on every host OS. engine.WindowsStorageEngine
+// (engine_windows.go) is the one place that WOULD produce a Windows-native
+// form, but it has zero callers anywhere in the repo — confirmed dead
+// code, like engine/rootfs.go and hypervisor/compact.go — so there is
+// currently no real "Windows device path form" this validator needs to
+// accept. Uses "path.Clean", not "path/filepath.Clean": the latter is a
+// real bug on Windows builds, since filepath.Clean there normalizes to
+// "\"-separated output ("\dev\sdz" instead of "/dev/sdz"), so this check
+// rejected every single legitimate "/dev/..." path on a Windows-compiled
+// binary — found via a real Windows CI test failure
+// (journal_security_test.go), not by inspection. If engine.NewStorageEngine
+// is ever actually wired into RunProvision on Windows, SessionState's
+// device-path fields would need a real schema decision for how to
+// represent a Windows-native identifier, not just a looser regex here.
 func looksLikeDevicePath(s string) bool {
 	if s == "" {
 		return true
@@ -218,7 +239,7 @@ func looksLikeDevicePath(s string) bool {
 	if strings.Contains(s, "..") {
 		return false
 	}
-	return strings.HasPrefix(s, "/dev/") && filepath.Clean(s) == s
+	return strings.HasPrefix(s, "/dev/") && path.Clean(s) == s
 }
 
 // validateLoadedJournal rejects a journal whose contents could not have
