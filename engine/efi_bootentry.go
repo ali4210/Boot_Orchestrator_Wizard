@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"os/exec"
 	"strings"
 )
 
@@ -18,7 +17,7 @@ func ResolveBootEntryByEFIDir(efiDir string) string {
 	if efiDir == "" {
 		return ""
 	}
-	out, err := exec.Command("efibootmgr").Output()
+	out, err := execCommand("efibootmgr").Output()
 	if err != nil {
 		return ""
 	}

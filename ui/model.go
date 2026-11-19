@@ -245,7 +245,7 @@ func runPostInstallVerificationCmd() tea.Cmd {
 			fstabOk:      true,
 		}
 
-		_ = exec.Command("update-grub").Run()
+		_ = engine.ExecCommand("update-grub").Run()
 
 		if _, err := os.Stat("/boot/efi/EFI"); err == nil {
 			res.bootX64Ok = true
@@ -2562,8 +2562,8 @@ func updateScreenKey(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.verificationComplete && !m.verificationOk {
 				return m, nil
 			}
-			_ = exec.Command("sync").Run()
-			_ = exec.Command("reboot").Run()
+			_ = engine.ExecCommand("sync").Run()
+			_ = engine.ExecCommand("reboot").Run()
 			return m, tea.Quit
 
 		case "enter", "esc":

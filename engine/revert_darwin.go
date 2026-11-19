@@ -32,7 +32,7 @@ type DetectedGuestOS struct {
 }
 
 func DiscoverSecondaryOSes() ([]DetectedGuestOS, error) {
-	out, err := exec.Command("diskutil", "list").Output()
+	out, err := execCommand("diskutil", "list").Output()
 	if err != nil {
 		return nil, nil
 	}
@@ -89,7 +89,7 @@ func resolveDeviceByPartitionUUID(partUUID string) (string, error) {
 	if partUUID == "" {
 		return "", fmt.Errorf("no partition UUID recorded — cannot safely resolve device")
 	}
-	out, err := exec.Command("diskutil", "info", "-plist", partUUID).Output()
+	out, err := execCommand("diskutil", "info", "-plist", partUUID).Output()
 	if err != nil || len(out) == 0 {
 		return "", fmt.Errorf("no live partition currently has UUID %s (drive may be unplugged, or already reverted)", partUUID)
 	}
@@ -118,7 +118,7 @@ func verifyDarwinTargetBeforeDestruction(devicePath, expectedFSType string, expe
 	if expectedFSType == "" && expectedSizeBytes == 0 {
 		return nil
 	}
-	out, err := exec.Command("diskutil", "info", "-plist", devicePath).Output()
+	out, err := execCommand("diskutil", "info", "-plist", devicePath).Output()
 	if err != nil {
 		return nil // can't verify — don't block on a query failure
 	}
@@ -190,13 +190,13 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 	logFn(fmt.Sprintf("=> [MACOS ROLLBACK] Processing target partition %s...", targetDev))
 
 	if targetDev != "" {
-		_ = exec.Command("diskutil", "unmountDisk", "force", targetDev).Run()
+		_ = execCommand("diskutil", "unmountDisk", "force", targetDev).Run()
 
 		if keepSlice {
 			// Format slice as FAT32 / ExFAT to preserve the partition slice for a subsequent OS
 			progressFn("=> [REVERT 50%] Formatting staging slice on macOS...", 0.50)
 			logFn(fmt.Sprintf("=> Formatting %s as clean staging slice...", targetDev))
-			_ = exec.Command("diskutil", "eraseVolume", "MS-DOS FAT32", "STAGING_SLICE", targetDev).Run()
+			_ = execCommand("diskutil", "eraseVolume", "MS-DOS FAT32", "STAGING_SLICE", targetDev).Run()
 		} else {
 			// Final safety gate right before deletion.
 			if verifyErr := verifyDarwinTargetBeforeDestruction(targetDev, p.ExpectedFSType, p.ExpectedSizeBytes); verifyErr != nil {
@@ -206,7 +206,7 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 			// Erase to Free Space and reclaim
 			progressFn("=> [REVERT 50%] Erasing partition to unallocated space...", 0.50)
 			logFn(fmt.Sprintf("=> Deleting partition %s and returning to free space...", targetDev))
-			cmdErase := exec.Command("diskutil", "eraseVolume", "Free Space", "%noformat%", targetDev)
+			cmdErase := execCommand("diskutil", "eraseVolume", "Free Space", "%noformat%", targetDev)
 			if out, err := cmdErase.CombinedOutput(); err != nil {
 				logFn(fmt.Sprintf("=> eraseVolume note: %s", strings.TrimSpace(string(out))))
 			}
@@ -215,7 +215,7 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 			if p.DiskDevice != "" {
 				progressFn("=> [REVERT 75%] Expanding APFS container to reclaim 100% disk...", 0.75)
 				logFn(fmt.Sprintf("=> Reclaiming free space on %s into APFS container...", p.DiskDevice))
-				_ = exec.Command("diskutil", "apfs", "resizeContainer", p.DiskDevice, "0").Run()
+				_ = execCommand("diskutil", "apfs", "resizeContainer", p.DiskDevice, "0").Run()
 			}
 		}
 	}
@@ -225,9 +225,9 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 		progressFn(fmt.Sprintf("=> [REVERT 90%%] Purging /EFI/%s from macOS ESP...", p.EFIDirNameToPurge), 0.90)
 		logFn(fmt.Sprintf("=> Purging EFI directory %s...", p.EFIDirNameToPurge))
 		efiPart := p.DiskDevice + "s1"
-		_ = exec.Command("diskutil", "mount", efiPart).Run()
+		_ = execCommand("diskutil", "mount", efiPart).Run()
 		_ = fsRunner.RemoveAll(filepath.Join("/Volumes/EFI/EFI", p.EFIDirNameToPurge))
-		_ = exec.Command("diskutil", "unmount", efiPart).Run()
+		_ = execCommand("diskutil", "unmount", efiPart).Run()
 	}
 
 	progressFn("=> [REVERT 100%] macOS revert completed.", 1.0)

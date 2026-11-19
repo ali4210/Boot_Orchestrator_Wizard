@@ -89,7 +89,7 @@ func DiscoverSecondaryOSes() ([]DetectedGuestOS, error) {
 
 	// 2. Query Windows Partition subsystem for Linux GPT Type GUID
 	psCmd := `Get-Partition | Where-Object { $_.Type -like "*Linux*" -or $_.GptType -eq "{0fc63daf-8483-4772-8e79-3d69d8477de4}" } | Select-Object DiskNumber, PartitionNumber | ConvertTo-Json`
-	out, err := exec.Command("powershell.exe", "-NoProfile", "-Command", psCmd).Output()
+	out, err := execCommand("powershell.exe", "-NoProfile", "-Command", psCmd).Output()
 	if err == nil && len(strings.TrimSpace(string(out))) > 0 {
 		type winPart struct {
 			DiskNumber      int `json:"DiskNumber"`
@@ -179,7 +179,7 @@ if ($p.GptType -eq "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}") {
 }
 `, diskDigits, partNum, diskDigits, partNum, partNum)
 
-	out, err := exec.Command("powershell.exe", "-NoProfile", "-Command", psCheck).CombinedOutput()
+	out, err := execCommand("powershell.exe", "-NoProfile", "-Command", psCheck).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("safety check abort: %s", strings.TrimSpace(string(out)))
 	}
@@ -222,13 +222,13 @@ if ($p) {
     Format-Volume -Partition $p -FileSystem NTFS -NewFileSystemLabel "STAGING_SLICE" -Confirm:$false
 }
 `, diskDigits, partNum)
-			_ = exec.Command("powershell.exe", "-NoProfile", "-Command", psFormat).Run()
+			_ = execCommand("powershell.exe", "-NoProfile", "-Command", psFormat).Run()
 
 		} else {
 			progressFn("=> [REVERT 40%] Removing secondary partition from GPT table...", 0.40)
 			logFn(fmt.Sprintf("=> Eradicating partition %s from disk %s...", partNum, diskDigits))
 			psDel := fmt.Sprintf(`Get-Partition -DiskNumber %s -PartitionNumber %s -ErrorAction SilentlyContinue | Remove-Partition -Confirm:$false`, diskDigits, partNum)
-			if out, err := exec.Command("powershell.exe", "-NoProfile", "-Command", psDel).CombinedOutput(); err != nil {
+			if out, err := execCommand("powershell.exe", "-NoProfile", "-Command", psDel).CombinedOutput(); err != nil {
 				return fmt.Errorf("failed to remove partition %s on disk %s: %s: %w", partNum, diskDigits, strings.TrimSpace(string(out)), err)
 			}
 
@@ -242,7 +242,7 @@ if ($max) {
     Resize-Partition -DiskNumber %s -PartitionNumber %s -Size $max -ErrorAction SilentlyContinue
 }
 `, diskDigits, hostPart, diskDigits, hostPart)
-				_ = exec.Command("powershell.exe", "-NoProfile", "-Command", psExpand).Run()
+				_ = execCommand("powershell.exe", "-NoProfile", "-Command", psExpand).Run()
 			}
 		}
 	}
@@ -251,7 +251,7 @@ if ($max) {
 	if p.EFIBootEntryNum != "" {
 		progressFn("=> [REVERT 85%] Purging registered BCD boot target...", 0.85)
 		logFn(fmt.Sprintf("=> Purging BCD boot target %s...", p.EFIBootEntryNum))
-		_ = exec.Command("bcdedit.exe", "/delete", p.EFIBootEntryNum, "/cleanup").Run()
+		_ = execCommand("bcdedit.exe", "/delete", p.EFIBootEntryNum, "/cleanup").Run()
 	}
 
 	// Purge EFI directory using a collision-free temporary drive letter
@@ -270,7 +270,7 @@ if ($esp) {
     Remove-PartitionAccessPath -InputObject $esp -AccessPath $letter
 }
 `, p.EFIDirNameToPurge)
-		_ = exec.Command("powershell.exe", "-NoProfile", "-Command", mountESP).Run()
+		_ = execCommand("powershell.exe", "-NoProfile", "-Command", mountESP).Run()
 	}
 
 	// Purge journal files so state resets completely — both the current

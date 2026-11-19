@@ -110,7 +110,7 @@ func rollbackHandlers(grubDefaultPath string) map[string]safety.RollbackFunc {
 }
 
 func DetectAllInternalDisks() ([]USBTargetDevice, error) {
-	out, err := exec.Command("lsblk", "-d", "-J", "-o", "NAME,SIZE,TRAN,TYPE,RM,VENDOR,MODEL").Output()
+	out, err := execCommand("lsblk", "-d", "-J", "-o", "NAME,SIZE,TRAN,TYPE,RM,VENDOR,MODEL").Output()
 	if err != nil {
 		return nil, fmt.Errorf("querying internal storage controller: %w", err)
 	}
@@ -141,7 +141,7 @@ func DetectAllInternalDisks() ([]USBTargetDevice, error) {
 func DetectActiveRootDisk() (parentDisk string, hostPart string, hostNum string, targetPart string, err error) {
 	rootDev := ""
 
-	if out, err := exec.Command("findmnt", "-n", "-o", "SOURCE", "/").Output(); err == nil {
+	if out, err := execCommand("findmnt", "-n", "-o", "SOURCE", "/").Output(); err == nil {
 		rootDev = strings.TrimSpace(string(out))
 	}
 
@@ -173,7 +173,7 @@ func DetectActiveRootDisk() (parentDisk string, hostPart string, hostNum string,
 	// resolve through those instead.
 	if rootDev == "" || !strings.HasPrefix(rootDev, "/dev/") {
 		for _, liveMount := range []string{"/run/live/medium", "/lib/live/mount/medium", "/run/archiso/bootmnt", "/isodevice"} {
-			out, lmErr := exec.Command("findmnt", "-n", "-o", "SOURCE", liveMount).Output()
+			out, lmErr := execCommand("findmnt", "-n", "-o", "SOURCE", liveMount).Output()
 			if lmErr != nil {
 				continue
 			}
@@ -223,20 +223,20 @@ func ensure7ZipInstalled(logFn func(string)) error {
 	case "linux":
 		if _, err := exec.LookPath("apt-get"); err == nil {
 			logFn("=> [AUTONOMOUS ENGINE] Installing 7zip via apt-get...")
-			_ = exec.Command("apt-get", "update", "-y").Run()
-			if out, err := exec.Command("apt-get", "install", "-y", "7zip").CombinedOutput(); err != nil {
+			_ = execCommand("apt-get", "update", "-y").Run()
+			if out, err := execCommand("apt-get", "install", "-y", "7zip").CombinedOutput(); err != nil {
 				return fmt.Errorf("apt-get install 7zip failed: %w (%s)", err, string(out))
 			}
 			return nil
 		} else if _, err := exec.LookPath("dnf"); err == nil {
 			logFn("=> [AUTONOMOUS ENGINE] Installing p7zip via dnf...")
-			if out, err := exec.Command("dnf", "install", "-y", "p7zip", "p7zip-plugins").CombinedOutput(); err != nil {
+			if out, err := execCommand("dnf", "install", "-y", "p7zip", "p7zip-plugins").CombinedOutput(); err != nil {
 				return fmt.Errorf("dnf install p7zip failed: %w (%s)", err, string(out))
 			}
 			return nil
 		} else if _, err := exec.LookPath("pacman"); err == nil {
 			logFn("=> [AUTONOMOUS ENGINE] Installing p7zip via pacman...")
-			if out, err := exec.Command("pacman", "-Sy", "--noconfirm", "p7zip").CombinedOutput(); err != nil {
+			if out, err := execCommand("pacman", "-Sy", "--noconfirm", "p7zip").CombinedOutput(); err != nil {
 				return fmt.Errorf("pacman install p7zip failed: %w (%s)", err, string(out))
 			}
 			return nil
@@ -244,15 +244,15 @@ func ensure7ZipInstalled(logFn func(string)) error {
 	case "windows":
 		if _, err := exec.LookPath("winget"); err == nil {
 			logFn("=> [AUTONOMOUS ENGINE] Installing 7zip via winget...")
-			return exec.Command("winget", "install", "--id", "7zip.7zip", "-e", "--silent", "--accept-source-agreements", "--accept-package-agreements").Run()
+			return execCommand("winget", "install", "--id", "7zip.7zip", "-e", "--silent", "--accept-source-agreements", "--accept-package-agreements").Run()
 		} else if _, err := exec.LookPath("choco"); err == nil {
 			logFn("=> [AUTONOMOUS ENGINE] Installing 7zip via choco...")
-			return exec.Command("choco", "install", "7zip", "-y").Run()
+			return execCommand("choco", "install", "7zip", "-y").Run()
 		}
 	case "darwin":
 		if _, err := exec.LookPath("brew"); err == nil {
 			logFn("=> [AUTONOMOUS ENGINE] Installing sevenzip via Homebrew...")
-			return exec.Command("brew", "install", "sevenzip").Run()
+			return execCommand("brew", "install", "sevenzip").Run()
 		}
 	}
 
@@ -283,20 +283,20 @@ func ensureWindowsDeployToolsInstalled(logFn func(string)) error {
 	case "linux":
 		if _, err := exec.LookPath("apt-get"); err == nil {
 			logFn("=> [AUTONOMOUS ENGINE] Installing wimtools & ntfs-3g via apt-get...")
-			_ = exec.Command("apt-get", "update", "-y").Run()
-			if out, err := exec.Command("apt-get", "install", "-y", "wimtools", "ntfs-3g").CombinedOutput(); err != nil {
+			_ = execCommand("apt-get", "update", "-y").Run()
+			if out, err := execCommand("apt-get", "install", "-y", "wimtools", "ntfs-3g").CombinedOutput(); err != nil {
 				return fmt.Errorf("installing wimtools/ntfs-3g via apt failed: %w (%s)", err, string(out))
 			}
 			return nil
 		} else if _, err := exec.LookPath("dnf"); err == nil {
 			logFn("=> [AUTONOMOUS ENGINE] Installing wimtools & ntfs-3g via dnf...")
-			if out, err := exec.Command("dnf", "install", "-y", "wimtools", "ntfs-3g").CombinedOutput(); err != nil {
+			if out, err := execCommand("dnf", "install", "-y", "wimtools", "ntfs-3g").CombinedOutput(); err != nil {
 				return fmt.Errorf("installing wimtools/ntfs-3g via dnf failed: %w (%s)", err, string(out))
 			}
 			return nil
 		} else if _, err := exec.LookPath("pacman"); err == nil {
 			logFn("=> [AUTONOMOUS ENGINE] Installing wimlib & ntfs-3g via pacman...")
-			if out, err := exec.Command("pacman", "-Sy", "--noconfirm", "wimlib", "ntfs-3g").CombinedOutput(); err != nil {
+			if out, err := execCommand("pacman", "-Sy", "--noconfirm", "wimlib", "ntfs-3g").CombinedOutput(); err != nil {
 				return fmt.Errorf("installing wimlib/ntfs-3g via pacman failed: %w (%s)", err, string(out))
 			}
 			return nil
@@ -316,34 +316,34 @@ func deployMacOSPayload(dmgPath, targetPart string, logFn func(string)) error {
 	}
 
 	logFn(fmt.Sprintf("=> [MACOS DEPLOY] Formatting target partition %s as ext4 [MACOS_RECOVERY]...", targetPart))
-	if out, err := exec.Command("mkfs.ext4", "-F", "-q", "-L", "MACOS_RECOVERY", targetPart).CombinedOutput(); err != nil {
+	if out, err := execCommand("mkfs.ext4", "-F", "-q", "-L", "MACOS_RECOVERY", targetPart).CombinedOutput(); err != nil {
 		return fmt.Errorf("formatting target %s: %w (%s)", targetPart, err, string(out))
 	}
 
 	targetMount := "/mnt/orch_target_root"
 	_ = fsRunner.MkdirAll(targetMount, 0755)
-	_ = exec.Command("umount", "-l", targetMount).Run()
+	_ = execCommand("umount", "-l", targetMount).Run()
 
 	logFn(fmt.Sprintf("=> [MACOS DEPLOY] Mounting %s at %s...", targetPart, targetMount))
-	if out, err := exec.Command("mount", targetPart, targetMount).CombinedOutput(); err != nil {
+	if out, err := execCommand("mount", targetPart, targetMount).CombinedOutput(); err != nil {
 		return fmt.Errorf("mounting target partition %s: %w (%s)", targetPart, err, string(out))
 	}
 	defer func() {
-		_ = exec.Command("sync").Run()
-		_ = exec.Command("umount", "-l", targetMount).Run()
+		_ = execCommand("sync").Run()
+		_ = execCommand("umount", "-l", targetMount).Run()
 	}()
 
 	logFn("=> [MACOS DEPLOY] Unpacking Apple BaseSystem via 7-Zip engine (2-3 min)...")
-	cmd7z := exec.Command("7z", "x", "-y", fmt.Sprintf("-o%s", targetMount), dmgPath)
+	cmd7z := execCommand("7z", "x", "-y", fmt.Sprintf("-o%s", targetMount), dmgPath)
 	_ = cmd7z.Run()
 
 	nestedDir := filepath.Join(targetMount, "macOS Base System")
 	if fi, err := os.Stat(nestedDir); err == nil && fi.IsDir() {
 		logFn("=> [MACOS DEPLOY] Structuring recovery filesystem tree...")
-		_ = exec.Command("bash", "-c", fmt.Sprintf("shopt -s dotglob; mv %s/* %s/ 2>/dev/null || true; rmdir %s 2>/dev/null || true", nestedDir, targetMount, nestedDir)).Run()
+		_ = execCommand("bash", "-c", fmt.Sprintf("shopt -s dotglob; mv %s/* %s/ 2>/dev/null || true; rmdir %s 2>/dev/null || true", nestedDir, targetMount, nestedDir)).Run()
 	}
 
-	_ = exec.Command("sync").Run()
+	_ = execCommand("sync").Run()
 	logFn("=> [MACOS DEPLOY 100%] Apple BaseSystem deployed successfully.")
 	return nil
 }
@@ -357,10 +357,10 @@ func deployWindowsPayload(isoPath, targetPart string, wimIndex int, autounattend
 		return fmt.Errorf("dependency resolution failed: %w", err)
 	}
 
-	fsTypeOut, _ := exec.Command("blkid", "-s", "TYPE", "-o", "value", targetPart).Output()
+	fsTypeOut, _ := execCommand("blkid", "-s", "TYPE", "-o", "value", targetPart).Output()
 	if !strings.EqualFold(strings.TrimSpace(string(fsTypeOut)), "ntfs") {
 		logFn(fmt.Sprintf("=> [WINDOWS DEPLOY] Formatting target partition %s as NTFS [WINDOWS]...", targetPart))
-		if out, err := exec.Command("mkfs.ntfs", "-F", "-q", "-L", "WINDOWS", targetPart).CombinedOutput(); err != nil {
+		if out, err := execCommand("mkfs.ntfs", "-F", "-q", "-L", "WINDOWS", targetPart).CombinedOutput(); err != nil {
 			return fmt.Errorf("formatting target %s as NTFS: %w (%s)", targetPart, err, string(out))
 		}
 	} else {
@@ -369,29 +369,29 @@ func deployWindowsPayload(isoPath, targetPart string, wimIndex int, autounattend
 
 	targetMount := "/mnt/orch_target_root"
 	_ = fsRunner.MkdirAll(targetMount, 0755)
-	_ = exec.Command("umount", "-l", targetMount).Run()
+	_ = execCommand("umount", "-l", targetMount).Run()
 
 	logFn(fmt.Sprintf("=> [WINDOWS DEPLOY] Mounting target NTFS partition %s at %s...", targetPart, targetMount))
-	if out, err := exec.Command("mount", "-t", "ntfs-3g", targetPart, targetMount).CombinedOutput(); err != nil {
-		if out2, err2 := exec.Command("mount", targetPart, targetMount).CombinedOutput(); err2 != nil {
+	if out, err := execCommand("mount", "-t", "ntfs-3g", targetPart, targetMount).CombinedOutput(); err != nil {
+		if out2, err2 := execCommand("mount", targetPart, targetMount).CombinedOutput(); err2 != nil {
 			return fmt.Errorf("mounting target partition %s: %w (%s | %s)", targetPart, err, string(out), string(out2))
 		}
 	}
 	defer func() {
-		_ = exec.Command("sync").Run()
-		_ = exec.Command("umount", "-l", targetMount).Run()
+		_ = execCommand("sync").Run()
+		_ = execCommand("umount", "-l", targetMount).Run()
 	}()
 
 	isoMount := "/mnt/orch_iso_source"
 	_ = fsRunner.MkdirAll(isoMount, 0755)
-	_ = exec.Command("umount", "-l", isoMount).Run()
+	_ = execCommand("umount", "-l", isoMount).Run()
 
 	logFn("=> [WINDOWS DEPLOY] Mounting Windows source ISO loopback: " + isoPath)
-	if out, err := exec.Command("mount", "-o", "loop,ro", isoPath, isoMount).CombinedOutput(); err != nil {
+	if out, err := execCommand("mount", "-o", "loop,ro", isoPath, isoMount).CombinedOutput(); err != nil {
 		return fmt.Errorf("mounting loop ISO %s: %w (%s)", isoPath, err, string(out))
 	}
 	defer func() {
-		_ = exec.Command("umount", "-l", isoMount).Run()
+		_ = execCommand("umount", "-l", isoMount).Run()
 	}()
 
 	candidates := []string{
@@ -417,7 +417,7 @@ func deployWindowsPayload(isoPath, targetPart string, wimIndex int, autounattend
 	}
 
 	logFn(fmt.Sprintf("=> [WINDOWS DEPLOY] Applying Windows image from %s (Index %s) via wimapply (3-6 min)...", filepath.Base(wimPath), targetIndex))
-	cmdApply := exec.Command("wimapply", wimPath, targetIndex, targetMount)
+	cmdApply := execCommand("wimapply", wimPath, targetIndex, targetMount)
 	if out, err := cmdApply.CombinedOutput(); err != nil {
 		return fmt.Errorf("wimapply extraction failed: %w (%s)", err, string(out))
 	}
@@ -429,7 +429,7 @@ func deployWindowsPayload(isoPath, targetPart string, wimIndex int, autounattend
 		}
 	}
 
-	_ = exec.Command("sync").Run()
+	_ = execCommand("sync").Run()
 	logFn("=> [WINDOWS DEPLOY 100%] Windows operating system tree successfully applied.")
 	return nil
 }
@@ -440,7 +440,7 @@ func registerWindowsInGRUB(isoPath, targetDiskPath, targetPart, espPath, grubDef
 	}
 
 	logFn("=> [BOOTLOADER] Querying Windows target partition UUID...")
-	uuidOut, err := exec.Command("blkid", "-s", "UUID", "-o", "value", targetPart).Output()
+	uuidOut, err := execCommand("blkid", "-s", "UUID", "-o", "value", targetPart).Output()
 	targetUUID := strings.TrimSpace(string(uuidOut))
 	if targetUUID == "" {
 		return fmt.Errorf("failed to retrieve UUID for target Windows partition %s: %w", targetPart, err)
@@ -455,14 +455,14 @@ func registerWindowsInGRUB(isoPath, targetDiskPath, targetPart, espPath, grubDef
 
 	targetMount := "/mnt/orch_target_root"
 	_ = fsRunner.MkdirAll(targetMount, 0755)
-	_ = exec.Command("umount", "-l", targetMount).Run()
-	if _, err := exec.Command("mount", "-o", "ro", targetPart, targetMount).CombinedOutput(); err == nil {
+	_ = execCommand("umount", "-l", targetMount).Run()
+	if _, err := execCommand("mount", "-o", "ro", targetPart, targetMount).CombinedOutput(); err == nil {
 		defer func() {
-			_ = exec.Command("umount", "-l", targetMount).Run()
+			_ = execCommand("umount", "-l", targetMount).Run()
 		}()
 		srcBootEFI := filepath.Join(targetMount, "Windows", "Boot", "EFI")
 		if fi, err := os.Stat(srcBootEFI); err == nil && fi.IsDir() {
-			_ = exec.Command("cp", "-r", filepath.Join(srcBootEFI, "."), winESPDir).Run()
+			_ = execCommand("cp", "-r", filepath.Join(srcBootEFI, "."), winESPDir).Run()
 		}
 	}
 
@@ -496,8 +496,8 @@ menuentry "%s" {
 	}
 
 	logFn("=> [BOOTLOADER] Synchronizing host GRUB with os-prober and Windows boot configuration...")
-	_ = exec.Command("sed", "-i", `s/^#\?GRUB_DISABLE_OS_PROBER=.*/GRUB_DISABLE_OS_PROBER=false/`, "/etc/default/grub").Run()
-	if out, err := exec.Command("update-grub").CombinedOutput(); err != nil {
+	_ = execCommand("sed", "-i", `s/^#\?GRUB_DISABLE_OS_PROBER=.*/GRUB_DISABLE_OS_PROBER=false/`, "/etc/default/grub").Run()
+	if out, err := execCommand("update-grub").CombinedOutput(); err != nil {
 		return fmt.Errorf("updating grub: %w (%s)", err, string(out))
 	}
 
@@ -518,16 +518,16 @@ func registerMacOSInGRUB(targetPart, espPath, grubDefaultPath string, logFn func
 		_ = fsRunner.MkdirAll("/boot/efi/EFI/OC", 0755)
 		tmpZip := "/tmp/OpenCoreEFI.zip"
 		url := "https://github.com/thenickdude/KVM-Opencore/releases/download/v21/OpenCoreEFIFolder-v21.zip"
-		if _, err := exec.Command("curl", "-sSL", "-o", tmpZip, url).CombinedOutput(); err == nil {
-			_ = exec.Command("unzip", "-q", "-o", tmpZip, "-d", "/tmp/oc_unpack").Run()
-			_ = exec.Command("cp", "-r", "/tmp/oc_unpack/EFI/.", "/boot/efi/EFI/").Run()
+		if _, err := execCommand("curl", "-sSL", "-o", tmpZip, url).CombinedOutput(); err == nil {
+			_ = execCommand("unzip", "-q", "-o", tmpZip, "-d", "/tmp/oc_unpack").Run()
+			_ = execCommand("cp", "-r", "/tmp/oc_unpack/EFI/.", "/boot/efi/EFI/").Run()
 			_ = fsRunner.RemoveAll("/tmp/oc_unpack")
 			_ = fsRunner.Remove(tmpZip)
 		}
 	}
 
 	bootPart := ""
-	if out, err := exec.Command("df", "--output=source", "/boot").Output(); err == nil {
+	if out, err := execCommand("df", "--output=source", "/boot").Output(); err == nil {
 		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 		if len(lines) > 1 {
 			bootPart = lines[1]
@@ -537,10 +537,10 @@ func registerMacOSInGRUB(targetPart, espPath, grubDefaultPath string, logFn func
 		bootPart, _, _, _, _ = DetectActiveRootDisk()
 	}
 
-	uuidOut, _ := exec.Command("blkid", "-s", "UUID", "-o", "value", bootPart).Output()
+	uuidOut, _ := execCommand("blkid", "-s", "UUID", "-o", "value", bootPart).Output()
 	bootUUID := strings.TrimSpace(string(uuidOut))
 
-	fsTypeOut, _ := exec.Command("blkid", "-s", "TYPE", "-o", "value", bootPart).Output()
+	fsTypeOut, _ := execCommand("blkid", "-s", "TYPE", "-o", "value", bootPart).Output()
 	bootFSType := strings.ToLower(strings.TrimSpace(string(fsTypeOut)))
 
 	fsDriver := "ext2"
@@ -571,7 +571,7 @@ menuentry "macOS Recovery (OpenCore)" {
 		}
 	}
 
-	if out, err := exec.Command("update-grub").CombinedOutput(); err != nil {
+	if out, err := execCommand("update-grub").CombinedOutput(); err != nil {
 		return fmt.Errorf("updating grub: %w (%s)", err, string(out))
 	}
 
@@ -591,34 +591,34 @@ func extractLiveRootFS(isoPath, targetPart string, creds Credentials, logFn func
 	}
 
 	logFn(fmt.Sprintf("=> [ROOTFS DEPLOY] Formatting target partition %s as ext4 [LINUX_ROOT]...", targetPart))
-	if out, err := exec.Command("mkfs.ext4", "-F", "-q", "-L", "LINUX_ROOT", targetPart).CombinedOutput(); err != nil {
+	if out, err := execCommand("mkfs.ext4", "-F", "-q", "-L", "LINUX_ROOT", targetPart).CombinedOutput(); err != nil {
 		return fmt.Errorf("formatting %s: %w (%s)", targetPart, err, string(out))
 	}
-	_ = exec.Command("sync").Run()
+	_ = execCommand("sync").Run()
 
 	targetMount := "/mnt/orch_target_root"
 	_ = fsRunner.MkdirAll(targetMount, 0755)
-	_ = exec.Command("umount", "-l", targetMount).Run()
+	_ = execCommand("umount", "-l", targetMount).Run()
 
 	logFn(fmt.Sprintf("=> [ROOTFS DEPLOY] Mounting target %s at %s...", targetPart, targetMount))
-	if out, err := exec.Command("mount", targetPart, targetMount).CombinedOutput(); err != nil {
+	if out, err := execCommand("mount", targetPart, targetMount).CombinedOutput(); err != nil {
 		return fmt.Errorf("mounting %s to %s: %w (%s)", targetPart, targetMount, err, string(out))
 	}
 	defer func() {
-		_ = exec.Command("sync").Run()
-		_ = exec.Command("umount", "-l", targetMount).Run()
+		_ = execCommand("sync").Run()
+		_ = execCommand("umount", "-l", targetMount).Run()
 	}()
 
 	isoMount := "/mnt/orch_iso_source"
 	_ = fsRunner.MkdirAll(isoMount, 0755)
-	_ = exec.Command("umount", "-l", isoMount).Run()
+	_ = execCommand("umount", "-l", isoMount).Run()
 
 	logFn("=> [ROOTFS DEPLOY] Mounting source ISO loopback: " + isoPath)
-	if out, err := exec.Command("mount", "-o", "loop,ro", isoPath, isoMount).CombinedOutput(); err != nil {
+	if out, err := execCommand("mount", "-o", "loop,ro", isoPath, isoMount).CombinedOutput(); err != nil {
 		return fmt.Errorf("mounting loop iso %s: %w (%s)", isoPath, err, string(out))
 	}
 	defer func() {
-		_ = exec.Command("umount", "-l", isoMount).Run()
+		_ = execCommand("umount", "-l", isoMount).Run()
 	}()
 
 	squashPath := ""
@@ -663,19 +663,19 @@ func extractLiveRootFS(isoPath, targetPart string, creds Credentials, logFn func
 	}
 
 	logFn("=> [ROOTFS DEPLOY] Extracting live root filesystem tree via unsquashfs (2-4 min)...")
-	unsquashCmd := exec.Command("unsquashfs", "-f", "-d", targetMount, squashPath)
+	unsquashCmd := execCommand("unsquashfs", "-f", "-d", targetMount, squashPath)
 	if out, err := unsquashCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("unsquashfs extraction failed: %w (%s)", err, string(out))
 	}
 
-	_ = exec.Command("tune2fs", "-m", "1", targetPart).Run()
+	_ = execCommand("tune2fs", "-m", "1", targetPart).Run()
 
 	initTarget := filepath.Join(targetMount, "sbin", "init")
 	systemdTarget := "/lib/systemd/systemd"
 	_ = fsRunner.Remove(initTarget)
 	_ = fsRunner.Symlink(systemdTarget, initTarget)
 
-	uuidOut, err := exec.Command("blkid", "-s", "UUID", "-o", "value", targetPart).Output()
+	uuidOut, err := execCommand("blkid", "-s", "UUID", "-o", "value", targetPart).Output()
 	if err == nil && len(strings.TrimSpace(string(uuidOut))) > 0 {
 		uuidStr := strings.TrimSpace(string(uuidOut))
 		fstabEntry := fmt.Sprintf("UUID=%s / ext4 defaults,noatime,errors=remount-ro 0 1\n", uuidStr)
@@ -685,9 +685,9 @@ func extractLiveRootFS(isoPath, targetPart string, creds Credentials, logFn func
 
 	logFn("=> [CREDENTIALS] Configuring persistent user accounts and purging installer artifacts...")
 
-	_ = exec.Command("mount", "--bind", "/dev", filepath.Join(targetMount, "dev")).Run()
-	_ = exec.Command("mount", "--bind", "/proc", filepath.Join(targetMount, "proc")).Run()
-	_ = exec.Command("mount", "--bind", "/sys", filepath.Join(targetMount, "sys")).Run()
+	_ = execCommand("mount", "--bind", "/dev", filepath.Join(targetMount, "dev")).Run()
+	_ = execCommand("mount", "--bind", "/proc", filepath.Join(targetMount, "proc")).Run()
+	_ = execCommand("mount", "--bind", "/sys", filepath.Join(targetMount, "sys")).Run()
 
 	// Audit item 26 (found while surveying generated scripts for the
 	// syntax/fmt-verb check below): this used to provision the account
@@ -701,20 +701,20 @@ func extractLiveRootFS(isoPath, targetPart string, creds Credentials, logFn func
 	// (bootloader.go) instead, which detects sudo vs wheel and verifies
 	// the account actually exists afterward before returning success.
 	if err := assertDefaultCredentials(targetMount, creds, logFn); err != nil {
-		_ = exec.Command("umount", "-l", filepath.Join(targetMount, "dev")).Run()
-		_ = exec.Command("umount", "-l", filepath.Join(targetMount, "proc")).Run()
-		_ = exec.Command("umount", "-l", filepath.Join(targetMount, "sys")).Run()
+		_ = execCommand("umount", "-l", filepath.Join(targetMount, "dev")).Run()
+		_ = execCommand("umount", "-l", filepath.Join(targetMount, "proc")).Run()
+		_ = execCommand("umount", "-l", filepath.Join(targetMount, "sys")).Run()
 		return fmt.Errorf("provisioning account: %w", err)
 	}
 
 	cleanupScript := renderCalamaresCleanupScript(creds.Username)
-	if out, err := exec.Command("chroot", targetMount, "bash", "-c", cleanupScript).CombinedOutput(); err != nil {
+	if out, err := execCommand("chroot", targetMount, "bash", "-c", cleanupScript).CombinedOutput(); err != nil {
 		logFn(fmt.Sprintf("=> [WARNING] installer-artifact cleanup note: %v (%s)", err, out))
 	}
 
-	_ = exec.Command("umount", "-l", filepath.Join(targetMount, "dev")).Run()
-	_ = exec.Command("umount", "-l", filepath.Join(targetMount, "proc")).Run()
-	_ = exec.Command("umount", "-l", filepath.Join(targetMount, "sys")).Run()
+	_ = execCommand("umount", "-l", filepath.Join(targetMount, "dev")).Run()
+	_ = execCommand("umount", "-l", filepath.Join(targetMount, "proc")).Run()
+	_ = execCommand("umount", "-l", filepath.Join(targetMount, "sys")).Run()
 
 	logFn("=> [ROOTFS DEPLOY 100%] Root filesystem successfully unpacked and synchronized.")
 	return nil
@@ -1024,12 +1024,12 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 		if isTargetActiveHostDisk && isBareMetal {
 			onUpdate(StepUpdate{StepName: "=> [ACTIVE ROOT DETECTED] Routing to autonomous offline USB staging media...", Done: false})
 
-			_ = exec.Command("udevadm", "settle", "--timeout=5").Run()
+			_ = execCommand("udevadm", "settle", "--timeout=5").Run()
 
-			usbStoragePart, _ := exec.Command("blkid", "-L", "ORCH_STORAGE").Output()
+			usbStoragePart, _ := execCommand("blkid", "-L", "ORCH_STORAGE").Output()
 			storageDev := strings.TrimSpace(string(usbStoragePart))
 
-			usbBootPart, _ := exec.Command("blkid", "-L", "ORCH_BOOT").Output()
+			usbBootPart, _ := execCommand("blkid", "-L", "ORCH_BOOT").Output()
 			bootDev := strings.TrimSpace(string(usbBootPart))
 
 			if storageDev == "" || bootDev == "" {
@@ -1057,21 +1057,21 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 			_ = fsRunner.MkdirAll(usbStorageDir, 0755)
 
 			// Clean up any other conflicting mounts on the storage partition to prevent path divergence
-			if mntOut, mErr := exec.Command("findmnt", "-n", "-o", "TARGET", storageDev).Output(); mErr == nil {
+			if mntOut, mErr := execCommand("findmnt", "-n", "-o", "TARGET", storageDev).Output(); mErr == nil {
 				for _, line := range strings.Split(strings.TrimSpace(string(mntOut)), "\n") {
 					target := strings.TrimSpace(line)
 					if target != "" && target != usbStorageDir {
-						_ = exec.Command("umount", "-l", target).Run()
+						_ = execCommand("umount", "-l", target).Run()
 					}
 				}
 			}
 
 			// Ensure storageDev is actively mounted at /mnt/orch_usb_storage
-			if err := exec.Command("mountpoint", "-q", usbStorageDir).Run(); err != nil {
-				_ = exec.Command("mount", storageDev, usbStorageDir).Run()
+			if err := execCommand("mountpoint", "-q", usbStorageDir).Run(); err != nil {
+				_ = execCommand("mount", storageDev, usbStorageDir).Run()
 			}
-			if err := exec.Command("mountpoint", "-q", usbStorageDir).Run(); err != nil {
-				_ = exec.Command("mount", "-L", "ORCH_STORAGE", usbStorageDir).Run()
+			if err := execCommand("mountpoint", "-q", usbStorageDir).Run(); err != nil {
+				_ = execCommand("mount", "-L", "ORCH_STORAGE", usbStorageDir).Run()
 			}
 
 			// Bug G: neither mount attempt above was ever checked for
@@ -1126,7 +1126,7 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 						journal.Fail(step, cpErr)
 						return fail("payload-staging", fmt.Errorf("staging payload to USB vault: %w", cpErr))
 					}
-					_ = exec.Command("sync").Run()
+					_ = execCommand("sync").Run()
 					onUpdate(StepUpdate{StepName: "=> [STORAGE VAULT] Payload synchronization complete and verified.", Done: false})
 				}
 			}
@@ -1147,7 +1147,7 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 			// while storageDev is already known, so transient_resize.sh's
 			// mount-retry loop can fall back to mounting by UUID (not just
 			// LABEL) if the label hasn't been scanned yet on reboot.
-			storageUUIDOut, _ := exec.Command("blkid", "-s", "UUID", "-o", "value", storageDev).Output()
+			storageUUIDOut, _ := execCommand("blkid", "-s", "UUID", "-o", "value", storageDev).Output()
 			storageUUID := strings.TrimSpace(string(storageUUIDOut))
 
 			workerScript := renderAutonomousInstallerScript(autonomousInstallerScriptParams{
@@ -1167,14 +1167,14 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 			scriptPath := filepath.Join(usbStorageDir, "transient_resize.sh")
 			writeErr := writeScriptSecurely(scriptPath, workerScript)
 			if writeErr != nil {
-				_ = exec.Command("mount", storageDev, usbStorageDir).Run()
+				_ = execCommand("mount", storageDev, usbStorageDir).Run()
 				writeErr = writeScriptSecurely(scriptPath, workerScript)
 			}
 			// transientScriptMode (0700) is set by writeScriptSecurely itself;
 			// re-asserting it here only protects against an already-existing
 			// file at scriptPath with looser permissions from a prior run.
 			_ = os.Chmod(scriptPath, transientScriptMode)
-			_ = exec.Command("sync").Run()
+			_ = execCommand("sync").Run()
 
 			// Strict hardware physical verification
 			if fi, sErr := os.Stat(scriptPath); sErr != nil || fi.Size() == 0 {
@@ -1200,10 +1200,10 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 			// boot entry pointing at a file that doesn't exist on an arm64
 			// host's USB stick, silently breaking the reboot-into-installer
 			// step even though the USB media itself was staged correctly.
-			_ = exec.Command("efibootmgr", "-c", "-d", usbDiskParent, "-p", usbBootNum, "-L", "ORCH_AUTONOMOUS_INSTALLER", "-l", autonomousUSBEFILoaderNVRAMPath(runtime.GOARCH)).Run()
+			_ = execCommand("efibootmgr", "-c", "-d", usbDiskParent, "-p", usbBootNum, "-L", "ORCH_AUTONOMOUS_INSTALLER", "-l", autonomousUSBEFILoaderNVRAMPath(runtime.GOARCH)).Run()
 
 			bootNum := ""
-			if out, err := exec.Command("efibootmgr").Output(); err == nil {
+			if out, err := execCommand("efibootmgr").Output(); err == nil {
 				lines := strings.Split(string(out), "\n")
 				for _, line := range lines {
 					if strings.Contains(line, "ORCH_AUTONOMOUS_INSTALLER") && strings.HasPrefix(line, "Boot") {
@@ -1225,12 +1225,12 @@ func RunProvision(ctx context.Context, req ProvisionRequest, grubDefaultPath str
 			}
 
 			if bootNum != "" {
-				_ = exec.Command("efibootmgr", "-n", bootNum).Run()
+				_ = execCommand("efibootmgr", "-n", bootNum).Run()
 				onUpdate(StepUpdate{StepName: fmt.Sprintf("=> [NVRAM ENGINE] BootNext locked to slot %s", bootNum), Done: false})
 			}
 
 			onUpdate(StepUpdate{StepName: "=> [SUCCESS] Autonomous offline staging prepared. Ready to reboot.", Done: true})
-			_ = exec.Command("sync").Run()
+			_ = execCommand("sync").Run()
 			journal.Commit(step)
 
 			_ = journal.Finalize()
@@ -1292,8 +1292,8 @@ deployPhase:
 	if !isWindows && !isMacOS {
 		testMount := "/mnt/orch_iso_probe"
 		_ = fsRunner.MkdirAll(testMount, 0755)
-		_ = exec.Command("umount", "-l", testMount).Run()
-		if _, err := exec.Command("mount", "-o", "loop,ro", streamResult.DestPath, testMount).CombinedOutput(); err == nil {
+		_ = execCommand("umount", "-l", testMount).Run()
+		if _, err := execCommand("mount", "-o", "loop,ro", streamResult.DestPath, testMount).CombinedOutput(); err == nil {
 			candidates := []string{
 				filepath.Join(testMount, "sources", "install.wim"),
 				filepath.Join(testMount, "sources", "install.esd"),
@@ -1306,7 +1306,7 @@ deployPhase:
 					break
 				}
 			}
-			_ = exec.Command("umount", "-l", testMount).Run()
+			_ = execCommand("umount", "-l", testMount).Run()
 			_ = fsRunner.Remove(testMount)
 		}
 	}
@@ -1357,10 +1357,10 @@ deployPhase:
 	var targetSizeBytes uint64
 
 	if req.TargetPartition != "" {
-		if uuidOut, uErr := exec.Command("blkid", "-s", "PARTUUID", "-o", "value", req.TargetPartition).Output(); uErr == nil {
+		if uuidOut, uErr := execCommand("blkid", "-s", "PARTUUID", "-o", "value", req.TargetPartition).Output(); uErr == nil {
 			targetPartUUID = strings.TrimSpace(string(uuidOut))
 		}
-		if fsOut, fErr := exec.Command("blkid", "-s", "TYPE", "-o", "value", req.TargetPartition).Output(); fErr == nil {
+		if fsOut, fErr := execCommand("blkid", "-s", "TYPE", "-o", "value", req.TargetPartition).Output(); fErr == nil {
 			targetFSType = strings.ToLower(strings.TrimSpace(string(fsOut)))
 		}
 		targetSizeBytes, _ = QueryBlockDeviceBytes(filepath.Base(req.TargetPartition))
@@ -1368,7 +1368,7 @@ deployPhase:
 
 	if req.HostPartNum != "" && req.TargetDiskPath != "" {
 		hostPartDev := JoinDiskAndPartition(req.TargetDiskPath, req.HostPartNum)
-		if uuidOut, uErr := exec.Command("blkid", "-s", "PARTUUID", "-o", "value", hostPartDev).Output(); uErr == nil {
+		if uuidOut, uErr := execCommand("blkid", "-s", "PARTUUID", "-o", "value", hostPartDev).Output(); uErr == nil {
 			shrunkPartUUID = strings.TrimSpace(string(uuidOut))
 		}
 	}

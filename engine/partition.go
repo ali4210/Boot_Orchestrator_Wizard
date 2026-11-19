@@ -432,7 +432,7 @@ func CarveHardwarePartitionAtBoundary(diskPath, fsType string, targetBytes uint6
 		// parted needs an interactive "Yes" piped to stdin to confirm shrinking a
 		// partition that overlaps the filesystem's former extent; the Runner
 		// interface doesn't model stdin, so this stays a direct exec.Command.
-		partedResizeCmd := exec.Command("parted", "---pretend-input-tty", diskPath, "resizepart", "1", fmt.Sprintf("%dGiB", newPart1GiB))
+		partedResizeCmd := execCommand("parted", "---pretend-input-tty", diskPath, "resizepart", "1", fmt.Sprintf("%dGiB", newPart1GiB))
 		partedResizeCmd.Stdin = strings.NewReader("Yes\n")
 		_ = partedResizeCmd.Run()
 
@@ -563,7 +563,7 @@ func ApplyShrink(plan *ShrinkPlan) error {
 func ShrinkPartitionNonInteractive(diskPath, partNum string, targetGiB uint64) error {
 	// Needs Stdin to confirm the resize; stays a direct exec.Command (see note
 	// on the Runner type).
-	partedCmd := exec.Command("parted", "---pretend-input-tty", diskPath, "resizepart", partNum, fmt.Sprintf("%dGiB", targetGiB))
+	partedCmd := execCommand("parted", "---pretend-input-tty", diskPath, "resizepart", partNum, fmt.Sprintf("%dGiB", targetGiB))
 	partedCmd.Stdin = strings.NewReader("Yes\n")
 
 	if out, err := partedCmd.CombinedOutput(); err != nil {
@@ -751,7 +751,7 @@ func writeDiskRegion(diskPath string, offset int64, data []byte) error {
 	}
 	// Needs Stdin to supply the data being written; stays a direct
 	// exec.Command (see note on the Runner type).
-	cmd := exec.Command("dd",
+	cmd := execCommand("dd",
 		fmt.Sprintf("of=%s", diskPath),
 		"bs=512",
 		fmt.Sprintf("seek=%d", offset/512),

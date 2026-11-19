@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -94,7 +93,7 @@ func ApplyDockerIsolation(plan *DockerIsolationPlan) (rollbackData []byte, err e
 	}
 
 	// 2. Stop Docker. Required — do not rsync a live data-root.
-	if out, err := exec.Command("systemctl", "stop", "docker").CombinedOutput(); err != nil {
+	if out, err := execCommand("systemctl", "stop", "docker").CombinedOutput(); err != nil {
 		return rollbackData, fmt.Errorf("failed to stop docker service (aborting before any data move): %w\n%s", err, out)
 	}
 
@@ -103,7 +102,7 @@ func ApplyDockerIsolation(plan *DockerIsolationPlan) (rollbackData []byte, err e
 		return rollbackData, fmt.Errorf("creating target root %s: %w", plan.TargetRoot, err)
 	}
 	rsyncArgs := []string{"-aHAX", "--info=progress2", strings.TrimRight(sourceRoot, "/") + "/", plan.TargetRoot + "/"}
-	if out, err := exec.Command("rsync", rsyncArgs...).CombinedOutput(); err != nil {
+	if out, err := execCommand("rsync", rsyncArgs...).CombinedOutput(); err != nil {
 		return rollbackData, fmt.Errorf("rsync of docker data-root failed (original data at %s is untouched): %w\n%s", sourceRoot, err, out)
 	}
 
@@ -129,7 +128,7 @@ func ApplyDockerIsolation(plan *DockerIsolationPlan) (rollbackData []byte, err e
 	}
 
 	// 5. Restart Docker on the new root.
-	if out, err := exec.Command("systemctl", "start", "docker").CombinedOutput(); err != nil {
+	if out, err := execCommand("systemctl", "start", "docker").CombinedOutput(); err != nil {
 		return rollbackData, fmt.Errorf("docker failed to start on new data-root %s — old data at %s is still intact, rollback recommended: %w\n%s", plan.TargetRoot, sourceRoot, err, out)
 	}
 
@@ -150,7 +149,7 @@ func RollbackDockerIsolation(rollbackData json.RawMessage) error {
 		return fmt.Errorf("corrupt rollback data: %w", err)
 	}
 
-	exec.Command("systemctl", "stop", "docker").CombinedOutput()
+	execCommand("systemctl", "stop", "docker").CombinedOutput()
 
 	if len(rb.OriginalDaemonJSON) > 0 {
 		if err := fsRunner.WriteFile(rb.DaemonJSONPath, rb.OriginalDaemonJSON, 0644); err != nil {
@@ -163,7 +162,7 @@ func RollbackDockerIsolation(rollbackData json.RawMessage) error {
 	// Data at MovedTo is intentionally left in place rather than deleted —
 	// deleting user data during a rollback is a bigger risk than leaving an
 	// orphaned directory behind for the user to clean up manually.
-	if out, err := exec.Command("systemctl", "start", "docker").CombinedOutput(); err != nil {
+	if out, err := execCommand("systemctl", "start", "docker").CombinedOutput(); err != nil {
 		return fmt.Errorf("docker failed to restart after rollback to %s: %w\n%s", rb.OriginalRoot, err, out)
 	}
 	return nil

@@ -16,7 +16,7 @@ func NewStorageEngine() StorageEngine {
 }
 
 func (e *DarwinStorageEngine) EnumerateStorage() ([]UnifiedPartition, error) {
-	cmd := exec.Command("diskutil", "list")
+	cmd := execCommand("diskutil", "list")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("running diskutil list: %w", err)
@@ -40,7 +40,7 @@ func (e *DarwinStorageEngine) EnumerateStorage() ([]UnifiedPartition, error) {
 		if len(fields) >= 5 && strings.Contains(fields[len(fields)-1], "disk") {
 			node := "/dev/" + fields[len(fields)-1]
 			
-			infoCmd := exec.Command("diskutil", "info", node)
+			infoCmd := execCommand("diskutil", "info", node)
 			infoOut, infoErr := infoCmd.Output()
 			if infoErr != nil {
 				continue
@@ -89,7 +89,7 @@ func (e *DarwinStorageEngine) DetectActiveRoot() (UnifiedPartition, error) {
 func (e *DarwinStorageEngine) ShrinkVolume(partitionID string, shrinkSizeBytes uint64, logFn func(string)) error {
 	logFn(fmt.Sprintf("=> [MACOS ENGINE] Resizing APFS Container %s...", partitionID))
 
-	infoCmd := exec.Command("diskutil", "info", partitionID)
+	infoCmd := execCommand("diskutil", "info", partitionID)
 	infoOut, err := infoCmd.Output()
 	if err != nil {
 		return fmt.Errorf("reading partition info: %w", err)
@@ -103,7 +103,7 @@ func (e *DarwinStorageEngine) ShrinkVolume(partitionID string, shrinkSizeBytes u
 	targetBytes := currSize - shrinkSizeBytes
 	targetGB := targetBytes / (1024 * 1024 * 1024)
 
-	cmd := exec.Command("diskutil", "apfs", "resizeContainer", partitionID, fmt.Sprintf("%dg", targetGB))
+	cmd := execCommand("diskutil", "apfs", "resizeContainer", partitionID, fmt.Sprintf("%dg", targetGB))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("resizing APFS container failed: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
@@ -126,7 +126,7 @@ func (e *DarwinStorageEngine) CreatePartition(diskID string, sizeBytes uint64, f
 		targetFormat = "ExFAT"
 	}
 
-	cmd := exec.Command("diskutil", "addPartition", diskID, targetFormat, label, fmt.Sprintf("%dG", sizeGB))
+	cmd := execCommand("diskutil", "addPartition", diskID, targetFormat, label, fmt.Sprintf("%dG", sizeGB))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("diskutil addPartition failed: %w (%s)", err, strings.TrimSpace(string(out)))
@@ -156,13 +156,13 @@ func (e *DarwinStorageEngine) CreatePartition(diskID string, sizeBytes uint64, f
 func (e *DarwinStorageEngine) MountVolume(devPath string, logFn func(string)) (string, func(), error) {
 	logFn(fmt.Sprintf("=> [MACOS ENGINE] Mounting %s...", devPath))
 
-	cmd := exec.Command("diskutil", "mount", devPath)
+	cmd := execCommand("diskutil", "mount", devPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", func() {}, fmt.Errorf("mounting %s failed: %w (%s)", devPath, err, strings.TrimSpace(string(out)))
 	}
 
-	infoCmd := exec.Command("diskutil", "info", devPath)
+	infoCmd := execCommand("diskutil", "info", devPath)
 	infoOut, _ := infoCmd.Output()
 	mp := parseDiskutilField(string(infoOut), "Mount Point:")
 	if mp == "" {
@@ -170,7 +170,7 @@ func (e *DarwinStorageEngine) MountVolume(devPath string, logFn func(string)) (s
 	}
 
 	cleanup := func() {
-		_ = exec.Command("diskutil", "unmount", devPath).Run()
+		_ = execCommand("diskutil", "unmount", devPath).Run()
 	}
 
 	return mp, cleanup, nil
@@ -180,9 +180,9 @@ func (e *DarwinStorageEngine) RegisterBootEntry(title string, efiRelativePath st
 	logFn(fmt.Sprintf("=> [MACOS BLESS] Registering EFI boot entry: %s...", title))
 
 	targetEFI := fmt.Sprintf("%ss%d", diskID, partNum)
-	_ = exec.Command("diskutil", "mount", targetEFI).Run()
+	_ = execCommand("diskutil", "mount", targetEFI).Run()
 	
-	infoCmd := exec.Command("diskutil", "info", targetEFI)
+	infoCmd := execCommand("diskutil", "info", targetEFI)
 	infoOut, _ := infoCmd.Output()
 	mountPoint := parseDiskutilField(string(infoOut), "Mount Point:")
 	if mountPoint == "" {
@@ -192,7 +192,7 @@ func (e *DarwinStorageEngine) RegisterBootEntry(title string, efiRelativePath st
 	fullEfiFile := mountPoint + "/" + strings.TrimPrefix(efiRelativePath, "\\")
 	fullEfiFile = strings.ReplaceAll(fullEfiFile, "\\", "/")
 
-	cmd := exec.Command("/usr/sbin/bless", "--mount", mountPoint, "--setBoot", "--file", fullEfiFile)
+	cmd := execCommand("/usr/sbin/bless", "--mount", mountPoint, "--setBoot", "--file", fullEfiFile)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("bless failed: %w (%s)", err, strings.TrimSpace(string(out)))
 	}

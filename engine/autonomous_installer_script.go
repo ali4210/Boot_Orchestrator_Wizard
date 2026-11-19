@@ -3,7 +3,6 @@ package engine
 import (
 	"fmt"
 	"os"
-	"os/exec"
 )
 
 // autonomousInstallerScriptParams holds everything renderAutonomousInstallerScript
@@ -246,7 +245,7 @@ func writeScriptSecurely(path, content string) error {
 // reboot, the USB environment's own fresh mount of ORCH_STORAGE would then
 // find no transient_resize.sh at all.
 func ensureUSBStorageMounted(dir string) error {
-	if err := exec.Command("mountpoint", "-q", dir).Run(); err != nil {
+	if err := execCommand("mountpoint", "-q", dir).Run(); err != nil {
 		return fmt.Errorf("%s is not a mounted filesystem", dir)
 	}
 	return nil

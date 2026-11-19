@@ -2,7 +2,6 @@ package engine
 
 import (
 	"fmt"
-	"os/exec"
 	"regexp"
 	"strings"
 )
@@ -91,7 +90,7 @@ func ValidPassword(password string) bool {
 // c.Password, suitable for `chpasswd -e`. The password is piped via Stdin,
 // never passed as a CLI argument, so it never appears in a process listing.
 func (c Credentials) HashPassword() (string, error) {
-	cmd := exec.Command("openssl", "passwd", "-6", "-stdin")
+	cmd := execCommand("openssl", "passwd", "-6", "-stdin")
 	cmd.Stdin = strings.NewReader(c.Password)
 	out, err := cmd.Output()
 	if err != nil {

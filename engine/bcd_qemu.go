@@ -69,7 +69,7 @@ func writeWindowsBCD(isoPath, targetDiskPath, targetPart string, logFn func(stri
 	// there is usually exactly one ESP, and it lives on whichever disk the
 	// system actually boots from, not on the Windows target disk. Resolve
 	// the real mounted host ESP device via findmnt instead.
-	espMountSrc, err := exec.Command("findmnt", "-n", "-o", "SOURCE", "/boot/efi").Output()
+	espMountSrc, err := execCommand("findmnt", "-n", "-o", "SOURCE", "/boot/efi").Output()
 	if err != nil || strings.TrimSpace(string(espMountSrc)) == "" {
 		return fmt.Errorf("could not resolve host ESP device from /boot/efi mount: %w", err)
 	}
@@ -92,11 +92,11 @@ func writeWindowsBCD(isoPath, targetDiskPath, targetPart string, logFn func(stri
 
 	isoMount := "/mnt/orch_bcd_iso_source"
 	_ = fsRunner.MkdirAll(isoMount, 0755)
-	_ = exec.Command("umount", "-l", isoMount).Run()
-	if out, err := exec.Command("mount", "-o", "loop,ro", isoPath, isoMount).CombinedOutput(); err != nil {
+	_ = execCommand("umount", "-l", isoMount).Run()
+	if out, err := execCommand("mount", "-o", "loop,ro", isoPath, isoMount).CombinedOutput(); err != nil {
 		return fmt.Errorf("mounting install ISO for WinPE staging: %w (%s)", err, string(out))
 	}
-	defer exec.Command("umount", "-l", isoMount).Run()
+	defer execCommand("umount", "-l", isoMount).Run()
 
 	efiBootBin := filepath.Join(isoMount, "efi", "boot", "bootx64.efi")
 	if _, err := os.Stat(efiBootBin); err != nil {
@@ -104,7 +104,7 @@ func writeWindowsBCD(isoPath, targetDiskPath, targetPart string, logFn func(stri
 	}
 
 	logFn("=> [BCD ENGINE] Staging writable WinPE boot tree from install media...")
-	if out, err := exec.Command("cp", "-r", isoMount+"/.", stageDir).CombinedOutput(); err != nil {
+	if out, err := execCommand("cp", "-r", isoMount+"/.", stageDir).CombinedOutput(); err != nil {
 		return fmt.Errorf("copying ISO tree to staging dir: %w (%s)", err, string(out))
 	}
 
@@ -112,7 +112,7 @@ func writeWindowsBCD(isoPath, targetDiskPath, targetPart string, logFn func(stri
 	if _, err := os.Stat(bootWimPath); err != nil {
 		return fmt.Errorf("sources/boot.wim not found on install media: %w", err)
 	}
-	_ = exec.Command("chmod", "+w", bootWimPath).Run()
+	_ = execCommand("chmod", "+w", bootWimPath).Run()
 
 	winpeIndex, err := findWinPEImageIndex(bootWimPath)
 	if err != nil {
@@ -120,7 +120,7 @@ func writeWindowsBCD(isoPath, targetDiskPath, targetPart string, logFn func(stri
 	}
 
 	varsPath := filepath.Join(stageDir, "OVMF_VARS.fd")
-	if out, err := exec.Command("cp", ovmfVarsTemplate, varsPath).CombinedOutput(); err != nil {
+	if out, err := execCommand("cp", ovmfVarsTemplate, varsPath).CombinedOutput(); err != nil {
 		return fmt.Errorf("copying OVMF vars template: %w (%s)", err, string(out))
 	}
 
@@ -171,7 +171,7 @@ func writeWindowsBCD(isoPath, targetDiskPath, targetPart string, logFn func(stri
 		return fmt.Errorf("injecting WinPE autorun script: %w", err)
 	}
 
-	cmd := exec.Command("qemu-system-x86_64", qemuArgs...)
+	cmd := execCommand("qemu-system-x86_64", qemuArgs...)
 
 	qemuOut, err := cmd.CombinedOutput()
 	if err != nil {
@@ -181,12 +181,12 @@ func writeWindowsBCD(isoPath, targetDiskPath, targetPart string, logFn func(stri
 	logFn("=> [BCD ENGINE] Verifying BCD store was written to host ESP...")
 	verifyMount := "/mnt/orch_bcd_verify"
 	_ = fsRunner.MkdirAll(verifyMount, 0755)
-	_ = exec.Command("umount", "-l", verifyMount).Run()
-	out, err := exec.Command("mount", espDev, verifyMount).CombinedOutput()
+	_ = execCommand("umount", "-l", verifyMount).Run()
+	out, err := execCommand("mount", espDev, verifyMount).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("mounting ESP %s for BCD verification: %w (%s)", espDev, err, string(out))
 	}
-	defer exec.Command("umount", "-l", verifyMount).Run()
+	defer execCommand("umount", "-l", verifyMount).Run()
 
 	bcdPath := filepath.Join(verifyMount, "EFI", "Microsoft", "Boot", "BCD")
 	if fi, statErr := os.Stat(bcdPath); statErr != nil || fi.Size() == 0 {
@@ -203,18 +203,18 @@ func ensureQEMUInstalled(logFn func(string)) error {
 	}
 	logFn("=> [BCD ENGINE] qemu-system-x86_64 missing. Installing via host package manager...")
 	if _, err := exec.LookPath("apt-get"); err == nil {
-		_ = exec.Command("apt-get", "update", "-y").Run()
-		if out, err := exec.Command("apt-get", "install", "-y", "qemu-system-x86", "ovmf").CombinedOutput(); err != nil {
+		_ = execCommand("apt-get", "update", "-y").Run()
+		if out, err := execCommand("apt-get", "install", "-y", "qemu-system-x86", "ovmf").CombinedOutput(); err != nil {
 			return fmt.Errorf("apt-get install qemu-system-x86 ovmf failed: %w (%s)", err, string(out))
 		}
 		return nil
 	} else if _, err := exec.LookPath("dnf"); err == nil {
-		if out, err := exec.Command("dnf", "install", "-y", "qemu-system-x86", "edk2-ovmf").CombinedOutput(); err != nil {
+		if out, err := execCommand("dnf", "install", "-y", "qemu-system-x86", "edk2-ovmf").CombinedOutput(); err != nil {
 			return fmt.Errorf("dnf install qemu/ovmf failed: %w (%s)", err, string(out))
 		}
 		return nil
 	} else if _, err := exec.LookPath("pacman"); err == nil {
-		if out, err := exec.Command("pacman", "-Sy", "--noconfirm", "qemu-system-x86", "edk2-ovmf").CombinedOutput(); err != nil {
+		if out, err := execCommand("pacman", "-Sy", "--noconfirm", "qemu-system-x86", "edk2-ovmf").CombinedOutput(); err != nil {
 			return fmt.Errorf("pacman install qemu/ovmf failed: %w (%s)", err, string(out))
 		}
 		return nil
@@ -300,7 +300,7 @@ wpeutil shutdown
 	}
 
 	idxStr := strconv.Itoa(imageIndex)
-	cmd := exec.Command("wimlib-imagex", "update", bootWimPath, idxStr,
+	cmd := execCommand("wimlib-imagex", "update", bootWimPath, idxStr,
 		"--command", "add "+winpeshlPath+" /Windows/System32/winpeshl.ini",
 		"--command", "add "+bcdfixPath+" /bcdfix.cmd",
 	)

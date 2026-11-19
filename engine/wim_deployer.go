@@ -31,7 +31,7 @@ func ListWimIndexes(wimPath string) ([]WimIndex, error) {
 }
 
 func listWimIndexesWimlib(wimPath string) ([]WimIndex, error) {
-	xmlOut, err := exec.Command("wimlib-imagex", "info", wimPath, "--extract-xml").CombinedOutput()
+	xmlOut, err := execCommand("wimlib-imagex", "info", wimPath, "--extract-xml").CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("wimlib-imagex info XML %s failed: %w\n%s", wimPath, err, string(xmlOut))
 	}
@@ -39,7 +39,7 @@ func listWimIndexesWimlib(wimPath string) ([]WimIndex, error) {
 }
 
 func listWimIndexesDism(wimPath string) ([]WimIndex, error) {
-	out, err := exec.Command("dism.exe", "/Get-WimInfo", "/WimFile:"+wimPath).CombinedOutput()
+	out, err := execCommand("dism.exe", "/Get-WimInfo", "/WimFile:"+wimPath).CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("dism /Get-WimInfo %s: %w\n%s", wimPath, err, string(out))
 	}
@@ -120,7 +120,7 @@ func ApplyWim(plan *ApplyWimPlan) error {
 
 	if runtime.GOOS == "windows" {
 		// Native Windows DISM execution
-		cmd := exec.Command("dism.exe",
+		cmd := execCommand("dism.exe",
 			"/Apply-Image",
 			"/ImageFile:"+plan.WimPath,
 			"/Index:"+strconv.Itoa(plan.Index),
@@ -139,7 +139,7 @@ func ApplyWim(plan *ApplyWimPlan) error {
 		}
 
 		// 1. Format target partition as quick NTFS
-		if out, err := exec.Command("mkfs.ntfs", "-Q", "-F", plan.TargetPartition).CombinedOutput(); err != nil {
+		if out, err := execCommand("mkfs.ntfs", "-Q", "-F", plan.TargetPartition).CombinedOutput(); err != nil {
 			return fmt.Errorf("formatting %s as NTFS failed: %w\n%s", plan.TargetPartition, err, string(out))
 		}
 
@@ -151,23 +151,23 @@ func ApplyWim(plan *ApplyWimPlan) error {
 		defer fsRunner.RemoveAll(mountPoint)
 
 		// 3. Mount NTFS target partition
-		if out, err := exec.Command("mount", "-t", "ntfs-3g", plan.TargetPartition, mountPoint).CombinedOutput(); err != nil {
+		if out, err := execCommand("mount", "-t", "ntfs-3g", plan.TargetPartition, mountPoint).CombinedOutput(); err != nil {
 			// Fallback to standard mount if ntfs-3g alias is standard
-			if fbOut, fbErr := exec.Command("mount", plan.TargetPartition, mountPoint).CombinedOutput(); fbErr != nil {
+			if fbOut, fbErr := execCommand("mount", plan.TargetPartition, mountPoint).CombinedOutput(); fbErr != nil {
 				return fmt.Errorf("mounting NTFS partition failed: %s (fallback: %s: %w)", string(out), string(fbOut), fbErr)
 			}
 		}
 
 		defer func() {
-			_ = exec.Command("sync").Run()
-			if out, err := exec.Command("umount", mountPoint).CombinedOutput(); err != nil {
-				_ = exec.Command("umount", "-l", mountPoint).Run()
+			_ = execCommand("sync").Run()
+			if out, err := execCommand("umount", mountPoint).CombinedOutput(); err != nil {
+				_ = execCommand("umount", "-l", mountPoint).Run()
 				_ = out
 			}
 		}()
 
 		// 4. Apply chosen WIM index onto mounted NTFS target
-		applyCmd := exec.Command("wimlib-imagex", "apply", plan.WimPath, strconv.Itoa(plan.Index), mountPoint)
+		applyCmd := execCommand("wimlib-imagex", "apply", plan.WimPath, strconv.Itoa(plan.Index), mountPoint)
 		if out, err := applyCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("wimlib-imagex extraction to %s failed: %w\n%s", mountPoint, err, string(out))
 		}

@@ -101,7 +101,7 @@ func DiscoverSecondaryOSes() ([]DetectedGuestOS, error) {
 	}
 
 	// 2. Discover via os-prober across all connected physical disks
-	out, err := exec.Command("os-prober").Output()
+	out, err := execCommand("os-prober").Output()
 	if err == nil && len(out) > 0 {
 		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 		for _, line := range lines {
@@ -136,7 +136,7 @@ func DiscoverSecondaryOSes() ([]DetectedGuestOS, error) {
 	}
 
 	// 3. Comprehensive Block Scan across all disks
-	lsblkOut, err := exec.Command("lsblk", "-rno", "NAME,TYPE,FSTYPE,LABEL,MOUNTPOINT").Output()
+	lsblkOut, err := execCommand("lsblk", "-rno", "NAME,TYPE,FSTYPE,LABEL,MOUNTPOINT").Output()
 	if err == nil {
 		lines := strings.Split(strings.TrimSpace(string(lsblkOut)), "\n")
 		for _, line := range lines {
@@ -311,7 +311,7 @@ var grubDropinPaths = []string{
 	"/etc/default/grub.d/50-dualboot-menu.cfg",
 	"/etc/default/grub.d/99-orchestrator-prober.cfg",
 }
-var updateGrubFunc = func() error { return exec.Command("update-grub").Run() }
+var updateGrubFunc = func() error { return execCommand("update-grub").Run() }
 var fstabPath = "/etc/fstab"
 
 // findActiveESPMountFunc and efibootmgrRemoveFunc complete that isolation
@@ -324,7 +324,7 @@ var fstabPath = "/etc/fstab"
 var findActiveESPMountFunc = func() string {
 	candidates := []string{"/boot/efi", "/efi", "/boot"}
 	for _, c := range candidates {
-		out, err := exec.Command("findmnt", "-n", "-o", "FSTYPE", c).Output()
+		out, err := execCommand("findmnt", "-n", "-o", "FSTYPE", c).Output()
 		if err == nil {
 			fstype := strings.TrimSpace(string(out))
 			if fstype == "vfat" || fstype == "msdos" {
@@ -336,7 +336,7 @@ var findActiveESPMountFunc = func() string {
 }
 
 var efibootmgrRemoveFunc = func(bootNum string) error {
-	return exec.Command("efibootmgr", "-b", bootNum, "-B").Run()
+	return execCommand("efibootmgr", "-b", bootNum, "-B").Run()
 }
 
 func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn func(string), progressFn func(step string, percent float64)) error {
@@ -385,11 +385,11 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 
 	// 1. Force unmount target filesystem
 	logFn(fmt.Sprintf("=> Force unmounting target filesystem on %s...", targetDev))
-	_ = exec.Command("umount", "-f", "-l", targetDev).Run()
+	_ = execCommand("umount", "-f", "-l", targetDev).Run()
 
 	// 2. Wipe filesystem metadata & signatures
 	logFn(fmt.Sprintf("=> Sanitizing signatures and unlocking %s...", targetDev))
-	_ = exec.Command("wipefs", "-a", "-f", targetDev).Run()
+	_ = execCommand("wipefs", "-a", "-f", targetDev).Run()
 
 	// 3. UEFI NVRAM Cleanup
 	if isUEFIModeFunc() && p.EFIBootEntryNum != "" {
@@ -416,11 +416,11 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 	// 5. Branch Execution: Slice Preservation vs Full Eradication & Host Expansion
 	if keepSlice {
 		progressFn(fmt.Sprintf("=> [REVERT 60%%] Formatting %s as clean staging slice...", targetDev), 0.60)
-		out, err := exec.Command("mkfs.ext4", "-F", "-q", "-L", "STAGING_SLICE", targetDev).CombinedOutput()
+		out, err := execCommand("mkfs.ext4", "-F", "-q", "-L", "STAGING_SLICE", targetDev).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("formatting clean partition slice: %s: %w", string(out), err)
 		}
-		_ = exec.Command("sync").Run()
+		_ = execCommand("sync").Run()
 		logFn(fmt.Sprintf("=> Partition %s wiped and sanitized. Ready for next OS deployment.", targetDev))
 
 	} else {
@@ -428,25 +428,25 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 		logFn(fmt.Sprintf("=> Removing partition %s from GPT table on %s...", p.PartitionNum, p.DiskDevice))
 
 		// Fix backup GPT header to end of disk so parted/sgdisk will not fail
-		_ = exec.Command("sgdisk", "-e", p.DiskDevice).Run()
+		_ = execCommand("sgdisk", "-e", p.DiskDevice).Run()
 
 		// Delete partition dynamically via sgdisk (-d)
-		delCmd := exec.Command("sgdisk", "-d", p.PartitionNum, p.DiskDevice)
+		delCmd := execCommand("sgdisk", "-d", p.PartitionNum, p.DiskDevice)
 		if out, err := delCmd.CombinedOutput(); err != nil {
 			logFn(fmt.Sprintf("=> sgdisk delete failed: %s; running parted fallback...", strings.TrimSpace(string(out))))
-			if out2, err2 := exec.Command("parted", "-s", p.DiskDevice, "rm", p.PartitionNum).CombinedOutput(); err2 != nil {
+			if out2, err2 := execCommand("parted", "-s", p.DiskDevice, "rm", p.PartitionNum).CombinedOutput(); err2 != nil {
 				return fmt.Errorf("failed to delete partition %s on %s: sgdisk: %s | parted: %s",
 					p.PartitionNum, p.DiskDevice, strings.TrimSpace(string(out)), strings.TrimSpace(string(out2)))
 			}
 		}
 
-		_ = exec.Command("sync").Run()
+		_ = execCommand("sync").Run()
 
 		// Tell the kernel directly to drop this partition from memory even if the root disk is busy
-		_ = exec.Command("delpart", p.DiskDevice, p.PartitionNum).Run()
-		_ = exec.Command("partx", "-d", "--nr", p.PartitionNum, p.DiskDevice).Run()
-		_ = exec.Command("partprobe", p.DiskDevice).Run()
-		_ = exec.Command("udevadm", "settle", "--timeout=5").Run()
+		_ = execCommand("delpart", p.DiskDevice, p.PartitionNum).Run()
+		_ = execCommand("partx", "-d", "--nr", p.PartitionNum, p.DiskDevice).Run()
+		_ = execCommand("partprobe", p.DiskDevice).Run()
+		_ = execCommand("udevadm", "settle", "--timeout=5").Run()
 		time.Sleep(300 * time.Millisecond)
 
 		if p.HostPartNum != "" {
@@ -474,7 +474,7 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 			growWorked := false
 			if !leaveSwapRoom {
 				if _, err := exec.LookPath("growpart"); err == nil {
-					if out, gErr := exec.Command("growpart", p.DiskDevice, p.HostPartNum).CombinedOutput(); gErr == nil {
+					if out, gErr := execCommand("growpart", p.DiskDevice, p.HostPartNum).CombinedOutput(); gErr == nil {
 						growWorked = true
 					} else {
 						logFn(fmt.Sprintf("=> growpart note: %s", strings.TrimSpace(string(out))))
@@ -483,28 +483,28 @@ func ExecuteDecommissionWithOptions(p RealRevertParams, keepSlice bool, logFn fu
 			}
 
 			if !growWorked {
-				if out, err := exec.Command("parted", "-s", p.DiskDevice, "resizepart", p.HostPartNum, hostResizeEnd).CombinedOutput(); err != nil {
+				if out, err := execCommand("parted", "-s", p.DiskDevice, "resizepart", p.HostPartNum, hostResizeEnd).CombinedOutput(); err != nil {
 					logFn(fmt.Sprintf("=> parted resizepart failed: %s", strings.TrimSpace(string(out))))
 				}
 			}
 
-			_ = exec.Command("partx", "-u", "--nr", p.HostPartNum, p.DiskDevice).Run()
-			_ = exec.Command("udevadm", "settle", "--timeout=5").Run()
+			_ = execCommand("partx", "-u", "--nr", p.HostPartNum, p.DiskDevice).Run()
+			_ = execCommand("udevadm", "settle", "--timeout=5").Run()
 			time.Sleep(300 * time.Millisecond)
 
 			restoredDev := JoinDiskAndPartition(p.DiskDevice, p.HostPartNum)
 			logFn(fmt.Sprintf("=> Resizing filesystem online on %s...", restoredDev))
 
-			fsTypeOut, _ := exec.Command("blkid", "-s", "TYPE", "-o", "value", restoredDev).Output()
+			fsTypeOut, _ := execCommand("blkid", "-s", "TYPE", "-o", "value", restoredDev).Output()
 			fsType := strings.ToLower(strings.TrimSpace(string(fsTypeOut)))
 
 			switch fsType {
 			case "ntfs":
-				_ = exec.Command("ntfsresize", "-f", "-b", restoredDev).Run()
+				_ = execCommand("ntfsresize", "-f", "-b", restoredDev).Run()
 			case "btrfs":
-				_ = exec.Command("btrfs", "filesystem", "resize", "max", restoredDev).Run()
+				_ = execCommand("btrfs", "filesystem", "resize", "max", restoredDev).Run()
 			default: // ext4
-				cmdResizeFS := exec.Command("resize2fs", restoredDev)
+				cmdResizeFS := execCommand("resize2fs", restoredDev)
 				if out, err := cmdResizeFS.CombinedOutput(); err != nil {
 					logFn(fmt.Sprintf("=> resize2fs note: %s", strings.TrimSpace(string(out))))
 				} else {
@@ -534,7 +534,7 @@ exec tail -n +3 $0
 # the 'exec tail' line above.
 `
 	_ = fsRunner.WriteFile(grubCustomPath, []byte(defaultCustomGrub), 0755)
-	_ = exec.Command("chmod", "+x", grubCustomPath).Run()
+	_ = execCommand("chmod", "+x", grubCustomPath).Run()
 
 	logFn("=> Refreshing host GRUB configuration...")
 	if err := updateGrubFunc(); err != nil {
@@ -582,7 +582,7 @@ exec tail -n +3 $0
 // considers valid (avoiding the GPT-backup-area off-by-a-few-sectors
 // mismatch a manual "total sectors - N" calculation can produce).
 func trailingFreeSectorRange(diskDevice string) (startSector, endSector int64, err error) {
-	out, err := exec.Command("parted", "-s", "-m", diskDevice, "unit", "s", "print", "free").Output()
+	out, err := execCommand("parted", "-s", "-m", diskDevice, "unit", "s", "print", "free").Output()
 	if err != nil {
 		return 0, 0, err
 	}
@@ -627,7 +627,7 @@ func hostResizeEndLeavingSwap(diskDevice string, swapSizeBytes int64) (string, b
 	if freeErr != nil {
 		return "", false
 	}
-	sectorSizeOut, err := exec.Command("blockdev", "--getss", diskDevice).Output()
+	sectorSizeOut, err := execCommand("blockdev", "--getss", diskDevice).Output()
 	if err != nil {
 		return "", false
 	}
@@ -667,7 +667,7 @@ func recreateSwapPartition(diskDevice, hostPartNum string, swapSizeBytes int64, 
 	if freeErr != nil {
 		return fmt.Errorf("finding free space on %s: %w", diskDevice, freeErr)
 	}
-	sectorSizeOut, err := exec.Command("blockdev", "--getss", diskDevice).Output()
+	sectorSizeOut, err := execCommand("blockdev", "--getss", diskDevice).Output()
 	if err != nil {
 		return fmt.Errorf("reading sector size of %s: %w", diskDevice, err)
 	}
@@ -685,25 +685,25 @@ func recreateSwapPartition(diskDevice, hostPartNum string, swapSizeBytes int64, 
 	}
 	newSwapPartNum := strconv.Itoa(hostPartNumInt + 1)
 
-	if out, err := exec.Command("parted", "-s", "-a", "none", diskDevice, "mkpart", "primary", "linux-swap",
+	if out, err := execCommand("parted", "-s", "-a", "none", diskDevice, "mkpart", "primary", "linux-swap",
 		fmt.Sprintf("%ds", startSector), fmt.Sprintf("%ds", endSector)).CombinedOutput(); err != nil {
 		return fmt.Errorf("creating swap partition: %s: %w", strings.TrimSpace(string(out)), err)
 	}
-	_ = exec.Command("partprobe", diskDevice).Run()
-	_ = exec.Command("udevadm", "settle", "--timeout=5").Run()
+	_ = execCommand("partprobe", diskDevice).Run()
+	_ = execCommand("udevadm", "settle", "--timeout=5").Run()
 	time.Sleep(300 * time.Millisecond)
 
 	if strings.TrimSpace(originalPartUUID) != "" {
-		if out, err := exec.Command("sgdisk", "-u", newSwapPartNum+":"+strings.TrimSpace(originalPartUUID), diskDevice).CombinedOutput(); err != nil {
+		if out, err := execCommand("sgdisk", "-u", newSwapPartNum+":"+strings.TrimSpace(originalPartUUID), diskDevice).CombinedOutput(); err != nil {
 			logFn(fmt.Sprintf("=> [WARNING] could not restore original swap PARTUUID: %s", strings.TrimSpace(string(out))))
 		}
-		_ = exec.Command("partprobe", diskDevice).Run()
-		_ = exec.Command("udevadm", "settle", "--timeout=5").Run()
+		_ = execCommand("partprobe", diskDevice).Run()
+		_ = execCommand("udevadm", "settle", "--timeout=5").Run()
 		time.Sleep(300 * time.Millisecond)
 	}
 
 	swapDev := JoinDiskAndPartition(diskDevice, newSwapPartNum)
-	if out, err := exec.Command("mkswap", swapDev).CombinedOutput(); err != nil {
+	if out, err := execCommand("mkswap", swapDev).CombinedOutput(); err != nil {
 		return fmt.Errorf("mkswap %s: %s: %w", swapDev, strings.TrimSpace(string(out)), err)
 	}
 	logFn(fmt.Sprintf("=> Recreated swap partition %s and formatted it with mkswap.", swapDev))
@@ -807,13 +807,13 @@ func cleanDanglingFstabEntries(path string) (changed bool, removedSpecs []string
 func fstabDeviceExists(spec string) bool {
 	switch {
 	case strings.HasPrefix(spec, "UUID="):
-		out, err := exec.Command("blkid", "-U", strings.TrimPrefix(spec, "UUID=")).Output()
+		out, err := execCommand("blkid", "-U", strings.TrimPrefix(spec, "UUID=")).Output()
 		return err == nil && strings.TrimSpace(string(out)) != ""
 	case strings.HasPrefix(spec, "PARTUUID="):
-		out, err := exec.Command("blkid", "-t", "PARTUUID="+strings.TrimPrefix(spec, "PARTUUID="), "-o", "device").Output()
+		out, err := execCommand("blkid", "-t", "PARTUUID="+strings.TrimPrefix(spec, "PARTUUID="), "-o", "device").Output()
 		return err == nil && strings.TrimSpace(string(out)) != ""
 	case strings.HasPrefix(spec, "LABEL="):
-		out, err := exec.Command("blkid", "-L", strings.TrimPrefix(spec, "LABEL=")).Output()
+		out, err := execCommand("blkid", "-L", strings.TrimPrefix(spec, "LABEL=")).Output()
 		return err == nil && strings.TrimSpace(string(out)) != ""
 	case strings.HasPrefix(spec, "/dev/"):
 		_, statErr := os.Stat(spec)
@@ -830,7 +830,7 @@ func resolveDeviceByPartUUID(partUUID string) (string, error) {
 	if partUUID == "" {
 		return "", fmt.Errorf("no partition UUID recorded — cannot safely resolve device")
 	}
-	out, err := exec.Command("blkid", "-t", "PARTUUID="+partUUID, "-o", "device").Output()
+	out, err := execCommand("blkid", "-t", "PARTUUID="+partUUID, "-o", "device").Output()
 	if err != nil || strings.TrimSpace(string(out)) == "" {
 		return "", fmt.Errorf("no live partition currently has PARTUUID %s (drive may be unplugged, or already reverted)", partUUID)
 	}
@@ -850,7 +850,7 @@ func verifyLinuxTargetBeforeDestruction(devicePath, expectedFSType string, expec
 		return nil
 	}
 	if expectedFSType != "" {
-		out, err := exec.Command("blkid", "-s", "TYPE", "-o", "value", devicePath).Output()
+		out, err := execCommand("blkid", "-s", "TYPE", "-o", "value", devicePath).Output()
 		if err == nil {
 			actual := strings.ToLower(strings.TrimSpace(string(out)))
 			if actual != "" && actual != strings.ToLower(expectedFSType) {

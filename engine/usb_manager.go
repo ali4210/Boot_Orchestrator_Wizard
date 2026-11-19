@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"runtime"
@@ -109,7 +108,7 @@ func QueryBlockDeviceBytes(devName string) (uint64, error) {
 }
 
 func ProbeRemovableTargets() ([]USBTargetDevice, error) {
-	out, err := exec.Command("lsblk", "-J", "-o", "NAME,SIZE,TRAN,MOUNTPOINT,FSTYPE,TYPE,RM,VENDOR,MODEL").Output()
+	out, err := execCommand("lsblk", "-J", "-o", "NAME,SIZE,TRAN,MOUNTPOINT,FSTYPE,TYPE,RM,VENDOR,MODEL").Output()
 	if err != nil {
 		return nil, fmt.Errorf("lsblk target probe failed: %w", err)
 	}
@@ -174,51 +173,51 @@ func PrepareAutonomousUSBDisk(targetDev USBTargetDevice, logFn func(string)) (*U
 	storageEndMB := storageBytes / (1024 * 1024)
 
 	logFn("=> [USB PREPARE] Unmounting existing partitions on " + diskPath)
-	_ = exec.Command("bash", "-c", fmt.Sprintf("umount -l %s* 2>/dev/null || true", diskPath)).Run()
+	_ = execCommand("bash", "-c", fmt.Sprintf("umount -l %s* 2>/dev/null || true", diskPath)).Run()
 
 	logFn("=> [USB PREPARE] Purging stale filesystem signatures...")
-	_ = exec.Command("wipefs", "-a", "-f", diskPath).Run()
+	_ = execCommand("wipefs", "-a", "-f", diskPath).Run()
 
 	logFn("=> [USB PREPARE] Writing clean GPT partition table...")
-	if out, err := exec.Command("parted", "-s", diskPath, "mklabel", "gpt").CombinedOutput(); err != nil {
+	if out, err := execCommand("parted", "-s", diskPath, "mklabel", "gpt").CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("writing GPT label to %s: %w (%s)", diskPath, err, string(out))
 	}
 
 	logFn(fmt.Sprintf("=> [USB PREPARE] Carving Partition 1 [ORCH_STORAGE] (1MiB -> %dMiB)...", storageEndMB))
-	if out, err := exec.Command("parted", "-s", diskPath, "mkpart", "ORCH_STORAGE", "ext4", "1MiB", fmt.Sprintf("%dMiB", storageEndMB)).CombinedOutput(); err != nil {
+	if out, err := execCommand("parted", "-s", diskPath, "mkpart", "ORCH_STORAGE", "ext4", "1MiB", fmt.Sprintf("%dMiB", storageEndMB)).CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("creating storage partition: %w (%s)", err, string(out))
 	}
 
 	logFn("=> [USB PREPARE] Carving Partition 2 [ORCH_BOOT] (FAT32 Live ESP)...")
-	if out, err := exec.Command("parted", "-s", diskPath, "mkpart", "ORCH_BOOT", "fat32", fmt.Sprintf("%dMiB", storageEndMB), "100%").CombinedOutput(); err != nil {
+	if out, err := execCommand("parted", "-s", diskPath, "mkpart", "ORCH_BOOT", "fat32", fmt.Sprintf("%dMiB", storageEndMB), "100%").CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("creating boot partition: %w (%s)", err, string(out))
 	}
 
-	_ = exec.Command("parted", "-s", diskPath, "set", "2", "boot", "on").Run()
-	_ = exec.Command("parted", "-s", diskPath, "set", "2", "esp", "on").Run()
-	_ = exec.Command("partprobe", diskPath).Run()
-	_ = exec.Command("udevadm", "settle", "--timeout=10").Run()
+	_ = execCommand("parted", "-s", diskPath, "set", "2", "boot", "on").Run()
+	_ = execCommand("parted", "-s", diskPath, "set", "2", "esp", "on").Run()
+	_ = execCommand("partprobe", diskPath).Run()
+	_ = execCommand("udevadm", "settle", "--timeout=10").Run()
 	time.Sleep(1 * time.Second)
 
 	part1 := JoinDiskAndPartition(diskPath, "1")
 	part2 := JoinDiskAndPartition(diskPath, "2")
 
 	logFn("=> [USB PREPARE] Formatting Partition 1 as ext4 [ORCH_STORAGE]...")
-	if out, err := exec.Command("mkfs.ext4", "-F", "-q", "-L", "ORCH_STORAGE", part1).CombinedOutput(); err != nil {
+	if out, err := execCommand("mkfs.ext4", "-F", "-q", "-L", "ORCH_STORAGE", part1).CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("formatting ext4 storage partition %s: %w (%s)", part1, err, string(out))
 	}
 
 	logFn("=> [USB PREPARE] Formatting Partition 2 as FAT32 [ORCH_BOOT]...")
-	if out, err := exec.Command("mkfs.vfat", "-F32", "-n", "ORCH_BOOT", part2).CombinedOutput(); err != nil {
+	if out, err := execCommand("mkfs.vfat", "-F32", "-n", "ORCH_BOOT", part2).CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("formatting FAT32 boot partition %s: %w (%s)", part2, err, string(out))
 	}
 
 	mountDir := "/mnt/orch_usb_storage"
 	_ = fsRunner.MkdirAll(mountDir, 0755)
-	_ = exec.Command("umount", "-l", mountDir).Run()
+	_ = execCommand("umount", "-l", mountDir).Run()
 
 	logFn("=> [USB PREPARE] Mounting storage vault at " + mountDir)
-	if out, err := exec.Command("mount", part1, mountDir).CombinedOutput(); err != nil {
+	if out, err := execCommand("mount", part1, mountDir).CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("mounting storage partition %s to %s: %w (%s)", part1, mountDir, err, string(out))
 	}
 
@@ -238,15 +237,15 @@ func ArmAutonomousUSBBootloader(bootPart, isoPayloadPath, targetDisk string, log
 
 	bootMount := "/mnt/orch_usb_boot"
 	_ = fsRunner.MkdirAll(bootMount, 0755)
-	_ = exec.Command("umount", "-l", bootMount).Run()
+	_ = execCommand("umount", "-l", bootMount).Run()
 
 	logFn("=> [UNIVERSAL EFI] Mounting ORCH_BOOT at " + bootMount + "...")
-	if out, err := exec.Command("mount", bootPart, bootMount).CombinedOutput(); err != nil {
+	if out, err := execCommand("mount", bootPart, bootMount).CombinedOutput(); err != nil {
 		return fmt.Errorf("mounting boot partition %s: %w (%s)", bootPart, err, string(out))
 	}
 	defer func() {
-		_ = exec.Command("sync").Run()
-		_ = exec.Command("umount", "-l", bootMount).Run()
+		_ = execCommand("sync").Run()
+		_ = execCommand("umount", "-l", bootMount).Run()
 	}()
 
 	efiBootDir := filepath.Join(bootMount, "EFI", "BOOT")
@@ -313,7 +312,7 @@ normal
 			"normal", "configfile", "echo", "test", "reboot",
 			"linux", "boot", "loopback", "iso9660",
 		}
-		if out, err := exec.Command("grub-mkimage", mkimageArgs...).CombinedOutput(); err == nil {
+		if out, err := execCommand("grub-mkimage", mkimageArgs...).CombinedOutput(); err == nil {
 			if sFi, sErr := os.Stat(targetShim); sErr == nil && sFi.Size() > 0 {
 				builtMonolithic = true
 				logFn(fmt.Sprintf("=> [UNIVERSAL EFI] Monolithic %s compiled successfully (%d KB).", shimName, sFi.Size()/1024))
@@ -359,7 +358,7 @@ normal
 		}
 	}
 
-	_ = exec.Command("sync").Run()
+	_ = execCommand("sync").Run()
 
 	fi, err := os.Stat(targetShim)
 	if err != nil || fi.Size() == 0 {
@@ -524,7 +523,7 @@ func DownloadPayloadToUSB(targetDev USBTargetDevice, imageURL string, progressFn
 		}
 		mountPoint = tmpDir
 
-		mountCmd := exec.Command("mount", targetDev.DevPath, mountPoint)
+		mountCmd := execCommand("mount", targetDev.DevPath, mountPoint)
 		if out, err := mountCmd.CombinedOutput(); err != nil {
 			_ = fsRunner.Remove(mountPoint)
 			return fmt.Errorf("mounting usb partition %s: %w\n%s", targetDev.DevPath, err, string(out))
@@ -533,9 +532,9 @@ func DownloadPayloadToUSB(targetDev USBTargetDevice, imageURL string, progressFn
 	}
 
 	defer func() {
-		_ = exec.Command("sync").Run()
+		_ = execCommand("sync").Run()
 		if autoMounted {
-			_ = exec.Command("umount", "-l", mountPoint).Run()
+			_ = execCommand("umount", "-l", mountPoint).Run()
 			_ = fsRunner.Remove(mountPoint)
 		}
 	}()
@@ -761,7 +760,7 @@ func ProbeUSBPayloads() ([]USBPayload, error) {
 		}
 	}
 
-	out, err := exec.Command("lsblk", "-J", "-o", "NAME,SIZE,TRAN,MOUNTPOINT,FSTYPE,TYPE,RM").Output()
+	out, err := execCommand("lsblk", "-J", "-o", "NAME,SIZE,TRAN,MOUNTPOINT,FSTYPE,TYPE,RM").Output()
 	if err == nil {
 		var data usbLsblkResponse
 		if jsonErr := json.Unmarshal(out, &data); jsonErr == nil {
@@ -786,7 +785,7 @@ func ProbeUSBPayloads() ([]USBPayload, error) {
 								_ = fsRunner.MkdirAll(targetDir, 0755)
 							}
 
-							_ = exec.Command("mount", devPath, targetDir).Run()
+							_ = execCommand("mount", devPath, targetDir).Run()
 
 							if isMounted(targetDir) {
 								mountPath = targetDir
@@ -851,7 +850,7 @@ func CleanAutoMounts(payloads []USBPayload) {
 			continue
 		}
 		if p.WasAutoMount && p.MountPoint != "" {
-			_ = exec.Command("umount", "-l", p.MountPoint).Run()
+			_ = execCommand("umount", "-l", p.MountPoint).Run()
 			_ = fsRunner.Remove(p.MountPoint)
 		}
 	}
@@ -883,7 +882,7 @@ func PurgeIntermediatePayloads(storageMountPath string) error {
 		}
 	}
 
-	_ = exec.Command("sync").Run()
+	_ = execCommand("sync").Run()
 	return nil
 }
 
@@ -892,11 +891,11 @@ func FactoryResetUSB(diskPath, fsType string) error {
 		return fmt.Errorf("invalid disk path provided for factory reset")
 	}
 
-	_ = exec.Command("bash", "-c", fmt.Sprintf("umount -l %s* 2>/dev/null || true", diskPath)).Run()
-	_ = exec.Command("wipefs", "-a", "-f", diskPath).Run()
+	_ = execCommand("bash", "-c", fmt.Sprintf("umount -l %s* 2>/dev/null || true", diskPath)).Run()
+	_ = execCommand("wipefs", "-a", "-f", diskPath).Run()
 
-	if out, err := exec.Command("parted", "-s", diskPath, "mklabel", "msdos").CombinedOutput(); err != nil {
-		if outGpt, gptErr := exec.Command("parted", "-s", diskPath, "mklabel", "gpt").CombinedOutput(); gptErr != nil {
+	if out, err := execCommand("parted", "-s", diskPath, "mklabel", "msdos").CombinedOutput(); err != nil {
+		if outGpt, gptErr := execCommand("parted", "-s", diskPath, "mklabel", "gpt").CombinedOutput(); gptErr != nil {
 			return fmt.Errorf("relabeling drive failed: %w (%s | %s)", err, string(out), string(outGpt))
 		}
 	}
@@ -906,33 +905,33 @@ func FactoryResetUSB(diskPath, fsType string) error {
 		partType = "fat32"
 	}
 
-	if out, err := exec.Command("parted", "-s", diskPath, "mkpart", "primary", partType, "1MiB", "100%").CombinedOutput(); err != nil {
+	if out, err := execCommand("parted", "-s", diskPath, "mkpart", "primary", partType, "1MiB", "100%").CombinedOutput(); err != nil {
 		return fmt.Errorf("creating primary partition: %w (%s)", err, string(out))
 	}
 
-	_ = exec.Command("partprobe", diskPath).Run()
-	_ = exec.Command("udevadm", "settle", "--timeout=10").Run()
+	_ = execCommand("partprobe", diskPath).Run()
+	_ = execCommand("udevadm", "settle", "--timeout=10").Run()
 	time.Sleep(1 * time.Second)
 
 	part1 := JoinDiskAndPartition(diskPath, "1")
 
 	switch strings.ToLower(fsType) {
 	case "ntfs":
-		if out, err := exec.Command("mkfs.ntfs", "-f", "-L", "USB_DATA", part1).CombinedOutput(); err != nil {
-			if outEx, errEx := exec.Command("mkfs.exfat", "-n", "USB_DATA", part1).CombinedOutput(); errEx != nil {
+		if out, err := execCommand("mkfs.ntfs", "-f", "-L", "USB_DATA", part1).CombinedOutput(); err != nil {
+			if outEx, errEx := execCommand("mkfs.exfat", "-n", "USB_DATA", part1).CombinedOutput(); errEx != nil {
 				return fmt.Errorf("formatting NTFS/exFAT failed: %w (%s | %s)", err, string(out), string(outEx))
 			}
 		}
 	case "fat32":
-		if out, err := exec.Command("mkfs.vfat", "-F32", "-n", "USB_DATA", part1).CombinedOutput(); err != nil {
+		if out, err := execCommand("mkfs.vfat", "-F32", "-n", "USB_DATA", part1).CombinedOutput(); err != nil {
 			return fmt.Errorf("formatting FAT32 failed: %w (%s)", err, string(out))
 		}
 	default:
-		if _, err := exec.Command("mkfs.exfat", "-n", "USB_DATA", part1).CombinedOutput(); err != nil {
-			_ = exec.Command("mkfs.vfat", "-F32", "-n", "USB_DATA", part1).Run()
+		if _, err := execCommand("mkfs.exfat", "-n", "USB_DATA", part1).CombinedOutput(); err != nil {
+			_ = execCommand("mkfs.vfat", "-F32", "-n", "USB_DATA", part1).Run()
 		}
 	}
 
-	_ = exec.Command("sync").Run()
+	_ = execCommand("sync").Run()
 	return nil
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"runtime"
@@ -158,7 +157,7 @@ func PickFileOrDirectory(isDirectory bool, title string) (string, error) {
 	}
 
 	xauth := fmt.Sprintf("/home/%s/.Xauthority", sudoUser)
-	_ = exec.Command("xhost", "+local:").Run()
+	_ = execCommand("xhost", "+local:").Run()
 
 	cmdArgs := []string{"-u", sudoUser, "env", fmt.Sprintf("DISPLAY=%s", disp), fmt.Sprintf("XAUTHORITY=%s", xauth), "zenity", "--file-selection", "--title=" + title}
 	if isDirectory {
@@ -167,7 +166,7 @@ func PickFileOrDirectory(isDirectory bool, title string) (string, error) {
 		cmdArgs = append(cmdArgs, "--file-filter=All Bootable & Compressed Archives | *.iso *.img *.raw *.bin *.zip *.xz *.gz *.zst *.7z *.bz2 *.ISO *.IMG *.RAW *.BIN *.ZIP *.XZ *.GZ *.ZST *.7Z *.BZ2")
 	}
 
-	cmd := exec.Command("sudo", cmdArgs...)
+	cmd := execCommand("sudo", cmdArgs...)
 	out, err := cmd.Output()
 	if err == nil && len(bytes.TrimSpace(out)) > 0 {
 		return strings.TrimSpace(string(out)), nil

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -68,7 +67,7 @@ func DiscoverHostStorage() (*HostStorageProfile, error) {
 
 func findRootMount() (string, string, error) {
 	// Query using findmnt if available
-	out, err := exec.Command("findmnt", "-n", "-o", "SOURCE,FSTYPE", "/").Output()
+	out, err := execCommand("findmnt", "-n", "-o", "SOURCE,FSTYPE", "/").Output()
 	if err == nil {
 		fields := strings.Fields(string(out))
 		if len(fields) >= 2 {
@@ -98,7 +97,7 @@ func findRootMount() (string, string, error) {
 
 func findESPDevice(parentDisk string) string {
 	// Look for /boot/efi or /boot mount in findmnt
-	out, err := exec.Command("findmnt", "-n", "-o", "SOURCE", "/boot/efi").Output()
+	out, err := execCommand("findmnt", "-n", "-o", "SOURCE", "/boot/efi").Output()
 	if err == nil && len(strings.TrimSpace(string(out))) > 0 {
 		return strings.TrimSpace(string(out))
 	}
