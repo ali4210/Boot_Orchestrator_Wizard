@@ -93,6 +93,9 @@ func TestCheckRootOwnedFiles_NoOffenders(t *testing.T) {
 // follow-up F6's first half: a root-owned file in bin/ must hard-block
 // (non-zero exit) with a chown command naming bin/, exactly as before.
 func TestCheckRootOwnedFiles_BinOwnedByRootBlocks(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("check_root_owned_files intentionally returns 0 immediately when $EUID -eq 0 (autorun.sh: root can read/write/purge anything regardless of file ownership, so there is nothing to block) — this test's premise (a root-owned file blocks a non-root invocation) only applies when the test process itself is not root; skipping under `sudo go test`")
+	}
 	if !hasPasswordlessSudo(t) {
 		t.Skip("passwordless sudo not available in this environment; skipping the real-root-ownership case")
 	}
@@ -174,6 +177,9 @@ func TestAmbientSCRIPT_DIR_DoesNotRedirectScript(t *testing.T) {
 // .runtime/ must hard-block with a clear message rather than letting that
 // rm -rf fail with a raw permission error.
 func TestCheckRootOwnedFiles_RuntimeDirOwnedByRootBlocks(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("check_root_owned_files intentionally returns 0 immediately when $EUID -eq 0 (autorun.sh: root can read/write/purge anything regardless of file ownership, so there is nothing to block) — this test's premise (a root-owned file blocks a non-root invocation) only applies when the test process itself is not root; skipping under `sudo go test`")
+	}
 	if !hasPasswordlessSudo(t) {
 		t.Skip("passwordless sudo not available in this environment; skipping the real-root-ownership case")
 	}
