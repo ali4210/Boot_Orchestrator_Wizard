@@ -2061,6 +2061,134 @@ either. Verified here: `go build`/`go vet` clean natively and cross-compiled
 (`GOOS=windows/darwin GOARCH=amd64`, plus `make crosscheck`'s full matrix), and
 `go test -c` (compile-only) succeeds for the new Windows-tagged test file.
 
+## Post-PR follow-up, part 2: remaining 14 Windows test failures (Part A) + Alpine Unavailable (Part B)
+
+Watching the PR's CI runs to completion a second time (after items 59-62 fixed the first,
+incompletely-reported batch) surfaced 14 more real `go test ./...` failures on
+`windows-latest`, none previously fixed. Investigated each by confirming reachability on a
+Windows host first, per the explicit instruction, before deciding skip vs. fix. Every
+skip/tag below has its one-line reason inline in the code (repeated here, not just there) and
+was verified to still run and **pass** on Linux after the change.
+
+### Item 63: `autorun_test.go` is `//go:build !windows` — commit 4b4d7b0
+
+`TestAmbientSCRIPT_DIR_DoesNotRedirectScript` failed (Git Bash path-translation mismatch).
+`autorun.sh` itself never runs on Windows at all (separate `autorun.bat`/`autorun.cmd`/
+`autorun.ps1` launchers exist for that) — every test in this file works by sourcing the real
+`autorun.sh` under a real POSIX shell, so all of them (this one plus the three
+`TestCheckRootOwnedFiles_*` already fixed in item 60) are unreachable there by construction.
+Tagged the whole file (the only file in package `rootscripts`) `//go:build !windows`, not
+Linux-only — macOS uses `autorun.sh` too and these tests already pass there for real. Confirmed
+`go build/vet/test ./...`'s wildcard expansion silently excludes a zero-file package on
+Windows (exit 0, same as `cmd/env-check`'s "[no test files]"); `go build/vet/test .` (no
+wildcard) on the exact package does error, which is why `make crosscheck`/CI both use `./...`.
+
+### Item 64: skip `TestPasswordHashSurvivesHeredocRoundTrip` on Windows — commit b9f1510
+
+Failed (`cat: 'C:UsersRUNNER~1...'`, Git Bash path translation of `t.TempDir()`'s Windows
+path embedded in a heredoc). Tests the exact bash heredoc/quoting pattern
+`renderAutonomousInstallerScript` uses for `transient_resize.sh` — the Linux
+autonomous-USB-staging worker script, confirmed unreachable on Windows (requires `lsblk`).
+
+### Item 65: skip Linux-only autonomous-USB bash fragment tests on Windows — commit 4057ad6
+
+`TestUSBStorageMountRetryBlock_SucceedsOnThirdAttempt`/`_FailsLoudlyAfterTenAttempts`/
+`_FallsBackToUUID` and `TestDetectInstallerLayoutOrAbort_SquashfsLayoutProceeds`/
+`_BareLiveDirProceeds` all run a real fragment of `transient_resize.sh` under real bash;
+same unreachability as item 64. Added `skipIfWindowsAutonomousScriptUnreachable`, called
+from each. **Deliberately left alone**:
+`TestDetectInstallerLayoutOrAbort_UnsupportedLayoutAbortsBeforeAnyDiskWrite`, same file, same
+script fragment — it already **passes** on `windows-latest` (its assertion doesn't depend on
+the specific path translation that breaks the other two), so skipping it would violate "don't
+skip a test just to get green" for a test that isn't failing.
+
+### Item 66: skip `renderAccountProvisioningScript` tests on Windows (chroot-only) — commit 7e2604d
+
+`TestRenderAccountProvisioningScript_DetectsSudoGroup`/`_DetectsWheelGroup`/
+`_NoAdminGroupStillVerifiesAccount` failed (`ORCH_ACCOUNT_MISSING` where
+`ORCH_ACCOUNT_VERIFIED` was expected). Confirmed `renderAccountProvisioningScript` is only
+ever invoked via `assertDefaultCredentials`'s `cmdRunner.Run("chroot", rootPath, "/bin/sh",
+"-c", script)` — `chroot` has no Windows equivalent, unreachable regardless of which
+assertion any one test checks. Skipped inside the shared `runAccountScript` helper (not
+duplicated per test). The other two tests in this file
+(`_FailsLoudlyWhenAccountMissing`/`_FailsLoudlyWhenUseraddErrors`) don't currently fail on
+Windows, but only because the fake `useradd`/`getent`/`id` stub mechanism (shebang scripts
+with no real Windows executable extension) doesn't work there either, making every run look
+like "account missing" regardless of the fake env — a coincidental pass, not a meaningful
+one. Skipped all five together rather than leaving two looking green without testing
+anything real.
+
+### Item 67: real ACL lockdown for the Windows setup answer file — commit 98004a8
+
+Investigated `TestWriteScriptSecurely_*`'s "find every caller on Windows, and any
+equivalent that writes secrets" question in full before deciding: `writeScriptSecurely`
+itself has zero Windows callers (confirmed via grep — same `lsblk`-dependent autonomous-USB
+branch as items 64/65). But `injectAutounattend` (`engine/wim_deployer.go`) IS a real
+equivalent: reachable via `ApplyWim`'s native `runtime.GOOS == "windows"` DISM path, which —
+unlike the chroot/lsblk/ext4 code elsewhere — is genuinely functional Windows-native code
+(confirmed by reading it: calls `dism.exe /Apply-Image` directly). It writes
+`<targetRoot>\Windows\Panther\unattend.xml` with the account password in **plaintext**
+(inherent to the Windows unattend format) at mode 0644 — meaningless on Windows, same class
+of issue as the journal directory before item 62's fix.
+
+Exported `safety`'s icacls helper as `safety.RestrictToAdministrators` (renamed from
+`restrictJournalDirToAdministrators`, now general-purpose, not journal-specific) and call it
+from `injectAutounattend` right after the write, guarded by `runtime.GOOS == "windows"`
+(no-op elsewhere, same contract). Test:
+`TestInjectAutounattend_RestrictsUnattendXMLToAdministrators`
+(`engine/wim_deployer_windows_test.go`, `//go:build windows`) parses real `icacls.exe`
+output the same way `journal_acl_windows_test.go` already does. **Not run or verified
+against a real Windows machine from this sandbox** — explicitly flagged rather than claimed
+with confidence; CI's `windows-latest` is the first real execution.
+
+### Item 68: skip `TestWriteScriptSecurely_*` on Windows — no Windows caller — commit 389bf90
+
+`TestWriteScriptSecurely_UsesOwnerOnlyMode`/`_DoesNotNarrowModeOnExistingFile` failed
+(`expected mode 700, got 666`). Per item 67's investigation, `writeScriptSecurely` has no
+Windows caller at all — skipped both with that reason
+(`skipIfNoWindowsCallerForWriteScriptSecurely`), rather than building a Windows ACL path for
+a helper nothing on Windows ever calls.
+
+### Item 69: `DetectBackupTargets` — confirm graceful Windows degradation, fix tests — commit ea61d42
+
+`TestDetectBackupTargets_InternalSecondDiskNotTreatedAsRemovable`/
+`_ExcludesLiveUSBBootDiskEvenOnOverlayRoot` failed (`lsblk: executable file not found`).
+Checked reachability first: `DetectBackupTargets` **is** reachable on a Windows host for
+real — `ui/model.go`'s `scanBackupDrivesCmd` calls it unconditionally whenever the TUI's
+backup screen opens. Read the production code before concluding anything: it already
+degrades gracefully — `execCommand("lsblk", ...).Output()`'s error is wrapped and returned
+normally, never a panic (confirmed directly by the CI failure itself being a reported test
+failure, not a crash). Not a production bug; the two tests' `#!/bin/sh` fake-binary
+mechanism (same as `usb_manager_test.go`'s) just doesn't work on Windows. Skipped both with
+that reason, and added `TestDetectBackupTargets_NoLsblkOnPATH_ReturnsCleanErrorNotPanic` —
+runs on **every** platform (not Windows-only, since "clean error, no panic, when lsblk is
+unresolvable" is worth proving everywhere) — empties `PATH` and confirms a clean, wrapped,
+non-nil error with nil targets.
+
+### Item 70: Part B — mark `alpine-linux-amd64` Unavailable — commit f172f0c
+
+See the commit itself and `OS_STATUS_MATRIX.md`/`READINESS_GATE.md`'s updated entries. Real
+Tier 2/3 findings (no squashfs, no `/live` dir) already had their safety consequence fixed by
+item 50; this closes the data/catalog half the same way items 50-51 did for gentoo/macOS.
+Tests against the REAL embedded catalog (not synthetic fixtures), reproduce-first confirmed.
+
+### Confirmed, no code change needed
+
+- `TestIsLikelyLiveRootDisk`/`_DoesNotMatchOnTextualPrefixAlone` (`cmd/orchestrator/headless_test.go`)
+  were in the original 24-failure Windows list but are **already fixed** — `isLikelyLiveRootDisk`
+  calls `engine.SplitDiskAndPartition`, which item 59's `path` vs `path/filepath` fix already
+  corrected. Re-verified passing on this machine; no further action needed.
+- `safety/journal_acl_windows_test.go` (item 62's real Windows ACL test) is confirmed to have
+  run as part of a clean `boot-orchestrator/safety` package result on `windows-latest`
+  (`ok boot-orchestrator/safety 0.517s`, zero failures reported in that package). CI runs
+  `go test ./...` without `-v`, so there is no literal per-test PASS line to point to — stated
+  honestly as the limit of what this log format can confirm, not overclaimed as a definitive
+  per-test trace.
+- `autorun.bat`/`autorun.ps1` have **no CI coverage at all**, not even a syntax/parse check —
+  confirmed via `grep -rn autorun .github/workflows/*.yml` (zero matches). Reported as a real,
+  known gap; **not fixed** (building that coverage wasn't asked for this pass — see
+  `READINESS_GATE.md`'s "Update" section).
+
 ## Final Summary (item 41)
 
 **50 commits on `fix/audit-phase-0-1` ahead of `origin/fix/audit-phase-0-1`, plus the
