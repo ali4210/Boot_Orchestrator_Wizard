@@ -223,3 +223,38 @@ func TestAssertDefaultCredentials_DryRunDoesNotWriteSudoersFile(t *testing.T) {
 		t.Fatalf("dry-run mode actually wrote a real sudoers.d file at %s", sudoersPath)
 	}
 }
+
+// TestDiskReadRunner_BypassesDryRunStandIn is the regression test for the
+// real bug found while building item 50 (audit follow-up G3)'s dry-run
+// proof: blockDeviceSectorSize/blockDeviceSizeBytes/readDiskRegion
+// (engine/partition.go) going through cmdRunner directly meant
+// SetDryRun(true) made them all return empty output (DryRunRunner's
+// stand-in), which then failed to parse as a number — making
+// BackupPartitionTable, which every provision/revert calls unconditionally
+// near the start, fail immediately on every single dry run, before any
+// of the disk-mutating code --dry-run exists to protect against was ever
+// reached. diskReadRunner() must return the real DefaultRunner while
+// dry-run is active (these three are read-only by construction, not by
+// argument-inspection, so this is safe) — but still return a test's own
+// mock when one is in place, not silently ignore it.
+func TestDiskReadRunner_BypassesDryRunStandIn(t *testing.T) {
+	origRunner := cmdRunner
+	t.Cleanup(func() { cmdRunner = origRunner })
+
+	cmdRunner = DefaultRunner
+	if diskReadRunner() != DefaultRunner {
+		t.Errorf("expected diskReadRunner() to return cmdRunner unchanged when it's already DefaultRunner")
+	}
+
+	mock := &mockRunner{Handler: func(name string, args []string) ([]byte, error) { return nil, nil }}
+	cmdRunner = mock
+	if got := diskReadRunner(); got != Runner(mock) {
+		t.Errorf("expected diskReadRunner() to honor a test's own mock cmdRunner, got %T", got)
+	}
+
+	cmdRunner = DryRunRunner{}
+	if got := diskReadRunner(); got != DefaultRunner {
+		t.Errorf("expected diskReadRunner() to bypass DryRunRunner and return the real DefaultRunner, got %T", got)
+	}
+}
+

@@ -716,7 +716,7 @@ func extractUint(re *regexp.Regexp, text string) (uint64, error) {
 }
 
 func blockDeviceSectorSize(diskPath string) (int64, error) {
-	out, err := cmdRunner.Run("blockdev", "--getss", diskPath)
+	out, err := diskReadRunner().Run("blockdev", "--getss", diskPath)
 	if err != nil {
 		return 0, fmt.Errorf("blockdev --getss %s: %w\n%s", diskPath, err, out)
 	}
@@ -724,7 +724,7 @@ func blockDeviceSectorSize(diskPath string) (int64, error) {
 }
 
 func blockDeviceSizeBytes(diskPath string) (int64, error) {
-	out, err := cmdRunner.Run("blockdev", "--getsize64", diskPath)
+	out, err := diskReadRunner().Run("blockdev", "--getsize64", diskPath)
 	if err != nil {
 		return 0, fmt.Errorf("blockdev --getsize64 %s: %w\n%s", diskPath, err, out)
 	}
@@ -732,7 +732,7 @@ func blockDeviceSizeBytes(diskPath string) (int64, error) {
 }
 
 func readDiskRegion(diskPath string, offset, length int64) ([]byte, error) {
-	out, err := cmdRunner.RunStdout("dd",
+	out, err := diskReadRunner().RunStdout("dd",
 		fmt.Sprintf("if=%s", diskPath),
 		"bs=512",
 		fmt.Sprintf("skip=%d", offset/512),

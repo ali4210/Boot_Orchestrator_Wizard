@@ -119,6 +119,41 @@ func FSRunner() FS { return fsRunner }
 // FSRunner exists — see its doc comment.
 func ExecCommand(name string, args ...string) *exec.Cmd { return execCommand(name, args...) }
 
+// diskReadRunner is the Runner that genuinely read-only disk-geometry
+// queries — blockDeviceSectorSize, blockDeviceSizeBytes, readDiskRegion
+// (engine/partition.go) — should use instead of cmdRunner directly.
+// These three never write anything regardless of SetDryRun, by
+// construction (not by inspecting arguments): blockdev --getss/
+// --getsize64 and a `dd if=... status=none` read. That matches
+// docs/dryrun-inventory.md's own "read-only queries... already safe to
+// run for real... do NOT need interception" principle — a principle the
+// blanket cmdRunner/execCommand swap in SetDryRun doesn't actually honor
+// on its own, since it has no way to tell a read-only invocation from a
+// mutating one by command name alone (parted and dd are each used both
+// ways elsewhere in this codebase, which is why this isn't a general
+// allowlist of command names, only these three specific, unambiguous
+// call sites).
+//
+// Found and added while building item 50 (audit follow-up G3)'s real
+// dry-run proof: BackupPartitionTable (called unconditionally at the
+// start of every provision/revert, dry-run or not) depends on these
+// three for the disk's real sector size/byte count/GPT bytes — under the
+// blanket swap, DryRunRunner returned empty output for all of them,
+// which failed to parse, which made BackupPartitionTable error out, which
+// made the whole operation abort at "partition-shrink" on literally every
+// dry run, before any of the disk-mutating code this flag exists to
+// protect against was ever reached at all.
+//
+// If cmdRunner has been replaced by a test's own mock (as
+// TestReadDiskRegion_UsesStdoutOnly already does), that mock is still
+// honored — only the dry-run-specific stand-in is bypassed.
+func diskReadRunner() Runner {
+	if _, ok := cmdRunner.(DryRunRunner); ok {
+		return DefaultRunner
+	}
+	return cmdRunner
+}
+
 // DryRunRunner is a Runner that never actually executes anything: it logs
 // the command it would have run (to stderr, prefixed so it's
 // unmistakable in output) and returns an empty, successful result.
