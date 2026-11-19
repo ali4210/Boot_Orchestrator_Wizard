@@ -1915,6 +1915,33 @@ tests) and the reverse-skip relationship these two autorun tests have with that 
 command. `.github/workflows/ci.yml`'s `test-root-gated-loopdevice` job already had a
 20-minute timeout (>= the requested 15-minute floor) — confirmed, no change needed.
 
+### Item 58: real CI failure — unused imports on windows/darwin, plus `make crosscheck` — commit ff6fde9
+
+CI run `44501105882` (PR #1) failed `go build ./...` on `windows-latest` and `macos-latest`:
+`"os/exec" imported and not used` in `engine_windows.go`/`revert_windows.go`, `"os/exec"` and
+`"os"` in `revert_darwin.go`, `"os/exec"` in `engine_darwin.go` — left behind by item 47's
+`exec.Command` → `execCommand` rename across ~20 files, which removed every real call from
+these four `//go:build windows`/`//go:build darwin`-gated files but not their now-dead
+imports. Removed all of them.
+
+Investigated *why* local checks missed this before just fixing it, per the request: this
+project's development sandbox is Linux-only, and `go build ./... && go vet ./... &&
+go test ./...` — run before every single commit in this branch — never compiles a
+`windows`/`darwin`-gated file on a native Linux build at all. The discipline was followed
+correctly every time; the gate itself structurally could not see these four files. Ran the
+full requested cross-compile matrix after fixing, not only the files CI named — `GOOS=windows
+GOARCH=amd64`, `GOOS=darwin GOARCH=amd64`, `GOOS=darwin GOARCH=arm64`, `GOOS=linux
+GOARCH=arm64`, build *and* vet — and confirmed every target clean, no other latent error.
+
+Closed the process gap, not just the four imports: `scripts/crosscheck.sh` (exposed as
+`make crosscheck`) runs this exact matrix and exits non-zero with every failure listed.
+Verified it actually catches a regression — temporarily reintroduced the `engine_darwin.go`
+unused import, confirmed `make crosscheck` failed with the exact predicted error on that
+target, then reverted — before wiring it into CI as a new `crosscheck` job
+(`.github/workflows/ci.yml`, `ubuntu-latest`, 20-minute timeout; cross-compiling needs no
+real Windows/macOS runner). `CONTRIBUTING.md` now tells anyone touching a `*_windows.go`/
+`*_darwin.go` file to run `make crosscheck` too, with the real story of why it exists.
+
 ## Final Summary (item 41)
 
 **50 commits on `fix/audit-phase-0-1` ahead of `origin/fix/audit-phase-0-1`, plus the
