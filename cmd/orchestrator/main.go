@@ -32,26 +32,38 @@ var CustomISOPath string
 // all three switched together by engine.SetDryRun. --dry-run now runs the
 // real flow with that switch on, instead of refusing.
 //
-// One known, inherent limitation remains, and is called out here rather
-// than hidden: a command whose real OUTPUT a later step depends on (a
-// UUID from blkid, a filesystem type, ...) reports empty output in
-// dry-run, since the disk state it would report on was never actually
-// created. A step whose own success check relies on that real output (for
-// example assertDefaultCredentials verifying an account was actually
-// created inside a chroot — see engine/dryrun_test.go) will correctly
-// report failure in dry-run rather than fabricate a result it has no way
-// to know. This is a documented tradeoff of simulating a query against
-// state that doesn't exist, not a bug.
+// Two known, honest limitations remain, called out here rather than
+// hidden:
+//
+//  1. A command whose real OUTPUT a later step depends on (a UUID from
+//     blkid, a filesystem type, ...) reports empty output in dry-run,
+//     since the disk state it would report on was never actually
+//     created. A step whose own success check relies on that real output
+//     (for example assertDefaultCredentials verifying an account was
+//     actually created inside a chroot — see engine/dryrun_test.go) will
+//     correctly report failure in dry-run rather than fabricate a result
+//     it has no way to know.
+//  2. The payload DOWNLOAD itself (engine/streamer.go's real net/http GET
+//     plus os.Create/io.Copy to a local temp/cache file) is deliberately
+//     NOT intercepted. It never touches the target disk/bootloader/NVRAM
+//     — the actual safety concern 2.4 was about — and skipping it would
+//     make the rest of a dry run less realistic (no real checksum to
+//     verify, no real file size to compute free-space headroom against).
+//     A dry run therefore still uses real bandwidth and real local
+//     scratch disk space for this one step; everything after it that
+//     would touch the TARGET disk is intercepted.
 const dryRunBanner = `--dry-run: simulation mode enabled (engine.SetDryRun). Every exec.Command
-and filesystem-write call site this tool can reach is intercepted — each
-would-be mutating operation is logged to stderr, prefixed "[DRY-RUN]",
-instead of actually running. Nothing on this run will touch a real disk,
-partition table, bootloader, or NVRAM entry.
+and filesystem-write call site that could touch the target disk,
+partition table, bootloader, or NVRAM is intercepted — each would-be
+mutating operation is logged to stderr, prefixed "[DRY-RUN]", instead of
+actually running.
 
-Known limitation: a step whose own success check depends on a command's
-real output (a UUID, a filesystem type, ...) may correctly report failure
-in dry-run, since that output was never really produced — see
-docs/dryrun-inventory.md and engine/dryrun_test.go.
+Two things this does NOT change, deliberately: the payload download
+itself still happens for real (real network bandwidth, real local
+scratch/temp disk space — see docs/dryrun-inventory.md for why), and a
+step whose own success check depends on a command's real output (a UUID,
+a filesystem type, ...) may correctly report failure in dry-run, since
+that output was never really produced.
 `
 
 // applyDryRunFlag enables engine.SetDryRun when --dry-run was passed and
