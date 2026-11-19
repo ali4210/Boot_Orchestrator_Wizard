@@ -28,7 +28,7 @@ func EnsureRequiredPackage(pkg string, logFn func(string)) error {
 
 	// Debian / Ubuntu / Kali
 	if _, err := exec.LookPath("apt-get"); err == nil {
-		cmd := exec.Command("apt-get", "install", "-y", "-qq", pkg)
+		cmd := execCommand("apt-get", "install", "-y", "-qq", pkg)
 		cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("apt-get failed: %w (%s)", err, strings.TrimSpace(string(out)))
@@ -38,7 +38,7 @@ func EnsureRequiredPackage(pkg string, logFn func(string)) error {
 
 	// Fedora / RHEL 8+ / Rocky / AlmaLinux
 	if _, err := exec.LookPath("dnf"); err == nil {
-		cmd := exec.Command("dnf", "install", "-y", "-q", pkg)
+		cmd := execCommand("dnf", "install", "-y", "-q", pkg)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("dnf failed: %w (%s)", err, strings.TrimSpace(string(out)))
 		}
@@ -47,7 +47,7 @@ func EnsureRequiredPackage(pkg string, logFn func(string)) error {
 
 	// CentOS 7 / Older RHEL
 	if _, err := exec.LookPath("yum"); err == nil {
-		cmd := exec.Command("yum", "install", "-y", "-q", pkg)
+		cmd := execCommand("yum", "install", "-y", "-q", pkg)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("yum failed: %w (%s)", err, strings.TrimSpace(string(out)))
 		}
@@ -56,7 +56,7 @@ func EnsureRequiredPackage(pkg string, logFn func(string)) error {
 
 	// Arch Linux
 	if _, err := exec.LookPath("pacman"); err == nil {
-		cmd := exec.Command("pacman", "-S", "--noconfirm", "--needed", pkg)
+		cmd := execCommand("pacman", "-S", "--noconfirm", "--needed", pkg)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("pacman failed: %w (%s)", err, strings.TrimSpace(string(out)))
 		}
@@ -67,7 +67,7 @@ func EnsureRequiredPackage(pkg string, logFn func(string)) error {
 }
 
 func (e *LinuxStorageEngine) EnumerateStorage() ([]UnifiedPartition, error) {
-	out, err := exec.Command("lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,MODEL,RM,FSTYPE,LABEL").Output()
+	out, err := execCommand("lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,MODEL,RM,FSTYPE,LABEL").Output()
 	if err != nil {
 		return nil, fmt.Errorf("lsblk execution failed: %w", err)
 	}
@@ -146,11 +146,11 @@ func (e *LinuxStorageEngine) DetectActiveRoot() (UnifiedPartition, error) {
 func (e *LinuxStorageEngine) ShrinkVolume(partitionID string, shrinkSizeBytes uint64, logFn func(string)) error {
 	logFn(fmt.Sprintf("=> [LINUX ENGINE] Shrinking partition %s by %d bytes...", partitionID, shrinkSizeBytes))
 
-	cmdCheck := exec.Command("e2fsck", "-f", "-y", partitionID)
+	cmdCheck := execCommand("e2fsck", "-f", "-y", partitionID)
 	_ = cmdCheck.Run()
 
 	logFn("=> Resizing filesystem boundaries...")
-	cmdResize := exec.Command("resize2fs", partitionID)
+	cmdResize := execCommand("resize2fs", partitionID)
 	if out, err := cmdResize.CombinedOutput(); err != nil {
 		return fmt.Errorf("filesystem resize failed: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
@@ -159,28 +159,25 @@ func (e *LinuxStorageEngine) ShrinkVolume(partitionID string, shrinkSizeBytes ui
 
 func (e *LinuxStorageEngine) CreatePartition(diskID string, sizeBytes uint64, fsType string, label string, logFn func(string)) (string, error) {
 	logFn(fmt.Sprintf("=> [LINUX ENGINE] Partitioning disk %s (Filesystem: %s)...", diskID, fsType))
-	_ = exec.Command("partprobe", diskID).Run()
+	_ = execCommand("partprobe", diskID).Run()
 
 	sizeMiB := sizeBytes / (1024 * 1024)
-	cmdPart := exec.Command("parted", "-s", "-a", "optimal", diskID, "mkpart", "primary", fsType, "0%", fmt.Sprintf("%dMiB", sizeMiB))
+	cmdPart := execCommand("parted", "-s", "-a", "optimal", diskID, "mkpart", "primary", fsType, "0%", fmt.Sprintf("%dMiB", sizeMiB))
 	if out, err := cmdPart.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("parted failed: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 
-	_ = exec.Command("partprobe", diskID).Run()
+	_ = execCommand("partprobe", diskID).Run()
 	time.Sleep(1 * time.Second)
 
-	targetPart := diskID + "2"
-	if strings.Contains(diskID, "nvme") {
-		targetPart = diskID + "p2"
-	}
+	targetPart := JoinDiskAndPartition(diskID, "2")
 
 	mkfsCmd := "mkfs.ext4"
 	if fsType == "vfat" || fsType == "fat32" {
 		mkfsCmd = "mkfs.vfat"
 	}
 
-	cmdFmt := exec.Command(mkfsCmd, "-F", targetPart)
+	cmdFmt := execCommand(mkfsCmd, "-F", targetPart)
 	if out, err := cmdFmt.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("formatting %s failed: %w (%s)", targetPart, err, strings.TrimSpace(string(out)))
 	}
@@ -201,7 +198,7 @@ func (e *LinuxStorageEngine) RegisterBootEntry(title string, efiRelativePath str
 		}
 	}
 
-	cmd := exec.Command("efibootmgr", "-c", "-d", diskID, "-p", strconv.Itoa(int(partNum)), "-L", title, "-l", efiRelativePath)
+	cmd := execCommand("efibootmgr", "-c", "-d", diskID, "-p", strconv.Itoa(int(partNum)), "-L", title, "-l", efiRelativePath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("efibootmgr failed: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
@@ -218,9 +215,9 @@ func (e *LinuxStorageEngine) RegisterBootEntry(title string, efiRelativePath str
 		if _, err := os.Stat(cfg); err == nil {
 			logFn(fmt.Sprintf("=> Updating bootloader config at %s...", cfg))
 			if _, lookErr := exec.LookPath("update-grub"); lookErr == nil {
-				_ = exec.Command("update-grub").Run()
+				_ = execCommand("update-grub").Run()
 			} else if _, lookErr2 := exec.LookPath("grub2-mkconfig"); lookErr2 == nil {
-				_ = exec.Command("grub2-mkconfig", "-o", cfg).Run()
+				_ = execCommand("grub2-mkconfig", "-o", cfg).Run()
 			}
 			break
 		}

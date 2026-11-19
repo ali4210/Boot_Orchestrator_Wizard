@@ -5,7 +5,6 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -18,7 +17,7 @@ func NewStorageEngine() StorageEngine {
 }
 
 func runPowerShell(script string) ([]byte, error) {
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+	cmd := execCommand("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
 	return cmd.CombinedOutput()
 }
 
@@ -141,7 +140,7 @@ func (e *WindowsStorageEngine) MountVolume(devPath string, logFn func(string)) (
 func (e *WindowsStorageEngine) RegisterBootEntry(title string, efiRelativePath string, diskID string, partNum uint, logFn func(string)) error {
 	logFn(fmt.Sprintf("=> [WINDOWS BCD] Registering UEFI boot choice: %s...", title))
 
-	cmdCreate := exec.Command("bcdedit.exe", "/create", "/d", title, "/application", "BOOTAPP")
+	cmdCreate := execCommand("bcdedit.exe", "/create", "/d", title, "/application", "BOOTAPP")
 	out, err := cmdCreate.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("bcdedit create failed: %w (%s)", err, strings.TrimSpace(string(out)))
@@ -155,9 +154,9 @@ func (e *WindowsStorageEngine) RegisterBootEntry(title string, efiRelativePath s
 	}
 	guid := outStr[startIdx : endIdx+1]
 
-	_ = exec.Command("bcdedit.exe", "/set", guid, "device", fmt.Sprintf("partition=\\Device\\HarddiskVolume%d", partNum)).Run()
-	_ = exec.Command("bcdedit.exe", "/set", guid, "path", efiRelativePath).Run()
-	_ = exec.Command("bcdedit.exe", "/displayorder", guid, "/addlast").Run()
+	_ = execCommand("bcdedit.exe", "/set", guid, "device", fmt.Sprintf("partition=\\Device\\HarddiskVolume%d", partNum)).Run()
+	_ = execCommand("bcdedit.exe", "/set", guid, "path", efiRelativePath).Run()
+	_ = execCommand("bcdedit.exe", "/displayorder", guid, "/addlast").Run()
 
 	logFn(fmt.Sprintf("=> [WINDOWS BCD] Boot target %s registered successfully.", guid))
 	return nil

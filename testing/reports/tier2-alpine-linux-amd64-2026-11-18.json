@@ -1,0 +1,9 @@
+{
+  "iso_path": "/data/alpine.iso",
+  "squashfs_found": false,
+  "squashfs_path": "",
+  "live_dir_present": false,
+  "efi_boot_present": true,
+  "autonomous_installer_compatible": false,
+  "notes": "no squashfs and no /live directory found — the autonomous installer script would fall through to its generic rsync-everything fallback, which is NOT confirmed to produce a bootable installed system for this layout"
+}

@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="utf-8"?>
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+
+    <!-- ============================================================
+         SPECIALIZE pass — runs automatically on first boot of an
+         applied (non-generalized) install.wim image. Handles machine
+         identity, network profile, and hides the "getting devices
+         ready" spinner delays.
+         ============================================================ -->
+    <settings pass="specialize">
+        <component name="Microsoft-Windows-Shell-Setup"
+                    processorArchitecture="amd64"
+                    publicKeyToken="31bf3856ad364e35"
+                    language="neutral" versionScope="nonSxS"
+                    xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <ComputerName>BOOT-ORCH-PC</ComputerName>
+            <TimeZone>UTC</TimeZone>
+        </component>
+
+        <component name="Microsoft-Windows-UnattendedJoin"
+                    processorArchitecture="amd64"
+                    publicKeyToken="31bf3856ad364e35"
+                    language="neutral" versionScope="nonSxS"
+                    xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <Identification>
+                <JoinWorkgroup>WORKGROUP</JoinWorkgroup>
+            </Identification>
+        </component>
+
+        <component name="Networking-MPSSVC-Svc"
+                    processorArchitecture="amd64"
+                    publicKeyToken="31bf3856ad364e35"
+                    language="neutral" versionScope="nonSxS"
+                    xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <DoNotOpenInitialConfigurationTasksWindows>true</DoNotOpenInitialConfigurationTasksWindows>
+        </component>
+    </settings>
+
+    <!-- ============================================================
+         OOBESYSTEM pass — this is the block that actually removes
+         every interactive screen: license acceptance, region,
+         keyboard, network setup, privacy toggles, Microsoft-account
+         nag, and the "Let's connect you to a network" step.
+         ============================================================ -->
+    <settings pass="oobeSystem">
+        <component name="Microsoft-Windows-Shell-Setup"
+                    processorArchitecture="amd64"
+                    publicKeyToken="31bf3856ad364e35"
+                    language="neutral" versionScope="nonSxS"
+                    xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+            <OOBE>
+                <HideEULAPage>true</HideEULAPage>
+                <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+                <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+                <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+                <NetworkLocation>Home</NetworkLocation>
+                <SkipMachineOOBE>true</SkipMachineOOBE>
+                <SkipUserOOBE>true</SkipUserOOBE>
+                <ProtectYourPC>3</ProtectYourPC>
+            </OOBE>
+
+            <!-- Local admin account, no Microsoft account prompt.
+                 __ORCH_USERNAME__/__ORCH_PASSWORD__ are substituted by
+                 injectAutounattend() (engine/wim_deployer.go) with the
+                 account the user actually entered in the TUI — this file
+                 is a template, never applied with these literal tokens
+                 (audit 2.3: there is no hardcoded default account). -->
+            <UserAccounts>
+                <LocalAccounts>
+                    <LocalAccount wcm:action="add">
+                        <Name>__ORCH_USERNAME__</Name>
+                        <DisplayName>__ORCH_USERNAME__</DisplayName>
+                        <Group>Administrators</Group>
+                        <Password>
+                            <Value>__ORCH_PASSWORD__</Value>
+                            <PlainText>true</PlainText>
+                        </Password>
+                    </LocalAccount>
+                </LocalAccounts>
+            </UserAccounts>
+
+            <!-- Auto-logon straight to desktop on first boot -->
+            <AutoLogon>
+                <Enabled>true</Enabled>
+                <LogonCount>1</LogonCount>
+                <Username>__ORCH_USERNAME__</Username>
+                <Password>
+                    <Value>__ORCH_PASSWORD__</Value>
+                    <PlainText>true</PlainText>
+                </Password>
+            </AutoLogon>
+
+            <FirstLogonCommands>
+                <!-- Audit item 27: the answer file above (injected by
+                     injectAutounattend, engine/wim_deployer.go) carries the
+                     account password in plaintext at
+                     C:\Windows\Panther\unattend.xml — inherent to the
+                     unattend format, which has no hashed-password option
+                     for local account creation. Windows Setup itself may
+                     also leave a second copy under
+                     C:\Windows\Panther\unattend\ and, in some deployment
+                     paths, C:\Windows\System32\Sysprep\unattend.xml. Left
+                     alone, the plaintext password sits readable on disk
+                     indefinitely after setup completes. This runs FIRST,
+                     synchronously, during the one-time auto-logon
+                     (AutoLogon/LogonCount above is 1) — before an
+                     interactive desktop session is ever reachable — so the
+                     exposure window is only the setup process itself, not
+                     ongoing use of the machine. ">nul 2>&1" on each delete
+                     means a path that doesn't exist (not every deployment
+                     creates all three) doesn't abort the remaining
+                     cleanup commands. -->
+                <SynchronousCommand wcm:action="add">
+                    <Order>1</Order>
+                    <CommandLine>cmd /c del /f /q "%WINDIR%\Panther\unattend.xml" &gt;nul 2&gt;&amp;1 &amp; del /f /q "%WINDIR%\Panther\unattend\unattend.xml" &gt;nul 2&gt;&amp;1 &amp; del /f /q "%WINDIR%\System32\Sysprep\unattend.xml" &gt;nul 2&gt;&amp;1</CommandLine>
+                    <Description>Remove plaintext-password answer file copies from disk after setup consumes them</Description>
+                </SynchronousCommand>
+                <SynchronousCommand wcm:action="add">
+                    <Order>2</Order>
+                    <CommandLine>reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\OOBE" /v DisablePrivacyExperience /t REG_DWORD /d 1 /f</CommandLine>
+                    <Description>Suppress residual privacy dialog</Description>
+                </SynchronousCommand>
+                <SynchronousCommand wcm:action="add">
+                    <Order>3</Order>
+                    <CommandLine>reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE" /v DisableVoice /t REG_DWORD /d 1 /f</CommandLine>
+                    <Description>Suppress Cortana voice setup</Description>
+                </SynchronousCommand>
+            </FirstLogonCommands>
+
+        </component>
+
+        <component name="Microsoft-Windows-International-Core"
+                    processorArchitecture="amd64"
+                    publicKeyToken="31bf3856ad364e35"
+                    language="neutral" versionScope="nonSxS"
+                    xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <InputLocale>en-US</InputLocale>
+            <SystemLocale>en-US</SystemLocale>
+            <UILanguage>en-US</UILanguage>
+            <UserLocale>en-US</UserLocale>
+        </component>
+    </settings>
+
+</unattend>

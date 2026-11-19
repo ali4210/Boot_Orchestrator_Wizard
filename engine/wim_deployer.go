@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"boot-orchestrator/safety"
 )
 
 type WimIndex struct {
@@ -31,7 +33,7 @@ func ListWimIndexes(wimPath string) ([]WimIndex, error) {
 }
 
 func listWimIndexesWimlib(wimPath string) ([]WimIndex, error) {
-	xmlOut, err := exec.Command("wimlib-imagex", "info", wimPath, "--extract-xml").CombinedOutput()
+	xmlOut, err := execCommand("wimlib-imagex", "info", wimPath, "--extract-xml").CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("wimlib-imagex info XML %s failed: %w\n%s", wimPath, err, string(xmlOut))
 	}
@@ -39,7 +41,7 @@ func listWimIndexesWimlib(wimPath string) ([]WimIndex, error) {
 }
 
 func listWimIndexesDism(wimPath string) ([]WimIndex, error) {
-	out, err := exec.Command("dism.exe", "/Get-WimInfo", "/WimFile:"+wimPath).CombinedOutput()
+	out, err := execCommand("dism.exe", "/Get-WimInfo", "/WimFile:"+wimPath).CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("dism /Get-WimInfo %s: %w\n%s", wimPath, err, string(out))
 	}
@@ -105,6 +107,7 @@ type ApplyWimPlan struct {
 	TargetPartition string
 	MountPoint      string
 	AutounattendSrc string
+	Credentials     Credentials
 }
 
 // ApplyWim autonomously prepares NTFS, mounts target, unpacks WIM/ESD, and injects answer file.
@@ -119,7 +122,7 @@ func ApplyWim(plan *ApplyWimPlan) error {
 
 	if runtime.GOOS == "windows" {
 		// Native Windows DISM execution
-		cmd := exec.Command("dism.exe",
+		cmd := execCommand("dism.exe",
 			"/Apply-Image",
 			"/ImageFile:"+plan.WimPath,
 			"/Index:"+strconv.Itoa(plan.Index),
@@ -138,7 +141,7 @@ func ApplyWim(plan *ApplyWimPlan) error {
 		}
 
 		// 1. Format target partition as quick NTFS
-		if out, err := exec.Command("mkfs.ntfs", "-Q", "-F", plan.TargetPartition).CombinedOutput(); err != nil {
+		if out, err := execCommand("mkfs.ntfs", "-Q", "-F", plan.TargetPartition).CombinedOutput(); err != nil {
 			return fmt.Errorf("formatting %s as NTFS failed: %w\n%s", plan.TargetPartition, err, string(out))
 		}
 
@@ -147,26 +150,26 @@ func ApplyWim(plan *ApplyWimPlan) error {
 		if err != nil {
 			return fmt.Errorf("creating temporary mountpoint: %w", err)
 		}
-		defer os.RemoveAll(mountPoint)
+		defer fsRunner.RemoveAll(mountPoint)
 
 		// 3. Mount NTFS target partition
-		if out, err := exec.Command("mount", "-t", "ntfs-3g", plan.TargetPartition, mountPoint).CombinedOutput(); err != nil {
+		if out, err := execCommand("mount", "-t", "ntfs-3g", plan.TargetPartition, mountPoint).CombinedOutput(); err != nil {
 			// Fallback to standard mount if ntfs-3g alias is standard
-			if fbOut, fbErr := exec.Command("mount", plan.TargetPartition, mountPoint).CombinedOutput(); fbErr != nil {
+			if fbOut, fbErr := execCommand("mount", plan.TargetPartition, mountPoint).CombinedOutput(); fbErr != nil {
 				return fmt.Errorf("mounting NTFS partition failed: %s (fallback: %s: %w)", string(out), string(fbOut), fbErr)
 			}
 		}
 
 		defer func() {
-			_ = exec.Command("sync").Run()
-			if out, err := exec.Command("umount", mountPoint).CombinedOutput(); err != nil {
-				_ = exec.Command("umount", "-l", mountPoint).Run()
+			_ = execCommand("sync").Run()
+			if out, err := execCommand("umount", mountPoint).CombinedOutput(); err != nil {
+				_ = execCommand("umount", "-l", mountPoint).Run()
 				_ = out
 			}
 		}()
 
 		// 4. Apply chosen WIM index onto mounted NTFS target
-		applyCmd := exec.Command("wimlib-imagex", "apply", plan.WimPath, strconv.Itoa(plan.Index), mountPoint)
+		applyCmd := execCommand("wimlib-imagex", "apply", plan.WimPath, strconv.Itoa(plan.Index), mountPoint)
 		if out, err := applyCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("wimlib-imagex extraction to %s failed: %w\n%s", mountPoint, err, string(out))
 		}
@@ -176,7 +179,7 @@ func ApplyWim(plan *ApplyWimPlan) error {
 
 	// 5. Inject Unattended Answer File if configured
 	if plan.AutounattendSrc != "" && plan.MountPoint != "" {
-		if err := injectAutounattend(plan.AutounattendSrc, plan.MountPoint); err != nil {
+		if err := injectAutounattend(plan.AutounattendSrc, plan.MountPoint, plan.Credentials); err != nil {
 			return fmt.Errorf("autounattend injection failed: %w", err)
 		}
 	}
@@ -184,16 +187,56 @@ func ApplyWim(plan *ApplyWimPlan) error {
 	return nil
 }
 
-func injectAutounattend(srcPath, targetRoot string) error {
+// injectAutounattend copies the answer file at srcPath onto the target,
+// substituting the __ORCH_USERNAME__/__ORCH_PASSWORD__ placeholders (see
+// discovery/manifests/autounattend.xml) with creds' actual values.
+// Windows's unattend mechanism has no hashed-password option for local
+// account creation, so creds.Password reaches this file as plaintext — that
+// is inherent to the format (see Credentials' doc comment), not a choice
+// made here; what audit 2.3 fixes is that the account is no longer a
+// hardcoded "saleem" regardless of who runs the tool.
+func injectAutounattend(srcPath, targetRoot string, creds Credentials) error {
 	data, err := os.ReadFile(srcPath)
 	if err != nil {
 		return fmt.Errorf("reading answer file %s: %w", srcPath, err)
 	}
+	content := string(data)
+	content = strings.ReplaceAll(content, "__ORCH_USERNAME__", xmlEscape(creds.Username))
+	content = strings.ReplaceAll(content, "__ORCH_PASSWORD__", xmlEscape(creds.Password))
+	data = []byte(content)
 	if err := xml.Unmarshal(data, new(struct{ XMLName xml.Name })); err != nil {
 		return fmt.Errorf("malformed XML answer file %s: %w", srcPath, err)
 	}
-	destPath := filepath.Join(targetRoot, "autounattend.xml")
-	return os.WriteFile(destPath, data, 0644)
+	pantherDir := filepath.Join(targetRoot, "Windows", "Panther")
+	if err := fsRunner.MkdirAll(pantherDir, 0755); err != nil {
+		return fmt.Errorf("creating Panther dir: %w", err)
+	}
+	destPath := filepath.Join(pantherDir, "unattend.xml")
+	if err := fsRunner.WriteFile(destPath, data, 0644); err != nil {
+		return err
+	}
+
+	// Audit follow-up (Windows CI, writeScriptSecurely investigation):
+	// this file carries creds.Password in plaintext (inherent to the
+	// unattend format, see above) — the real-world "equivalent" of
+	// writeScriptSecurely's secret-bearing script, for the ApplyWim
+	// native-Windows path (runtime.GOOS == "windows" above), which is
+	// genuinely reachable and functional there (unlike the chroot/lsblk/
+	// ext4 code elsewhere in this engine). Lock it down the same way
+	// DefaultJournalPath's directory is locked down
+	// (safety.RestrictToAdministrators, via icacls) for the real window
+	// between writing it here and the guest's own first boot deleting it
+	// (item 27's FirstLogonCommand) — targetRoot is a live-mounted drive
+	// letter on the host during that window, not an inert archive.
+	// No-op on non-Windows (ntfs-3g-mounted targetRoot there has no
+	// equivalent host-side exposure in the same way, and POSIX file
+	// modes already apply for whatever does exist).
+	if runtime.GOOS == "windows" {
+		if err := safety.RestrictToAdministrators(destPath); err != nil {
+			return fmt.Errorf("restricting %s to Administrators/SYSTEM: %w", destPath, err)
+		}
+	}
+	return nil
 }
 
 func splitLines(s string) []string {

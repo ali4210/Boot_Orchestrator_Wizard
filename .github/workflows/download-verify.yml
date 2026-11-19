@@ -1,0 +1,37 @@
+name: Download Verify
+
+# Audit item 14: downloads every catalog entry FULLY using this project's
+# own downloader and verifies/reports its checksum. This downloads real,
+# multi-gigabyte files — intentionally NEVER run on push or pull_request,
+# only on demand or on a slow monthly schedule.
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 3 1 * *" # 03:00 UTC on the 1st of every month
+
+permissions:
+  contents: read
+
+jobs:
+  download-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run download-verify
+        run: |
+          go run ./cmd/download-verify -out download-verify-report.json
+        continue-on-error: true
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: download-verify-report
+          path: download-verify-report.json
+          retention-days: 90

@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,13 +24,32 @@ const (
 	StepRolledBack StepStatus = "rolled_back"
 )
 
-// SessionState records the overall transaction context for pause/resume.
+// SessionState records the overall transaction context across disks.
 type SessionState struct {
 	TargetOSID      string `json:"target_os_id,omitempty"`
 	DistroName      string `json:"distro_name,omitempty"`
-	ProvisionMode   string `json:"provision_mode,omitempty"` // "dual-boot", "single-boot"
-	TargetDisk      string `json:"target_disk,omitempty"`
-	TargetPartition string `json:"target_partition,omitempty"`
+	ProvisionMode   string `json:"provision_mode,omitempty"`    // "single-boot", "dual-boot", "triple-boot"
+	TargetDisk      string `json:"target_disk,omitempty"`       // e.g. "/dev/sda" (best-effort, resolved fresh on revert)
+	TargetPartition string `json:"target_partition,omitempty"`  // e.g. "/dev/sda2" (best-effort, resolved fresh on revert)
+	TargetPartNum   string `json:"target_part_num,omitempty"`   // e.g. "2"
+	TargetPartUUID  string `json:"target_part_uuid,omitempty"`  // stable fingerprint — survives device renaming
+	TargetFSType    string `json:"target_fs_type,omitempty"`    // fs type recorded at creation, for a sanity check on revert
+	TargetSizeBytes int64  `json:"target_size_bytes,omitempty"` // partition size recorded at creation, for a sanity check on revert
+	ShrunkPartition string `json:"shrunk_partition,omitempty"`  // e.g. "/dev/sda1" (best-effort, resolved fresh on revert)
+	ShrunkPartNum   string `json:"shrunk_part_num,omitempty"`   // e.g. "1"
+	ShrunkPartUUID  string `json:"shrunk_part_uuid,omitempty"`  // stable fingerprint of the host partition being expanded back
+	ShrunkFSType    string `json:"shrunk_fs_type,omitempty"`    // "ext4", "ntfs", "btrfs"
+	EFIDirName      string `json:"efi_dir_name,omitempty"`      // e.g. "Microsoft", "parrot"
+
+	// OriginalSwapSizeBytes/OriginalSwapUUID record a trailing swap slice
+	// that install-time partitioning converted into the target OS
+	// partition (follow-up F14), so revert can recreate an equivalent swap
+	// partition instead of permanently losing the host's swap space. Zero/
+	// empty when no swap was converted (the common case: carved from free
+	// space, or a plain shrink).
+	OriginalSwapSizeBytes int64  `json:"original_swap_size_bytes,omitempty"`
+	OriginalSwapUUID      string `json:"original_swap_uuid,omitempty"`
+
 	DownloadURL     string `json:"download_url,omitempty"`
 	BytesDownloaded int64  `json:"bytes_downloaded,omitempty"`
 	TotalBytes      int64  `json:"total_bytes,omitempty"`
@@ -60,10 +82,115 @@ type Journal struct {
 // RollbackFunc undoes one step given its stored rollback data.
 type RollbackFunc func(data json.RawMessage) error
 
-// NewJournal creates a fresh journal file at path.
+// DefaultJournalPath returns the path the journal should be created/loaded
+// at by default: a dedicated, non-world-writable state directory outside
+// the git repository, so an unprivileged user — including the very user
+// who invoked `sudo` to run this tool — cannot tamper with journal
+// contents between runs and steer what a LATER elevated run does to real
+// disks (follow-up F12; see the "Security tradeoff" note in PROGRESS.md).
+// Each candidate directory is created mode 0700, so whichever process
+// first creates it (normally the root-elevated engine) is the only one
+// that can read or write inside it afterward. Falls through to the next
+// candidate if a directory can't be created (e.g. not running as root, or
+// a read-only /var), and as an absolute last resort returns a
+// repo-relative path matching this tool's original behavior.
+//
+// Windows: os.MkdirAll's mode parameter does not translate into a
+// meaningful Windows ACL on its own (Go only maps it to the read-only
+// attribute bit) — this used to be a documented, unaddressed gap (see the
+// "Security tradeoff" note in PROGRESS.md's history). setUpProtectedJournalDir
+// now closes it for real: on Windows it also runs icacls (via
+// RestrictToAdministrators, safety/journal_acl_windows.go) to
+// strip inherited %ProgramData% permissions and grant only Administrators
+// and SYSTEM, the actual Windows equivalent of 0700.
+
+// journalUnixCandidateDirs are the default journal state directories tried
+// in order on non-Windows platforms. Injectable (follow-up F17): a test
+// calling DefaultJournalPath() with the real values would really create
+// /var/lib/boot-orchestrator or /var/tmp/boot-orchestrator (mode 0700) on
+// whatever machine runs the test — exactly the "tests must not touch real
+// /var/lib or /var/tmp" problem this var exists to let a test avoid, by
+// pointing it at a t.TempDir() for the duration of the test instead.
+var journalUnixCandidateDirs = []string{"/var/lib/boot-orchestrator", "/var/tmp/boot-orchestrator"}
+
+// SetJournalCandidateDirsForTesting overrides journalUnixCandidateDirs for
+// the duration of a test and returns a function that restores the real
+// value. Exported specifically so OTHER packages' tests can use it too:
+// ui.NewModel() calls LoadJournal(DefaultJournalPath()) unconditionally on
+// every construction (to pick up any unfinished session), so — before this
+// existed — every single ui package test that constructed a Model really
+// created /var/lib/boot-orchestrator or /var/tmp/boot-orchestrator on
+// whatever machine ran `go test ./ui/...`, not just this package's own
+// tests. See ui's TestMain for where this is applied process-wide.
+func SetJournalCandidateDirsForTesting(dirs []string) (restore func()) {
+	orig := journalUnixCandidateDirs
+	journalUnixCandidateDirs = dirs
+	return func() { journalUnixCandidateDirs = orig }
+}
+
+// setUpProtectedJournalDir creates dir (mode 0700) and, on Windows, also
+// locks its ACL down to Administrators/SYSTEM only via
+// RestrictToAdministrators — the real equivalent of what 0700
+// already achieves on Unix, where os.MkdirAll's mode parameter is a real
+// permission bit, not just a synthesized read-only attribute (see that
+// function's own doc comment). Returns false (and leaves dir exactly as
+// MkdirAll left it, not half-configured) if either step fails, so the
+// caller falls through to the next candidate exactly as it would for a
+// plain MkdirAll failure.
+func setUpProtectedJournalDir(dir string) bool {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		if err := RestrictToAdministrators(dir); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func DefaultJournalPath() string {
+	var candidates []string
+	if runtime.GOOS == "windows" {
+		if pd := os.Getenv("ProgramData"); pd != "" {
+			candidates = append(candidates, filepath.Join(pd, "BootOrchestrator"))
+		}
+	} else {
+		candidates = journalUnixCandidateDirs
+	}
+	for _, dir := range candidates {
+		if setUpProtectedJournalDir(dir) {
+			return filepath.Join(dir, "journal.json")
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		dir := filepath.Join(home, ".local", "state", "boot-orchestrator")
+		if setUpProtectedJournalDir(dir) {
+			return filepath.Join(dir, "journal.json")
+		}
+	}
+	return "orchestrator_journal.json"
+}
+
+// NewJournal creates a fresh journal file at path, auto-healing 0-byte crashed stubs.
+//
+// Follow-up F12: this used to chown the newly created file back to
+// SUDO_UID/SUDO_GID so it wouldn't be left root-owned in the invoking
+// user's repo checkout. That chown is now removed rather than kept: this
+// engine's journal records exactly the state (target disk/partition,
+// rollback data) a LATER elevated run trusts to decide what to do to real
+// hardware, so handing an unprivileged user write access to it was the
+// opposite of what a security boundary should do. DefaultJournalPath
+// instead keeps the journal in a directory the invoking user can't write
+// to at all, which is the actual fix autorun.sh's root-owned-file warning
+// was only ever a band-aid for.
 func NewJournal(path, txnID string) (*Journal, error) {
-	if _, err := os.Stat(path); err == nil {
-		return nil, fmt.Errorf("journal already exists at %s — call LoadJournal to resume or purge it first", path)
+	if fi, err := os.Stat(path); err == nil {
+		if fi.Size() == 0 {
+			_ = os.Remove(path)
+		} else {
+			return nil, fmt.Errorf("journal already exists at %s — call LoadJournal to resume or purge it first", path)
+		}
 	}
 	j := &Journal{
 		Path:      path,
@@ -78,8 +205,99 @@ func NewJournal(path, txnID string) (*Journal, error) {
 	return j, nil
 }
 
-// LoadJournal reads an existing journal.json.
+// allowedStepNames is every step name this engine's own code ever creates
+// via Journal.Begin, plus every name its RollbackAll handler maps key
+// against. Follow-up F12 defense-in-depth: a journal loaded from disk is
+// state an earlier (possibly different-privilege, possibly tampered)
+// process produced. Restricting step names to this fixed set on load means
+// a corrupted or hand-edited journal can't make RollbackAll invoke a
+// handler for a step name this version of the engine never actually
+// creates, or otherwise smuggle unexpected behavior through Step.Name.
+var allowedStepNames = map[string]bool{
+	"image-download":       true,
+	"partition-shrink":     true,
+	"image-deploy":         true,
+	"bootloader-configure": true,
+	"revert-engine":        true,
+	"docker-isolation":     true,
+	"uefi-set-boot-next":   true,
+	"uefi-set-boot-order":  true,
+	"bcd-mutation":         true,
+	"bcd-add-entry":        true,
+	"grub-set-default":     true,
+}
+
+// looksLikeDevicePath reports whether s is a plausible Linux block device
+// path with no path-traversal segment — structural validation, not an
+// existence check (see the "Security tradeoff" note in PROGRESS.md for why
+// this stops short of verifying the device exists/matches: device paths
+// legitimately get renumbered between boots, which is exactly why
+// SessionState separately carries PARTUUID fields for resume to re-resolve
+// against, rather than trusting the raw path). Empty is allowed, since not
+// every session has every field populated.
+//
+// TargetDisk/TargetPartition/ShrunkPartition are ALWAYS "/dev/..."-style
+// Linux device paths today, never a Windows-native form ("Disk 0", "C:",
+// ...): the only code that writes these fields (RunProvision, sourced from
+// --target-disk or the TUI's disk list, both ultimately backed by
+// DetectAllInternalDisks/ProbeRemovableTargets' lsblk-based enumeration)
+// produces that format on every host OS. engine.WindowsStorageEngine
+// (engine_windows.go) is the one place that WOULD produce a Windows-native
+// form, but it has zero callers anywhere in the repo — confirmed dead
+// code, like engine/rootfs.go and hypervisor/compact.go — so there is
+// currently no real "Windows device path form" this validator needs to
+// accept. Uses "path.Clean", not "path/filepath.Clean": the latter is a
+// real bug on Windows builds, since filepath.Clean there normalizes to
+// "\"-separated output ("\dev\sdz" instead of "/dev/sdz"), so this check
+// rejected every single legitimate "/dev/..." path on a Windows-compiled
+// binary — found via a real Windows CI test failure
+// (journal_security_test.go), not by inspection. If engine.NewStorageEngine
+// is ever actually wired into RunProvision on Windows, SessionState's
+// device-path fields would need a real schema decision for how to
+// represent a Windows-native identifier, not just a looser regex here.
+func looksLikeDevicePath(s string) bool {
+	if s == "" {
+		return true
+	}
+	if strings.Contains(s, "..") {
+		return false
+	}
+	return strings.HasPrefix(s, "/dev/") && path.Clean(s) == s
+}
+
+// validateLoadedJournal rejects a journal whose contents could not have
+// been produced by this engine's own code paths (follow-up F12 defense in
+// depth, checked on every LoadJournal regardless of where the journal file
+// lives).
+func validateLoadedJournal(j *Journal) error {
+	for _, field := range []string{j.Session.TargetDisk, j.Session.TargetPartition, j.Session.ShrunkPartition} {
+		if !looksLikeDevicePath(field) {
+			return fmt.Errorf("journal contains a malformed or suspicious device path %q", field)
+		}
+	}
+	for _, s := range j.Steps {
+		if s == nil {
+			continue
+		}
+		if !allowedStepNames[s.Name] {
+			return fmt.Errorf("journal contains an unrecognized step name %q", s.Name)
+		}
+	}
+	return nil
+}
+
+// LoadJournal reads an existing journal.json, rejects empty/invalid files
+// cleanly, and validates its contents (follow-up F12) before returning it.
 func LoadJournal(path string) (*Journal, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if fi.Size() == 0 {
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("journal at %s was 0 bytes (purged stale stub)", path)
+	}
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -88,12 +306,14 @@ func LoadJournal(path string) (*Journal, error) {
 	if err := json.Unmarshal(raw, &j); err != nil {
 		return nil, fmt.Errorf("journal at %s is corrupt: %w", path, err)
 	}
+	if err := validateLoadedJournal(&j); err != nil {
+		return nil, fmt.Errorf("journal at %s failed validation: %w", path, err)
+	}
 	j.Path = path
 	return &j, nil
 }
 
 // HasIncompleteSteps reports whether an active operation is currently running or paused.
-// Completed or previously rolled-back/failed historical steps do not count as in-flight locks.
 func (j *Journal) HasIncompleteSteps() bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -112,7 +332,7 @@ func (j *Journal) hasIncompleteStepsLocked() bool {
 	return false
 }
 
-// GetUnfinishedSession returns the stored session parameters if an interrupted or paused session exists.
+// GetUnfinishedSession returns the stored session parameters if an interrupted session exists.
 func (j *Journal) GetUnfinishedSession() (*SessionState, bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -185,7 +405,7 @@ func (j *Journal) Fail(step *Step, cause error) error {
 	return j.flushLocked()
 }
 
-// RollbackAll undoes all committed, running, or failed steps in reverse order.
+// RollbackAll undoes steps in reverse chronological order.
 func (j *Journal) RollbackAll(handlers map[string]RollbackFunc) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -216,13 +436,34 @@ func (j *Journal) RollbackAll(handlers map[string]RollbackFunc) error {
 	return nil
 }
 
-// Finalize removes the journal file after a successful run.
-func (j *Journal) Finalize() error {
+// FinalizeAndRecord cleans up the transactional journal upon successful completion,
+// but first persists the session's identity fingerprint (PARTUUID etc.) into a
+// small permanent record file, so a later revert can still find and undo this
+// install after the transactional journal itself is gone. Pass the same
+// SessionState you were tracking (it's read out before wiping, so this must be
+// called before/instead of the old bare Finalize()).
+func (j *Journal) FinalizeAndRecord(recordPath string) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
 	if j.hasIncompleteStepsLocked() {
 		return fmt.Errorf("refusing to finalize: active operations still in flight")
+	}
+
+	// Persist the durable fact of "this OS was installed here" before wiping
+	// the transactional state. Best-effort: a failure here shouldn't block
+	// finishing the provision, but it does mean the install becomes
+	// undiscoverable by DiscoverSecondaryOSes later — worth logging upstream.
+	if recordPath != "" && (j.Session.TargetPartUUID != "" || j.Session.TargetPartition != "") {
+		record := &Journal{
+			Path:      recordPath,
+			TxnID:     j.TxnID,
+			CreatedAt: j.CreatedAt,
+			UpdatedAt: time.Now(),
+			Session:   j.Session,
+			Steps:     nil,
+		}
+		_ = record.flush()
 	}
 
 	j.Steps = nil
@@ -233,7 +474,14 @@ func (j *Journal) Finalize() error {
 	return nil
 }
 
-// PurgeForce unconditionally removes the journal file and releases state locks.
+// Finalize is kept for backward compatibility — it cleans up the transactional
+// journal without persisting an install record. Prefer FinalizeAndRecord for
+// any provisioning path that creates a revertible dual-boot partition.
+func (j *Journal) Finalize() error {
+	return j.FinalizeAndRecord("")
+}
+
+// PurgeForce unconditionally removes the journal file from disk.
 func (j *Journal) PurgeForce() error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -258,6 +506,9 @@ func (j *Journal) flushLocked() error {
 		return err
 	}
 	dir := filepath.Dir(j.Path)
+	if dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0755)
+	}
 	tmp, err := os.CreateTemp(dir, ".journal-*.tmp")
 	if err != nil {
 		return err

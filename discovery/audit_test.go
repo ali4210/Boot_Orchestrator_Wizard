@@ -1,0 +1,157 @@
+package discovery
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestAuditEntry_FlagsEachMissingProperty(t *testing.T) {
+	cases := []struct {
+		name       string
+		entry      Entry
+		wantBroken bool
+	}{
+		{
+			name:       "complete entry",
+			entry:      Entry{ID: "ok", DownloadURL: "https://example.test/iso", SHA256: "deadbeef"},
+			wantBroken: false,
+		},
+		{
+			name:       "missing checksum",
+			entry:      Entry{ID: "no-sha", DownloadURL: "https://example.test/iso"},
+			wantBroken: true,
+		},
+		{
+			name:       "missing url and mirrors",
+			entry:      Entry{ID: "no-url", SHA256: "deadbeef"},
+			wantBroken: true,
+		},
+		{
+			name:       "missing both",
+			entry:      Entry{ID: "nothing"},
+			wantBroken: true,
+		},
+		{
+			name:       "mirrors satisfy the url requirement",
+			entry:      Entry{ID: "mirrors-only", Mirrors: []string{"https://example.test/iso"}, SHA256: "deadbeef"},
+			wantBroken: false,
+		},
+		{
+			name:       "whitespace-only checksum counts as missing",
+			entry:      Entry{ID: "blank-sha", DownloadURL: "https://example.test/iso", SHA256: "   "},
+			wantBroken: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AuditEntry(tc.entry)
+			if got.Broken != tc.wantBroken {
+				t.Errorf("AuditEntry(%+v).Broken = %v, want %v (reason: %q)", tc.entry, got.Broken, tc.wantBroken, got.BrokenReason)
+			}
+		})
+	}
+}
+
+func TestCatalog_Audit_FindsOnlyBrokenEntries(t *testing.T) {
+	c := &Catalog{Entries: []Entry{
+		{ID: "good", DownloadURL: "https://example.test/a", SHA256: "aaaa"},
+		{ID: "bad-1", DownloadURL: "https://example.test/b"},
+		{ID: "good-2", DownloadURL: "https://example.test/c", SHA256: "cccc"},
+		{ID: "bad-2"},
+	}}
+
+	broken := c.Audit()
+	if len(broken) != 2 {
+		t.Fatalf("expected 2 broken entries, got %d: %+v", len(broken), broken)
+	}
+	if broken[0].Entry.ID != "bad-1" || broken[1].Entry.ID != "bad-2" {
+		t.Fatalf("unexpected broken entries: %+v", broken)
+	}
+}
+
+// TestRealEmbeddedCatalog_AuditReport is not a pass/fail regression test —
+// every manifest entry currently lacks a SHA256 checksum (see
+// docs/MANIFEST_AUDIT.md for the full list and why this isn't fixed here:
+// a real checksum can only come from actually downloading each,
+// multi-gigabyte, OS image, which this session cannot safely or
+// practically do for 28 entries). This test exists so the real catalog's
+// audit state is visible in test output (`go test -v`) without silently
+// failing the suite over a data-completeness gap that isn't a code bug.
+func TestRealEmbeddedCatalog_AuditReport(t *testing.T) {
+	cat, err := LoadEmbedded()
+	if err != nil {
+		t.Fatalf("LoadEmbedded: %v", err)
+	}
+	broken := cat.Audit()
+	t.Logf("catalog audit: %d/%d entries broken", len(broken), len(cat.Entries))
+	for _, b := range broken {
+		t.Logf("  BROKEN %s (%s): %s", b.Entry.ID, b.Entry.Distro, b.BrokenReason)
+	}
+}
+
+// TestEmbeddedCatalog_DoesNotContainWindowsXP is the regression test for
+// audit item 2.13: Windows XP predates WIM-based installation, but its
+// manifest entry routed through the same deployWindowsPayload/WIM path as
+// Windows 10/11, which searches for sources/install.wim or install.esd —
+// neither of which exists on XP media (it uses a pre-WIM, i386/txtsetup.sif
+// layout). Selecting it would always fail, late, after a ~600MB download,
+// with a confusing "cannot locate install.wim or install.esd" error.
+// Building a real XP installation path was judged low-value by the audit
+// (XP long EOL, no security updates); the entry was removed from
+// discovery/manifests/windows.json rather than left to fail at runtime.
+func TestEmbeddedCatalog_DoesNotContainWindowsXP(t *testing.T) {
+	cat, err := LoadEmbedded()
+	if err != nil {
+		t.Fatalf("LoadEmbedded: %v", err)
+	}
+	for _, e := range cat.Entries {
+		if e.ID == "winxp-pro-i386" || strings.Contains(strings.ToLower(e.Distro), "windows xp") {
+			t.Fatalf("expected no Windows XP entry in the catalog (audit 2.13: no viable WIM-based install path), found %+v", e)
+		}
+	}
+}
+
+// TestEmbeddedCatalog_AlpineIsMarkedUnavailable is the regression test for
+// marking alpine-linux-amd64 Unavailable: OS_STATUS_MATRIX.md's real Tier
+// 2/3 runs found Alpine's standard ISO has neither a *.squashfs file nor a
+// /live directory, so the autonomous installer's layout detection
+// (engine/autonomous_installer_script.go's detectInstallerLayoutOrAbort,
+// item 50/G1) would correctly refuse it every time — a real, reproducible
+// incompatibility, not a hypothetical one. Marked the same way
+// gentoo-stage3-amd64 and both macOS entries already are: hidden from the
+// TUI's catalog listing (GetEntriesByCategory/ListCategories) and refused
+// outright in headless mode (see cmd/orchestrator's own test for that
+// half), rather than letting a user discover the incompatibility only
+// after selecting it and watching a real download run.
+func TestEmbeddedCatalog_AlpineIsMarkedUnavailable(t *testing.T) {
+	cat, err := LoadEmbedded()
+	if err != nil {
+		t.Fatalf("LoadEmbedded: %v", err)
+	}
+
+	var alpine *Entry
+	for i := range cat.Entries {
+		if cat.Entries[i].ID == "alpine-linux-amd64" {
+			alpine = &cat.Entries[i]
+			break
+		}
+	}
+	if alpine == nil {
+		t.Fatalf("expected an alpine-linux-amd64 entry in the embedded catalog")
+	}
+	if !alpine.Unavailable {
+		t.Fatalf("expected alpine-linux-amd64 to be marked Unavailable, got: %+v", alpine)
+	}
+	if !strings.Contains(alpine.UnavailableReason, "incompatible with the autonomous installer") {
+		t.Fatalf(`expected UnavailableReason to say "incompatible with the autonomous installer", got %q`, alpine.UnavailableReason)
+	}
+
+	// Hidden from the TUI's catalog listing — same mechanism as
+	// gentoo-stage3-amd64/macOS (discovery/availability_test.go), checked
+	// here against the REAL embedded catalog rather than a synthetic one.
+	for _, e := range cat.GetEntriesByCategory(alpine.Category) {
+		if e.ID == "alpine-linux-amd64" {
+			t.Fatalf("expected alpine-linux-amd64 to be hidden from GetEntriesByCategory(%q), but it was listed", alpine.Category)
+		}
+	}
+}

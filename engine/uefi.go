@@ -27,7 +27,7 @@ var efibootmgrOrderRe = regexp.MustCompile(`^BootOrder:\s*(.+)$`)
 var efibootmgrNextRe = regexp.MustCompile(`^BootNext:\s*([0-9A-Fa-f]{4})`)
 
 func ReadNVRAMState() (*NVRAMState, error) {
-	out, err := exec.Command("efibootmgr", "-v").CombinedOutput()
+	out, err := execCommand("efibootmgr", "-v").CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("efibootmgr -v failed: %w\n%s", err, out)
 	}
@@ -80,7 +80,7 @@ func SetBootNext(targetEntryID string) (rollbackData []byte, err error) {
 		return rollbackData, fmt.Errorf("boot entry %s not found in current NVRAM", targetEntryID)
 	}
 
-	out, err := exec.Command("efibootmgr", "-n", targetEntryID).CombinedOutput()
+	out, err := execCommand("efibootmgr", "-n", targetEntryID).CombinedOutput()
 	if err != nil {
 		return rollbackData, fmt.Errorf("efibootmgr -n %s failed: %w\n%s", targetEntryID, err, out)
 	}
@@ -99,13 +99,13 @@ func RollbackSetBootNext(rollbackData json.RawMessage) error {
 		return fmt.Errorf("corrupt rollback data: %w", err)
 	}
 	if rb.PreviousBootNext == "" {
-		out, err := exec.Command("efibootmgr", "-N").CombinedOutput()
+		out, err := execCommand("efibootmgr", "-N").CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("efibootmgr -N failed: %w\n%s", err, out)
 		}
 		return nil
 	}
-	out, err := exec.Command("efibootmgr", "-n", rb.PreviousBootNext).CombinedOutput()
+	out, err := execCommand("efibootmgr", "-n", rb.PreviousBootNext).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("restoring BootNext failed: %w\n%s", err, out)
 	}
@@ -134,7 +134,7 @@ func SetBootOrder(newOrder []string) (rollbackData []byte, err error) {
 		}
 	}
 
-	out, err := exec.Command("efibootmgr", "-o", strings.Join(newOrder, ",")).CombinedOutput()
+	out, err := execCommand("efibootmgr", "-o", strings.Join(newOrder, ",")).CombinedOutput()
 	if err != nil {
 		return rollbackData, fmt.Errorf("efibootmgr -o failed: %w\n%s", err, out)
 	}
@@ -147,7 +147,7 @@ func RollbackSetBootOrder(rollbackData json.RawMessage) error {
 	if err := json.Unmarshal(rollbackData, &rb); err != nil {
 		return fmt.Errorf("corrupt rollback data: %w", err)
 	}
-	out, err := exec.Command("efibootmgr", "-o", strings.Join(rb.PreviousBootOrder, ",")).CombinedOutput()
+	out, err := execCommand("efibootmgr", "-o", strings.Join(rb.PreviousBootOrder, ",")).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("restoring BootOrder failed: %w\n%s", err, out)
 	}
@@ -159,7 +159,7 @@ type BCDBackupRollbackData struct {
 }
 
 func BackupBCD(exportPath string) (rollbackData []byte, err error) {
-	out, err := exec.Command("bcdedit", "/export", exportPath).CombinedOutput()
+	out, err := execCommand("bcdedit", "/export", exportPath).CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("bcdedit /export failed: %w\n%s", err, out)
 	}
@@ -173,7 +173,7 @@ func RollbackBCD(rollbackData json.RawMessage) error {
 	if err := json.Unmarshal(rollbackData, &rb); err != nil {
 		return fmt.Errorf("corrupt rollback data: %w", err)
 	}
-	out, err := exec.Command("bcdedit", "/import", rb.ExportPath).CombinedOutput()
+	out, err := execCommand("bcdedit", "/import", rb.ExportPath).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("bcdedit /import failed: %w\n%s", err, out)
 	}
@@ -181,7 +181,7 @@ func RollbackBCD(rollbackData json.RawMessage) error {
 }
 
 func AddWindowsBootEntry(description string) (guid string, rollbackData []byte, err error) {
-	out, err := exec.Command("bcdedit", "/copy", "{current}", "/d", description).CombinedOutput()
+	out, err := execCommand("bcdedit", "/copy", "{current}", "/d", description).CombinedOutput()
 	if err != nil {
 		return "", nil, fmt.Errorf("bcdedit /copy failed: %w\n%s", err, out)
 	}
@@ -203,7 +203,7 @@ func RollbackAddWindowsBootEntry(rollbackData json.RawMessage) error {
 	if err := json.Unmarshal(rollbackData, &rb); err != nil {
 		return fmt.Errorf("corrupt rollback data: %w", err)
 	}
-	out, err := exec.Command("bcdedit", "/delete", rb.CreatedGuid).CombinedOutput()
+	out, err := execCommand("bcdedit", "/delete", rb.CreatedGuid).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("bcdedit /delete failed: %w\n%s", err, out)
 	}
@@ -244,7 +244,7 @@ func SetGrubDefaultEntry(grubDefaultPath, menuEntryTitle string) (rollbackData [
 	}
 	rollbackData, _ = json.Marshal(rb)
 
-	if err := os.WriteFile(grubDefaultPath, []byte(strings.Join(lines, "\n")), 0644); err != nil {
+	if err := fsRunner.WriteFile(grubDefaultPath, []byte(strings.Join(lines, "\n")), 0644); err != nil {
 		return rollbackData, fmt.Errorf("writing %s: %w", grubDefaultPath, err)
 	}
 
@@ -275,7 +275,7 @@ func RollbackSetGrubDefaultEntry(grubDefaultPath string, rollbackData json.RawMe
 		}
 		out = append(out, line)
 	}
-	if err := os.WriteFile(grubDefaultPath, []byte(strings.Join(out, "\n")), 0644); err != nil {
+	if err := fsRunner.WriteFile(grubDefaultPath, []byte(strings.Join(out, "\n")), 0644); err != nil {
 		return fmt.Errorf("writing restored %s: %w", grubDefaultPath, err)
 	}
 	return RegenerateGrubConfig()
@@ -289,7 +289,7 @@ func RegenerateGrubConfig() error {
 			if tool == "grub2-mkconfig" {
 				args = []string{"-o", "/boot/grub2/grub.cfg"}
 			}
-			out, err := exec.Command(tool, args...).CombinedOutput()
+			out, err := execCommand(tool, args...).CombinedOutput()
 			if err != nil {
 				return fmt.Errorf("%s failed: %w\n%s", tool, err, out)
 			}

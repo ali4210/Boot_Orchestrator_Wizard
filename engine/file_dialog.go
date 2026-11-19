@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -42,20 +42,37 @@ func IsSupportedPayload(name string) bool {
 	return false
 }
 
-// GetRealUserHome resolves the genuine home path of the logged-in user rather than root.
+// userLookupFunc is user.Lookup, as a var so a test can substitute a fake
+// lookup (e.g. an account with a custom, non-/home/<name> home directory)
+// without creating or deleting a real system user account.
+var userLookupFunc = user.Lookup
+
+// GetRealUserHome resolves the genuine home path of the logged-in user
+// rather than root.
+//
+// Bug H's investigation: this used to guess the home directory as
+// filepath.Join("/home", sudoUser) — correct for the common default
+// layout, but wrong for any account whose home isn't literally at
+// /home/<username> (a custom useradd -d, an NSS/LDAP-provided home
+// elsewhere, ...). When that guess missed, this fell through to
+// os.UserHomeDir() — which, running under sudo, resolves to root's own
+// home and was explicitly excluded — and then to a hardcoded "/home/kali"
+// fallback that was clearly a dev-testing leftover, not something
+// meaningful for any other user, and finally to "/" (the filesystem
+// root) if even that didn't exist: a surprising, unhelpful place for an
+// ISO/image picker to land. Now resolves via os/user.Lookup, which reads
+// the real passwd/NSS database entry for SUDO_USER — authoritative,
+// not a guess, regardless of where that account's home actually lives.
 func GetRealUserHome() string {
-	sudoUser := os.Getenv("SUDO_USER")
-	if sudoUser != "" && sudoUser != "root" {
-		userHome := filepath.Join("/home", sudoUser)
-		if _, err := os.Stat(userHome); err == nil {
-			return userHome
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" && sudoUser != "root" {
+		if u, err := userLookupFunc(sudoUser); err == nil && u.HomeDir != "" {
+			if _, statErr := os.Stat(u.HomeDir); statErr == nil {
+				return u.HomeDir
+			}
 		}
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "/root" {
 		return home
-	}
-	if _, err := os.Stat("/home/kali"); err == nil {
-		return "/home/kali"
 	}
 	return "/"
 }
@@ -140,7 +157,7 @@ func PickFileOrDirectory(isDirectory bool, title string) (string, error) {
 	}
 
 	xauth := fmt.Sprintf("/home/%s/.Xauthority", sudoUser)
-	_ = exec.Command("xhost", "+local:").Run()
+	_ = execCommand("xhost", "+local:").Run()
 
 	cmdArgs := []string{"-u", sudoUser, "env", fmt.Sprintf("DISPLAY=%s", disp), fmt.Sprintf("XAUTHORITY=%s", xauth), "zenity", "--file-selection", "--title=" + title}
 	if isDirectory {
@@ -149,7 +166,7 @@ func PickFileOrDirectory(isDirectory bool, title string) (string, error) {
 		cmdArgs = append(cmdArgs, "--file-filter=All Bootable & Compressed Archives | *.iso *.img *.raw *.bin *.zip *.xz *.gz *.zst *.7z *.bz2 *.ISO *.IMG *.RAW *.BIN *.ZIP *.XZ *.GZ *.ZST *.7Z *.BZ2")
 	}
 
-	cmd := exec.Command("sudo", cmdArgs...)
+	cmd := execCommand("sudo", cmdArgs...)
 	out, err := cmd.Output()
 	if err == nil && len(bytes.TrimSpace(out)) > 0 {
 		return strings.TrimSpace(string(out)), nil

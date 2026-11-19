@@ -161,11 +161,11 @@ func ApplySlipstream(plan *SlipstreamPlan) (err error) {
 		return fmt.Errorf("dism.exe not found — driver slipstreaming requires running on Windows or WinPE: %w", err)
 	}
 
-	if err := os.MkdirAll(plan.MountDir, 0755); err != nil {
+	if err := fsRunner.MkdirAll(plan.MountDir, 0755); err != nil {
 		return fmt.Errorf("creating mount dir %s: %w", plan.MountDir, err)
 	}
 
-	mountOut, err := exec.Command("dism.exe",
+	mountOut, err := execCommand("dism.exe",
 		"/Mount-Image",
 		"/ImageFile:"+plan.WimPath,
 		fmt.Sprintf("/Index:%d", plan.WimIndex),
@@ -181,7 +181,7 @@ func ApplySlipstream(plan *SlipstreamPlan) (err error) {
 		if err != nil {
 			verb = "/Discard"
 		}
-		unmountOut, uerr := exec.Command("dism.exe", "/Unmount-Image", "/MountDir:"+plan.MountDir, verb).CombinedOutput()
+		unmountOut, uerr := execCommand("dism.exe", "/Unmount-Image", "/MountDir:"+plan.MountDir, verb).CombinedOutput()
 		if uerr != nil {
 			// Surface the unmount failure even if the main operation
 			// otherwise succeeded — a WIM stuck mounted will fail every
@@ -191,7 +191,7 @@ func ApplySlipstream(plan *SlipstreamPlan) (err error) {
 	}()
 
 	for _, drv := range plan.Drivers {
-		out, derr := exec.Command("dism.exe",
+		out, derr := execCommand("dism.exe",
 			"/Image:"+plan.MountDir,
 			"/Add-Driver",
 			"/Driver:"+drv.InfPath,

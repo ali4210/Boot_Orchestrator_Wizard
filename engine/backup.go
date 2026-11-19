@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -37,11 +38,11 @@ func ensureNTFS3G(logFn func(string)) error {
 	logFn("=> [DRIVER CHECK] ntfs-3g missing. Installing non-interactively...")
 
 	if _, err := exec.LookPath("apt-get"); err == nil {
-		cmd := exec.Command("apt-get", "update", "-qq")
+		cmd := execCommand("apt-get", "update", "-qq")
 		cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 		_ = cmd.Run()
 
-		cmdInstall := exec.Command("apt-get", "install", "-y", "-qq", "ntfs-3g")
+		cmdInstall := execCommand("apt-get", "install", "-y", "-qq", "ntfs-3g")
 		cmdInstall.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 		if out, err := cmdInstall.CombinedOutput(); err != nil {
 			return fmt.Errorf("installing ntfs-3g failed: %w (%s)", err, strings.TrimSpace(string(out)))
@@ -52,12 +53,14 @@ func ensureNTFS3G(logFn func(string)) error {
 	return fmt.Errorf("apt-get not available to install ntfs-3g")
 }
 
+// resolveBackupMountNode is called with what might already be a whole-disk
+// path; if so, it tries partition 1 of that disk instead. Audit 1C.8: the
+// nvme/mmcblk-substring special case (else bare "path+1") mis-parses loop
+// devices (loop0 -> loop01 instead of loop0p1); built via the shared
+// JoinDiskAndPartition instead.
 func resolveBackupMountNode(devPath string) string {
 	if strings.HasPrefix(devPath, "/dev/") && !strings.Contains(devPath, "1") && !strings.Contains(devPath, "2") {
-		p1 := devPath + "1"
-		if strings.Contains(devPath, "nvme") || strings.Contains(devPath, "mmcblk") {
-			p1 = devPath + "p1"
-		}
+		p1 := JoinDiskAndPartition(devPath, "1")
 		if _, err := os.Stat(p1); err == nil {
 			return p1
 		}
@@ -73,32 +76,32 @@ func AutoMountDrive(devPath string, logFn func(string)) (string, func(), error) 
 	devPath = resolveBackupMountNode(devPath)
 
 	mountPoint := filepath.Join("/mnt", "orch_drive_"+filepath.Base(devPath))
-	_ = os.MkdirAll(mountPoint, 0755)
+	_ = fsRunner.MkdirAll(mountPoint, 0755)
 
-	fsTypeOut, _ := exec.Command("blkid", "-s", "TYPE", "-o", "value", devPath).Output()
+	fsTypeOut, _ := execCommand("blkid", "-s", "TYPE", "-o", "value", devPath).Output()
 	detectedFS := strings.ToLower(strings.TrimSpace(string(fsTypeOut)))
 
 	if detectedFS == "ntfs" {
 		if err := ensureNTFS3G(logFn); err != nil {
 			return "", func() {}, err
 		}
-		cmdNTFS := exec.Command("ntfs-3g", "-o", "remove_hiberfile,rw", devPath, mountPoint)
+		cmdNTFS := execCommand("ntfs-3g", "-o", "remove_hiberfile,rw", devPath, mountPoint)
 		if _, err := cmdNTFS.CombinedOutput(); err == nil {
 			return mountPoint, makeCleanup(mountPoint), nil
 		}
-		cmdFallback := exec.Command("mount", "-t", "ntfs-3g", devPath, mountPoint)
+		cmdFallback := execCommand("mount", "-t", "ntfs-3g", devPath, mountPoint)
 		if _, errF := cmdFallback.CombinedOutput(); errF == nil {
 			return mountPoint, makeCleanup(mountPoint), nil
 		}
 	}
 
-	cmd := exec.Command("mount", devPath, mountPoint)
+	cmd := execCommand("mount", devPath, mountPoint)
 	if _, err := cmd.CombinedOutput(); err == nil {
 		return mountPoint, makeCleanup(mountPoint), nil
 	}
 
 	if errInstall := ensureNTFS3G(logFn); errInstall == nil {
-		cmdRetry := exec.Command("ntfs-3g", devPath, mountPoint)
+		cmdRetry := execCommand("ntfs-3g", devPath, mountPoint)
 		if _, errRetry := cmdRetry.CombinedOutput(); errRetry == nil {
 			return mountPoint, makeCleanup(mountPoint), nil
 		}
@@ -109,8 +112,8 @@ func AutoMountDrive(devPath string, logFn func(string)) (string, func(), error) 
 
 func makeCleanup(mountPoint string) func() {
 	return func() {
-		_ = exec.Command("umount", "-l", mountPoint).Run()
-		_ = os.Remove(mountPoint)
+		_ = execCommand("umount", "-l", mountPoint).Run()
+		_ = fsRunner.Remove(mountPoint)
 	}
 }
 
@@ -118,7 +121,7 @@ func makeCleanup(mountPoint string) func() {
 // whole raw disk targets (/dev/sdX) so that dynamic autonomous partitioning into
 // ext4 (ORCH_STORAGE) and FAT32 (ORCH_BOOT) is triggered.
 func DetectBackupTargets() ([]BlockDevice, error) {
-	out, err := exec.Command("lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,MODEL,RM,HOTPLUG,FSTYPE").Output()
+	out, err := execCommand("lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,MODEL,RM,HOTPLUG,TRAN,FSTYPE").Output()
 	if err != nil {
 		return nil, fmt.Errorf("querying storage topology: %w", err)
 	}
@@ -132,6 +135,7 @@ func DetectBackupTargets() ([]BlockDevice, error) {
 			Model      string `json:"model"`
 			RM         bool   `json:"rm"`
 			Hotplug    bool   `json:"hotplug"`
+			Tran       string `json:"tran"`
 			FSType     string `json:"fstype"`
 			Children   []struct {
 				Name       string `json:"name"`
@@ -141,6 +145,7 @@ func DetectBackupTargets() ([]BlockDevice, error) {
 				Model      string `json:"model"`
 				RM         bool   `json:"rm"`
 				Hotplug    bool   `json:"hotplug"`
+				Tran       string `json:"tran"`
 				FSType     string `json:"fstype"`
 			} `json:"children"`
 		} `json:"blockdevices"`
@@ -163,7 +168,13 @@ func DetectBackupTargets() ([]BlockDevice, error) {
 			continue
 		}
 
-		isRemovableDisk := dev.Type == "disk" && (dev.RM || dev.Hotplug || (strings.HasPrefix(dev.Name, "sd") && dev.Name != pDiskBase))
+		// Audit 1C-followup: this used to also treat ANY non-root disk whose
+		// name merely started with "sd" as removable/safe-to-wipe — on a
+		// machine with more than two SATA/SAS disks, an internal data disk
+		// (sdb, sdc, ...) would be silently offered as a backup-staging
+		// target and then repartitioned. Classify removable only by lsblk's
+		// own TRAN=="usb" or RM signal; fail closed otherwise.
+		isRemovableDisk := dev.Type == "disk" && (dev.RM || strings.ToLower(dev.Tran) == "usb")
 
 		if isRemovableDisk {
 			valid = append(valid, BlockDevice{
@@ -215,7 +226,7 @@ func EstimateHostBackupSize() uint64 {
 	sources := []string{"/home", "/etc", "/root", "/var/local", "/opt"}
 	var total uint64
 	for _, s := range sources {
-		out, err := exec.Command("du", "-sb", s).Output()
+		out, err := execCommand("du", "-sb", s).Output()
 		if err == nil {
 			parts := strings.Fields(string(out))
 			if len(parts) > 0 {
@@ -274,7 +285,7 @@ func CreateHostBackupWithProgress(targetPath string, onProgress func(written int
 		"--exclude=/tmp",
 	}, validSources...)
 
-	cmd := exec.Command("tar", tarArgs...)
+	cmd := execCommand("tar", tarArgs...)
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("starting backup: %w", err)
 	}
@@ -295,12 +306,12 @@ func CreateHostBackupWithProgress(targetPath string, onProgress func(written int
 			}
 			onProgress(int64(targetEst), "compressing: 100.0% (Finalizing sync)")
 			onProgress(0, "=> Computing SHA256 checksum manifest on USB media...")
-			chkCmd := exec.Command("sha256sum", filepath.Base(fullDestPath))
+			chkCmd := execCommand("sha256sum", filepath.Base(fullDestPath))
 			chkCmd.Dir = destDir
 			if chkOut, cErr := chkCmd.Output(); cErr == nil {
-				_ = os.WriteFile(fullDestPath+".sha256", chkOut, 0644)
+				_ = fsRunner.WriteFile(fullDestPath+".sha256", chkOut, 0644)
 			}
-			_ = exec.Command("sync").Run()
+			_ = execCommand("sync").Run()
 			return fullDestPath, nil
 
 		case <-ticker.C:
@@ -402,7 +413,7 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 
 	logFn("=> [DISASTER RESTORE] Verifying backup checksum manifest...")
 	if _, err := os.Stat(archivePath + ".sha256"); err == nil {
-		cmdCheck := exec.Command("sha256sum", "-c", archivePath+".sha256")
+		cmdCheck := execCommand("sha256sum", "-c", archivePath+".sha256")
 		cmdCheck.Dir = filepath.Dir(archivePath)
 		if out, err := cmdCheck.CombinedOutput(); err != nil {
 			return fmt.Errorf("cryptographic verification failed: archive corrupted: %s", string(out))
@@ -410,7 +421,7 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 		logFn("=> Checksum matched: Image verified 100% authentic.")
 	}
 
-	_ = exec.Command("swapoff", "-a").Run()
+	_ = execCommand("swapoff", "-a").Run()
 
 	isUEFI := isUEFIBooted()
 	baseDisk := strings.TrimPrefix(targetDisk, "/dev/")
@@ -421,33 +432,67 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 
 	var espPart, rootPart string
 
+	// Audit item 25 (silent-error audit): every parted/mkfs call in this
+	// block used to discard its error. If, say, "mklabel gpt" silently
+	// failed (disk busy, permission denied, device vanished), every
+	// subsequent mkpart/mkfs call below it would operate against a disk
+	// that was never actually relabeled — some would then also fail
+	// silently, others might succeed against a stale/unexpected existing
+	// layout, and the function would sail on to mount whatever espPart/
+	// rootPart happened to compute to. A full failure (no partition at
+	// all) does eventually surface at the mkfs.ext4/mount calls further
+	// down, which already correctly checked their errors — but a PARTIAL
+	// failure (e.g. the ESP mkpart/mkfs failing while the root partition
+	// succeeds) would not: the ESP mount below silently creates an empty
+	// directory instead of a real mount, extraction proceeds anyway, and
+	// disaster recovery finishes "successfully" having produced an
+	// unbootable UEFI system with no real ESP content. Every call that
+	// actually changes the disk's structure now checks its error and
+	// aborts loudly; partprobe (a kernel re-read nudge, not a state
+	// change) is left as best-effort.
 	if isUEFI {
 		logFn(fmt.Sprintf("=> [UEFI DETECTED] Partitioning %s with GPT layout...", targetDisk))
-		_ = exec.Command("parted", "-s", targetDisk, "mklabel", "gpt").Run()
-		_ = exec.Command("parted", "-s", targetDisk, "mkpart", "ESP", "fat32", "1MiB", "1025MiB").Run()
-		_ = exec.Command("parted", "-s", targetDisk, "set", "1", "esp", "on").Run()
-		_ = exec.Command("parted", "-s", targetDisk, "mkpart", "primary", "ext4", "1025MiB", "100%").Run()
-		_ = exec.Command("partprobe", targetDisk).Run()
+		if out, err := execCommand("parted", "-s", targetDisk, "mklabel", "gpt").CombinedOutput(); err != nil {
+			return fmt.Errorf("creating GPT partition table on %s: %w (%s)", targetDisk, err, out)
+		}
+		if out, err := execCommand("parted", "-s", targetDisk, "mkpart", "ESP", "fat32", "1MiB", "1025MiB").CombinedOutput(); err != nil {
+			return fmt.Errorf("creating ESP partition on %s: %w (%s)", targetDisk, err, out)
+		}
+		if out, err := execCommand("parted", "-s", targetDisk, "set", "1", "esp", "on").CombinedOutput(); err != nil {
+			return fmt.Errorf("marking ESP flag on %s partition 1: %w (%s)", targetDisk, err, out)
+		}
+		if out, err := execCommand("parted", "-s", targetDisk, "mkpart", "primary", "ext4", "1025MiB", "100%").CombinedOutput(); err != nil {
+			return fmt.Errorf("creating root partition on %s: %w (%s)", targetDisk, err, out)
+		}
+		_ = execCommand("partprobe", targetDisk).Run()
 		time.Sleep(1 * time.Second)
 
 		espPart = fmt.Sprintf("/dev/%s%s1", baseDisk, sep)
 		rootPart = fmt.Sprintf("/dev/%s%s2", baseDisk, sep)
 
 		logFn(fmt.Sprintf("=> Formatting EFI system partition %s...", espPart))
-		_ = exec.Command("mkfs.vfat", "-F32", "-n", "BOOT", espPart).Run()
+		if out, err := execCommand("mkfs.vfat", "-F32", "-n", "BOOT", espPart).CombinedOutput(); err != nil {
+			return fmt.Errorf("formatting ESP %s: %w (%s)", espPart, err, out)
+		}
 	} else {
 		logFn(fmt.Sprintf("=> [LEGACY BIOS DETECTED] Partitioning %s with MBR layout...", targetDisk))
-		_ = exec.Command("parted", "-s", targetDisk, "mklabel", "msdos").Run()
-		_ = exec.Command("parted", "-s", targetDisk, "mkpart", "primary", "ext4", "1MiB", "100%").Run()
-		_ = exec.Command("parted", "-s", targetDisk, "set", "1", "boot", "on").Run()
-		_ = exec.Command("partprobe", targetDisk).Run()
+		if out, err := execCommand("parted", "-s", targetDisk, "mklabel", "msdos").CombinedOutput(); err != nil {
+			return fmt.Errorf("creating MBR partition table on %s: %w (%s)", targetDisk, err, out)
+		}
+		if out, err := execCommand("parted", "-s", targetDisk, "mkpart", "primary", "ext4", "1MiB", "100%").CombinedOutput(); err != nil {
+			return fmt.Errorf("creating root partition on %s: %w (%s)", targetDisk, err, out)
+		}
+		if out, err := execCommand("parted", "-s", targetDisk, "set", "1", "boot", "on").CombinedOutput(); err != nil {
+			return fmt.Errorf("marking boot flag on %s partition 1: %w (%s)", targetDisk, err, out)
+		}
+		_ = execCommand("partprobe", targetDisk).Run()
 		time.Sleep(1 * time.Second)
 
 		rootPart = fmt.Sprintf("/dev/%s%s1", baseDisk, sep)
 	}
 
 	logFn(fmt.Sprintf("=> Formatting root filesystem on %s...", rootPart))
-	if out, err := exec.Command("mkfs.ext4", "-F", "-L", "ROOT", rootPart).CombinedOutput(); err != nil {
+	if out, err := execCommand("mkfs.ext4", "-F", "-L", "ROOT", rootPart).CombinedOutput(); err != nil {
 		return fmt.Errorf("mkfs.ext4 failed: %w (%s)", err, string(out))
 	}
 
@@ -455,80 +500,94 @@ func RestoreHostFromBackup(archivePath, targetDisk string, logFn func(string)) e
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(stageDir)
+	defer fsRunner.RemoveAll(stageDir)
 
-	if out, err := exec.Command("mount", rootPart, stageDir).CombinedOutput(); err != nil {
+	if out, err := execCommand("mount", rootPart, stageDir).CombinedOutput(); err != nil {
 		return fmt.Errorf("mounting restore target failed: %w (%s)", err, string(out))
 	}
 	defer func() {
-		_ = exec.Command("umount", "-l", stageDir).Run()
-		_ = exec.Command("sync").Run()
+		_ = execCommand("umount", "-l", stageDir).Run()
+		_ = execCommand("sync").Run()
 	}()
 
 	if isUEFI {
 		efiDir := filepath.Join(stageDir, "boot", "efi")
-		_ = os.MkdirAll(efiDir, 0755)
-		_ = exec.Command("mount", espPart, efiDir).Run()
+		_ = fsRunner.MkdirAll(efiDir, 0755)
+		if out, err := execCommand("mount", espPart, efiDir).CombinedOutput(); err != nil {
+			return fmt.Errorf("mounting ESP %s at %s: %w (%s)", espPart, efiDir, err, out)
+		}
 		defer func() {
-			_ = exec.Command("umount", "-l", efiDir).Run()
+			_ = execCommand("umount", "-l", efiDir).Run()
 		}()
 	}
 
 	logFn(fmt.Sprintf("=> Extracting system files from %s...", archivePath))
-	tarCmd := exec.Command("tar", "-xpf", archivePath, "-C", stageDir)
+	tarCmd := execCommand("tar", "-xpf", archivePath, "-C", stageDir)
 	if out, err := tarCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("extraction failed: %w (%s)", err, string(out))
 	}
 
-	uuidOut, err := exec.Command("blkid", "-s", "UUID", "-o", "value", rootPart).Output()
+	uuidOut, err := execCommand("blkid", "-s", "UUID", "-o", "value", rootPart).Output()
 	if err == nil {
 		newUUID := strings.TrimSpace(string(uuidOut))
 		fstabPath := filepath.Join(stageDir, "etc", "fstab")
 		fstabContent := fmt.Sprintf("# Created by Disaster Recovery Orchestrator\nUUID=%s / ext4 errors=remount-ro 0 1\n", newUUID)
 		if isUEFI {
-			espUUIDOut, _ := exec.Command("blkid", "-s", "UUID", "-o", "value", espPart).Output()
+			espUUIDOut, _ := execCommand("blkid", "-s", "UUID", "-o", "value", espPart).Output()
 			espUUID := strings.TrimSpace(string(espUUIDOut))
 			fstabContent += fmt.Sprintf("UUID=%s /boot/efi vfat umask=0077 0 1\n", espUUID)
 		}
-		_ = os.WriteFile(fstabPath, []byte(fstabContent), 0644)
+		_ = fsRunner.WriteFile(fstabPath, []byte(fstabContent), 0644)
 	}
 
 	binds := []string{"/dev", "/proc", "/sys", "/dev/pts"}
 	for _, b := range binds {
 		dest := filepath.Join(stageDir, b)
-		_ = os.MkdirAll(dest, 0755)
-		_ = exec.Command("mount", "--bind", b, dest).Run()
+		_ = fsRunner.MkdirAll(dest, 0755)
+		_ = execCommand("mount", "--bind", b, dest).Run()
 	}
 	defer func() {
 		for i := len(binds) - 1; i >= 0; i-- {
-			_ = exec.Command("umount", "-l", filepath.Join(stageDir, binds[i])).Run()
+			_ = execCommand("umount", "-l", filepath.Join(stageDir, binds[i])).Run()
 		}
 	}()
 
 	if hostDNS, err := os.ReadFile("/etc/resolv.conf"); err == nil {
-		_ = os.WriteFile(filepath.Join(stageDir, "etc", "resolv.conf"), hostDNS, 0644)
+		_ = fsRunner.WriteFile(filepath.Join(stageDir, "etc", "resolv.conf"), hostDNS, 0644)
 	}
 
 	logFn(fmt.Sprintf("=> Reinstalling GRUB bootloader to %s...", targetDisk))
-	var grubScript string
+	grubScript := buildGrubReinstallScript(targetDisk, isUEFI, runtime.GOARCH)
+
+	chrootCmd := execCommand("chroot", stageDir, "/bin/sh", "-c", grubScript)
+	_ = chrootCmd.Run()
+
+	_ = execCommand("sync").Run()
+	logFn("=> [RESTORE COMPLETE] Operating system successfully restored.")
+	return nil
+}
+
+// buildGrubReinstallScript builds the chroot shell script that reinstalls
+// GRUB onto targetDisk during disaster recovery. goarch is the restoring
+// host's own architecture (e.g. runtime.GOARCH) — grub-install's
+// --target= value must match the host's EFI firmware architecture, not be
+// hardcoded to x86_64-efi, or a restore performed on arm64 host hardware
+// would silently install an x86_64 GRUB payload that the arm64 UEFI
+// firmware cannot execute, leaving the "restored" system unbootable.
+// Extracted as a pure function so the arch-selection logic is directly
+// testable without needing a real chroot/disk.
+func buildGrubReinstallScript(targetDisk string, isUEFI bool, goarch string) string {
 	if isUEFI {
-		grubScript = `
-grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=kali --recheck || grub-install /dev/sda
+		_, _, _, grubEFIFormat := efiBootNamesForArch(goarch)
+		return fmt.Sprintf(`
+grub-install --target=%s --efi-directory=/boot/efi --bootloader-id=kali --recheck || grub-install %s
 update-grub || grub-mkconfig -o /boot/grub/grub.cfg
 update-initramfs -u -k all || true
-`
-	} else {
-		grubScript = fmt.Sprintf(`
+`, grubEFIFormat, targetDisk)
+	}
+	return fmt.Sprintf(`
 grub-install %s || grub-install --recheck %s
 update-grub || grub-mkconfig -o /boot/grub/grub.cfg
 update-initramfs -u -k all || true
 `, targetDisk, targetDisk)
-	}
-
-	chrootCmd := exec.Command("chroot", stageDir, "/bin/sh", "-c", grubScript)
-	_ = chrootCmd.Run()
-
-	_ = exec.Command("sync").Run()
-	logFn("=> [RESTORE COMPLETE] Operating system successfully restored.")
-	return nil
 }

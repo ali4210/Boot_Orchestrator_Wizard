@@ -1,0 +1,82 @@
+name: CI
+
+# Audit 2.19: "no CI — go build/go vet/go test aren't even run automatically
+# today, so regressions can land silently." This is the baseline fix:
+# build + vet + test on every push and pull request, on every platform
+# this tool ships for. Deliberately does NOT run cmd/download-verify or
+# the OS Status Matrix workflow here — those make real, multi-gigabyte
+# downloads and (for the matrix) real emulated boots, and belong on
+# workflow_dispatch only (see .github/workflows/download-verify.yml and
+# os-matrix.yml), never on every commit.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-vet-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+
+  # Audit follow-up G2: engine/revert_linux_loopimage_test.go's real
+  # loop-device tests (ExecuteDecommissionWithOptions against an actual
+  # mkfs'd/mounted disk image, not mocked) check os.Geteuid() == 0 and
+  # t.Skip otherwise — meaning the build-vet-test job above, which runs
+  # `go test` as the normal unprivileged runner user, has always silently
+  # skipped them in CI. This job runs the exact same packages under sudo
+  # (-E preserves GOCACHE/GOPATH/PATH so `go` itself is still found and
+  # writes to the same, already-permissioned cache) so this real coverage
+  # actually executes on every push/PR, not only when a human happens to
+  # run `sudo go test` locally.
+  test-root-gated-loopdevice:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: sudo -E go test ./engine/... ./safety/...
+
+  # 2026-11 CI run 44501105882 failed go build ./... on windows-latest and
+  # macos-latest with unused-import errors in four GOOS-gated files
+  # (engine_windows.go, revert_windows.go, engine_darwin.go,
+  # revert_darwin.go) — a mistake that survived every local
+  # `go build ./... && go vet ./... && go test ./...` run because this
+  # project's development sandbox is Linux-only, and a native Linux build
+  # never compiles files gated by `//go:build windows`/`//go:build darwin`
+  # at all. This job runs scripts/crosscheck.sh (also exposed as
+  # `make crosscheck`), which cross-compiles and vets every non-native
+  # platform/arch this project ships for (windows/amd64, darwin/amd64,
+  # darwin/arm64, linux/arm64) from a single ubuntu-latest runner — no
+  # real windows-latest/macos-latest runner needed for this, since
+  # `go build`/`go vet` under GOOS/GOARCH only compiles and type-checks,
+  # it never executes anything. This exists specifically so a repeat of
+  # this exact class of mistake is caught here, not discovered only when
+  # the build-vet-test matrix's real windows-latest/macos-latest runners
+  # hit it.
+  crosscheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make crosscheck

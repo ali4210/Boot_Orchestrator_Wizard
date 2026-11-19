@@ -64,12 +64,39 @@ type Entry struct {
 	DownloadURL     string   `json:"download_url,omitempty"`
 	Mirrors         []string `json:"mirrors,omitempty"`
 	SHA256          string   `json:"sha256,omitempty"`
+
+	// SignatureURL/SigningKeyURL (audit 2.7/item 28) point at a detached
+	// OpenPGP signature (armored or binary) over the download and an
+	// ASCII-armored public keyring to verify it against, respectively.
+	// A SHA256 checksum alone doesn't protect against a compromised
+	// mirror serving a tampered file alongside a tampered checksum of
+	// its own, obtained from that same mirror — a signature made by the
+	// distro's own key, fetched independently, closes that gap. Both
+	// empty (the case for every current catalog entry — see item 20/28's
+	// notes in PROGRESS.md on why real values aren't invented here) means
+	// no signature check runs for that entry, exactly like SHA256 being
+	// empty today.
+	SignatureURL  string `json:"signature_url,omitempty"`
+	SigningKeyURL string `json:"signing_key_url,omitempty"`
 	ApproxSizeBytes uint64   `json:"approx_size_bytes,omitempty"`
 	RequiresLicense bool     `json:"requires_license,omitempty"`
 	MinDiskGB       int      `json:"min_disk_gb"`
 	Notes           string   `json:"notes,omitempty"`
 	EOL             bool     `json:"eol,omitempty"`
 	OpenCoreProfile string   `json:"opencore_profile,omitempty"`
+
+	// Unavailable marks an entry whose download is currently known not to
+	// work at all — a dead mirror, an expired/forbidden signed URL — as
+	// opposed to EOL, which is a "proceed anyway if you want" choice.
+	// There is no safe way to provision from an entry whose own URLs 404/
+	// 403 today, so it's hidden from the TUI's catalog listing
+	// (GetEntriesByCategory/ListCategories) and refused outright in
+	// headless mode, until UnavailableReason's underlying problem is
+	// actually fixed in the data (audit follow-up G1; see
+	// OS_STATUS_MATRIX.md for how each of these was confirmed dead, not
+	// assumed).
+	Unavailable       bool   `json:"unavailable,omitempty"`
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
 }
 
 // GetMirrors returns all available mirror URLs, falling back to DownloadURL.
@@ -159,7 +186,7 @@ func (c *Catalog) ListCategories() []Category {
 
 	for _, cat := range order {
 		for _, e := range c.Entries {
-			if e.Category == cat && !seen[cat] {
+			if e.Category == cat && !e.Unavailable && !seen[cat] {
 				seen[cat] = true
 				categories = append(categories, cat)
 				break
@@ -169,10 +196,17 @@ func (c *Catalog) ListCategories() []Category {
 	return categories
 }
 
-// GetEntriesByCategory filters entries by folder category.
+// GetEntriesByCategory filters entries by folder category, hiding any
+// entry marked Unavailable (audit follow-up G1) — there is no safe way to
+// provision from media whose own download URLs are confirmed dead, so
+// unlike EOL (still listed, just tagged), these never appear for the TUI
+// to offer at all.
 func (c *Catalog) GetEntriesByCategory(cat Category) []Entry {
 	var out []Entry
 	for _, e := range c.Entries {
+		if e.Unavailable {
+			continue
+		}
 		if e.Category == cat {
 			out = append(out, e)
 		}
@@ -201,6 +235,9 @@ func (c *Catalog) Merge(entries []Entry) {
 func (c *Catalog) Filter(family Family, flavor Flavor, arch Arch, includeEOL bool) []Entry {
 	var out []Entry
 	for _, e := range c.Entries {
+		if e.Unavailable {
+			continue
+		}
 		if family != "" && e.Family != family {
 			continue
 		}

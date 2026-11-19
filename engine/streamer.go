@@ -1,6 +1,7 @@
 // Package engine — streamer.go implements the Resilient Multi-Mirror HTTP
 // Streamer with automated failover, HTTP Range pause/resume capabilities,
-// local file payload support, and single-pass SHA-256 verification.
+// local file payload support, single-pass SHA-256 verification, and autonomous
+// HTTP 416 range auto-recovery.
 package engine
 
 import (
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,11 +23,56 @@ import (
 // ErrDownloadPaused indicates the download stopped gracefully due to a pause request.
 var ErrDownloadPaused = errors.New("download paused by user")
 
-// Progress holds a thread-safe snapshot of download telemetry.
+// errStalled indicates an attempt was aborted because no bytes were
+// received for stallTimeout, distinct from a user-requested pause/cancel
+// so retry logic can tell the two apart.
+var errStalled = errors.New("download stalled: no data received")
+
+// errPermanentStatus wraps an HTTP status a mirror returned that retrying
+// against the SAME mirror cannot possibly fix (403 Forbidden, 404 Not
+// Found, 401, ...). Without this, downloadFromSingleMirrorWithRetry's
+// generic "retry transient failures" logic would otherwise retry a
+// mirror that will deterministically return the same error every time,
+// burning downloadMaxAttempts worth of exponential backoff (tens of
+// seconds) before finally moving on to the next mirror.
+type errPermanentStatus struct {
+	status string
+}
+
+func (e *errPermanentStatus) Error() string {
+	return fmt.Sprintf("unexpected HTTP status: %s", e.status)
+}
+
+// stallTimeout is how long downloadFromSingleMirror waits for ANY forward
+// progress (new bytes read from the response body) before concluding the
+// connection has stalled and aborting that attempt so it can be retried.
+// Audit item 11/E: previously there was no such watchdog at all — a
+// connection that stayed open but stopped sending data (a true network
+// "stall", as opposed to a clean close or reset) would block on Read()
+// forever, since neither client.Timeout (disabled) nor the transport's
+// ResponseHeaderTimeout/IdleConnTimeout cover an already-in-progress body
+// read. A var so tests can shrink it instead of waiting out the real
+// duration.
+var stallTimeout = 30 * time.Second
+
+// downloadMaxAttempts and downloadRetryBaseDelay control per-mirror retry
+// backoff for a stalled/reset/truncated attempt. Audit item 11/E:
+// previously a single failed attempt against a mirror moved straight to
+// the next mirror (or straight to "all mirrors exhausted" when there was
+// only one, the common case for a single ImageURL) — a single transient
+// blip on a multi-gigabyte download killed the whole download with no
+// retry at all. Vars so tests don't have to wait out real backoff delays.
+var downloadMaxAttempts = 5
+var downloadRetryBaseDelay = 2 * time.Second
+
+// Progress holds a thread-safe snapshot of download telemetry. Status, when
+// non-empty, is a human-readable transient note (e.g. "stalled, retrying
+// 2/5") for the caller to surface in its UI; it is not cumulative state.
 type Progress struct {
 	BytesRead  int64
 	TotalBytes int64 // 0 if unknown
 	StartedAt  time.Time
+	Status     string
 }
 
 // Percent returns 0-100 or -1 if total is unknown.
@@ -67,6 +114,23 @@ func StreamDownload(ctx context.Context, url, destPath, expectedSHA256 string, o
 // StreamDownloadWithFailover handles local paths, iterates redundant mirrors,
 // runs active preflight sentinel checks, auto-decompresses archives,
 // and validates SHA-256 integrity.
+//
+// Deliberately NOT routed through fsRunner/execCommand, found and fixed
+// while building item 50 (audit follow-up G3)'s real dry-run proof: this
+// function only ever writes to a LOCAL destPath (never the target disk),
+// and the project's own documented design (docs/dryrun-inventory.md) is
+// that the payload download stays real under --dry-run so the rest of a
+// dry run (checksum verification, free-space headroom) stays meaningful.
+// An earlier pass had migrated this file's os.MkdirAll/Rename/Remove onto
+// fsRunner for blanket consistency with every other file — which broke
+// that documented design in a subtle way: the real HTTP/local-file copy
+// still happened for real (raw os.Create/io.Copy, never touched), but the
+// FINAL os.Rename committing the result to destPath got silently faked
+// under dry-run, so callers downstream (checksum verification against
+// streamResult.DestPath) would find no file there at all. Reverted this
+// file (and stream_decoder.go/resilient_streamer.go/scp_streamer.go,
+// the same download/local-cache family) back to raw os.* so the whole
+// download path is consistently real, not half-intercepted.
 func StreamDownloadWithFailover(ctx context.Context, mirrors []string, destPath, expectedSHA256 string, onProgress func(Progress)) (*StreamResult, error) {
 	if len(mirrors) == 0 {
 		return nil, fmt.Errorf("no download mirrors provided")
@@ -168,31 +232,56 @@ func StreamDownloadWithFailover(ctx context.Context, mirrors []string, destPath,
 			}
 		}
 
-		// Remote mirror execution
+		// Remote mirror execution. Retries transient failures (stall,
+		// reset) against this same mirror internally (audit item 11/E —
+		// see downloadFromSingleMirrorWithRetry); a checksum mismatch gets
+		// exactly one additional clean restart (full re-download from
+		// scratch) before this mirror is abandoned, since the mismatch
+		// could stem from a stale/corrupt .part file rather than the
+		// mirror itself.
 		var existingOffset int64
 		if stat, err := os.Stat(tmpPath); err == nil && stat.Size() > 0 {
 			existingOffset = stat.Size()
 		}
 
-		res, err := downloadFromSingleMirror(ctx, client, cleanMirror, tmpPath, existingOffset, start, onProgress)
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, ErrDownloadPaused) {
+		var res *StreamResult
+		var calculatedSHA string
+		var attemptErr error
+		for cleanRestart := 0; cleanRestart < 2; cleanRestart++ {
+			if cleanRestart == 1 {
+				_ = os.Remove(tmpPath)
+			}
+
+			res, attemptErr = downloadFromSingleMirrorWithRetry(ctx, client, cleanMirror, tmpPath, start, onProgress)
+			if attemptErr != nil {
+				break
+			}
+
+			calculatedSHA, attemptErr = computeFileSHA256(tmpPath)
+			if attemptErr != nil {
+				break
+			}
+
+			if expectedSHA256 == "" || equalFoldHex(calculatedSHA, expectedSHA256) {
+				attemptErr = nil
+				break
+			}
+
+			attemptErr = fmt.Errorf("checksum mismatch (expected: %s, calculated: %s)", expectedSHA256, calculatedSHA)
+			if onProgress != nil {
+				onProgress(Progress{StartedAt: start, Status: "checksum mismatch, restarting download from scratch..."})
+			}
+		}
+
+		if attemptErr != nil {
+			if errors.Is(attemptErr, context.Canceled) || errors.Is(attemptErr, ErrDownloadPaused) {
 				return nil, ErrDownloadPaused
 			}
-			lastErr = fmt.Errorf("mirror [%d/%d] %s failed: %w", mirrorIndex+1, len(prioritizedMirrors), cleanMirror, err)
-			continue
-		}
-
-		calculatedSHA, hashErr := computeFileSHA256(tmpPath)
-		if hashErr != nil {
-			lastErr = fmt.Errorf("verifying checksum: %w", hashErr)
-			continue
-		}
-
-		if expectedSHA256 != "" && !equalFoldHex(calculatedSHA, expectedSHA256) {
-			corruptPath := destPath + ".corrupt"
-			_ = os.Rename(tmpPath, corruptPath)
-			lastErr = fmt.Errorf("checksum mismatch from mirror %s (expected: %s, calculated: %s)", cleanMirror, expectedSHA256, calculatedSHA)
+			if strings.Contains(attemptErr.Error(), "checksum mismatch") {
+				corruptPath := destPath + ".corrupt"
+				_ = os.Rename(tmpPath, corruptPath)
+			}
+			lastErr = fmt.Errorf("mirror [%d/%d] %s failed: %w", mirrorIndex+1, len(prioritizedMirrors), cleanMirror, attemptErr)
 			continue
 		}
 
@@ -226,7 +315,6 @@ func copyFromLocalFile(
 	}
 	defer src.Close()
 
-	// Wrap in stream decoder for transparent on-the-fly inflation
 	decoded, err := InspectAndDecodeStream(src)
 	if err != nil {
 		return nil, fmt.Errorf("stream decoder failed: %w", err)
@@ -294,6 +382,69 @@ func copyFromLocalFile(
 	}, nil
 }
 
+// downloadFromSingleMirrorWithRetry wraps downloadFromSingleMirror with
+// exponential-backoff-with-jitter retries (audit item 11/E): a stalled,
+// reset, or otherwise transient failure retries the SAME mirror up to
+// downloadMaxAttempts times (re-reading whatever bytes already landed in
+// tmpPath via Range, same as a fresh resume) before giving up on it,
+// instead of a single failed attempt immediately exhausting that mirror.
+// A context cancellation/pause is never retried — it propagates straight
+// through.
+func downloadFromSingleMirrorWithRetry(ctx context.Context, client *http.Client, url, tmpPath string, startTime time.Time, onProgress func(Progress)) (*StreamResult, error) {
+	var lastErr error
+	for attempt := 1; attempt <= downloadMaxAttempts; attempt++ {
+		var resumeOffset int64
+		if stat, statErr := os.Stat(tmpPath); statErr == nil && stat.Size() > 0 {
+			resumeOffset = stat.Size()
+		}
+
+		res, err := downloadFromSingleMirror(ctx, client, url, tmpPath, resumeOffset, startTime, onProgress)
+		if err == nil {
+			return res, nil
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, ErrDownloadPaused) {
+			return nil, err
+		}
+		var permErr *errPermanentStatus
+		if errors.As(err, &permErr) {
+			// A deterministic HTTP error status (403, 404, ...) will not
+			// change on retry — fail fast instead of burning
+			// downloadMaxAttempts worth of exponential backoff against a
+			// mirror that will never succeed.
+			return nil, err
+		}
+		lastErr = err
+		if attempt == downloadMaxAttempts {
+			break
+		}
+
+		reason := "connection error"
+		if errors.Is(err, errStalled) {
+			reason = "stalled"
+		}
+
+		// Exponential backoff with jitter: base * 2^(attempt-1), plus up to
+		// one more base-delay-worth of random jitter so many clients
+		// retrying the same mirror at once don't all hammer it in lockstep.
+		delay := downloadRetryBaseDelay * time.Duration(1<<uint(attempt-1))
+		delay += time.Duration(rand.Int63n(int64(downloadRetryBaseDelay) + 1))
+
+		if onProgress != nil {
+			onProgress(Progress{
+				StartedAt: startTime,
+				Status:    fmt.Sprintf("%s, retrying %d/%d in %s...", reason, attempt, downloadMaxAttempts, delay.Round(time.Second)),
+			})
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ErrDownloadPaused
+		case <-time.After(delay):
+		}
+	}
+	return nil, fmt.Errorf("after %d attempts: %w", downloadMaxAttempts, lastErr)
+}
+
 func downloadFromSingleMirror(
 	ctx context.Context,
 	client *http.Client,
@@ -302,7 +453,14 @@ func downloadFromSingleMirror(
 	startTime time.Time,
 	onProgress func(Progress),
 ) (*StreamResult, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	// A per-attempt cancellable context, derived from ctx, lets the stall
+	// watchdog below abort an in-progress read (by cancelling this context,
+	// which aborts the underlying request) without needing SetReadDeadline
+	// on resp.Body, which net/http does not expose.
+	attemptCtx, cancelAttempt := context.WithCancel(ctx)
+	defer cancelAttempt()
+
+	req, err := http.NewRequestWithContext(attemptCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -318,6 +476,13 @@ func downloadFromSingleMirror(
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
+	}
+
+	// Range Sanity Fallback: If remote returned HTTP 416 (offset >= file size), truncate & retry from 0
+	if useRange && resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		resp.Body.Close()
+		_ = os.Truncate(tmpPath, 0)
+		return downloadFromSingleMirror(ctx, client, url, tmpPath, 0, startTime, onProgress)
 	}
 	defer resp.Body.Close()
 
@@ -339,18 +504,70 @@ func downloadFromSingleMirror(
 		currentBytes = 0
 		totalBytes = resp.ContentLength
 	} else {
-		return nil, fmt.Errorf("unexpected HTTP status: %s", resp.Status)
+		return nil, &errPermanentStatus{status: resp.Status}
 	}
 	defer file.Close()
 
-	// Route incoming socket stream through stream decoder
+	// Free-disk-space pre-check (audit item 12/E): once the server has told
+	// us how many bytes remain, confirm the destination filesystem actually
+	// has room before starting the write loop, rather than filling the disk
+	// partway through a multi-gigabyte transfer. Best-effort: if the space
+	// can't be determined (unsupported platform/filesystem), skip silently
+	// rather than blocking a download that might otherwise succeed.
+	if totalBytes > 0 {
+		remaining := totalBytes - currentBytes
+		if remaining > 0 {
+			if free, spaceErr := freeDiskSpaceBytes(filepath.Dir(tmpPath)); spaceErr == nil && int64(free) < remaining {
+				return nil, fmt.Errorf("insufficient disk space: need %d more bytes for this download, only %d available on %s", remaining, free, filepath.Dir(tmpPath))
+			}
+		}
+	}
+
+	// Stall watchdog (audit item 11/E): if no new bytes arrive for
+	// stallTimeout, cancel attemptCtx so a blocked Read() unblocks, rather
+	// than waiting on a connection that has gone silent forever. net/http
+	// doesn't expose a per-read deadline on resp.Body, so cancelling the
+	// request's own context is the mechanism available.
+	//
+	// Started here, BEFORE InspectAndDecodeStream, not just around the main
+	// read loop below: InspectAndDecodeStream does its own blocking
+	// io.ReadFull of the first 512 bytes to sniff the stream format, and a
+	// server that accepts the connection, sends headers, then sends zero
+	// body bytes and goes silent would otherwise hang there completely
+	// unprotected, before the main loop (and the watchdog that used to only
+	// guard it) ever starts.
+	done := make(chan struct{})
+	lastProgressAt := int64(0)
+	atomic.StoreInt64(&lastProgressAt, time.Now().UnixNano())
+	var stalled int32
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				last := atomic.LoadInt64(&lastProgressAt)
+				if time.Since(time.Unix(0, last)) > stallTimeout {
+					atomic.StoreInt32(&stalled, 1)
+					cancelAttempt()
+					return
+				}
+			}
+		}
+	}()
+
 	decoded, err := InspectAndDecodeStream(resp.Body)
 	if err != nil {
+		close(done)
+		if atomic.LoadInt32(&stalled) == 1 {
+			return nil, fmt.Errorf("%w for %s (while identifying the stream format)", errStalled, stallTimeout)
+		}
 		return nil, fmt.Errorf("failed decoding stream payload: %w", err)
 	}
 	defer decoded.Cleanup()
 
-	done := make(chan struct{})
 	if onProgress != nil {
 		go func() {
 			ticker := time.NewTicker(250 * time.Millisecond)
@@ -377,8 +594,11 @@ func downloadFromSingleMirror(
 	buffer := make([]byte, 128*1024)
 	for {
 		select {
-		case <-ctx.Done():
+		case <-attemptCtx.Done():
 			close(done)
+			if atomic.LoadInt32(&stalled) == 1 {
+				return nil, fmt.Errorf("%w for %s", errStalled, stallTimeout)
+			}
 			return nil, ErrDownloadPaused
 		default:
 		}
@@ -390,12 +610,21 @@ func downloadFromSingleMirror(
 				return nil, writeErr
 			}
 			atomic.AddInt64(&currentBytes, int64(n))
+			atomic.StoreInt64(&lastProgressAt, time.Now().UnixNano())
 		}
 
 		if readErr != nil {
 			close(done)
 			if errors.Is(readErr, io.EOF) {
 				break
+			}
+			// A Read() already in flight when the watchdog cancels
+			// attemptCtx surfaces here as a transport-level error (not
+			// caught by the attemptCtx.Done() select above, which only
+			// catches cancellation discovered BETWEEN reads) — relabel it
+			// as a stall if that's what actually happened.
+			if atomic.LoadInt32(&stalled) == 1 {
+				return nil, fmt.Errorf("%w for %s", errStalled, stallTimeout)
 			}
 			return nil, readErr
 		}

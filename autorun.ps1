@@ -5,7 +5,7 @@
  Supports:
    .\autorun.ps1              -> Standard elevated launch
    .\autorun.ps1 -Force (-f)  -> Force clean rebuild + launch
-   .\autorun.ps1 -Hard        -> Deep clean temporary artifacts + rebuild + launch
+   .\autorun.ps1 -Hard (-H)   -> Deep clean temporary artifacts + rebuild + launch
 ==============================================================================
 #>
 [CmdletBinding()]
@@ -13,10 +13,10 @@ param(
     [Alias("f")]
     [switch]$Force,
 
-    [Alias("hard")]
+    [Alias("H")]
     [switch]$Hard,
 
-    [Alias("h")]
+    [Alias("?")]
     [switch]$Help
 )
 
@@ -26,13 +26,13 @@ if ($Help) {
     Write-Host "Usage:"
     Write-Host "  .\autorun.ps1         Standard elevated launch"
     Write-Host "  .\autorun.ps1 -f      Force clean rebuild + auto-resolve modules + launch"
-    Write-Host "  .\autorun.ps1 -hard   Deep purge of caches, journals + fresh rebuild + launch"
-    Write-Host "  .\autorun.ps1 -h      Display this help menu"
+    Write-Host "  .\autorun.ps1 -Hard   Deep purge of caches, journals + fresh rebuild + launch"
+    Write-Host "  .\autorun.ps1 -?      Display this help menu"
     Write-Host ""
     exit 0
 }
 
-# --- 1. SELF-ELEVATION TRAMPOLINE (TRIGGERS NATIVE UAC "YES" PROMPT) ---
+# --- 1. SELF-ELEVATION TRAMPOLINE (TRIGGERS NATIVE UAC PROMPT) ---
 $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($currentIdentity)
 $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -48,7 +48,8 @@ if (-not $isAdmin) {
     if ($Hard)  { $paramList += "-Hard" }
     $paramString = $paramList -join " "
 
-    $arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"Set-Location '$PSScriptRoot'; & '$scriptPath' $paramString`""
+    # Keep console active and print any startup error directly
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -NoExit -Command `"Set-Location '$PSScriptRoot'; try { & '$scriptPath' $paramString } catch { Write-Host `$_.Exception.Message -ForegroundColor Red }; Read-Host 'Press Enter to close'`""
 
     try {
         Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -Verb RunAs
@@ -116,14 +117,39 @@ Write-Host "=> Checking Go toolchain to build from source..." -ForegroundColor Y
 $tempGoRoot = "$env:TEMP\go_runtime"
 $bootstrappedGo = $false
 
+# Even when a system Go is already on PATH, let its own toolchain manager
+# (Go 1.21+) transparently fetch/switch to whatever version go.mod requires
+# if the installed one is older (audit 1D.10).
+$env:GOTOOLCHAIN = "auto"
+
 try {
     if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
         Write-Host "=> Go compiler not found in system PATH." -ForegroundColor Yellow
         Write-Host "=> Auto-fetching portable Go runtime to ephemeral storage..." -ForegroundColor Cyan
-        
+
+        # Audit 1D.10: this used to hardcode a specific Go version
+        # (go1.22.6) that silently drifted out of sync with go.mod's own
+        # `go` directive (currently requiring 1.26.0) — an old bootstrapped
+        # toolchain can fail outright, or depend entirely on an implicit
+        # GOTOOLCHAIN auto-upgrade over the network. Parse the required
+        # version straight from go.mod instead, so this always bootstraps a
+        # toolchain that matches what the project actually needs.
+        $GoModPath = Join-Path $ScriptDir "go.mod"
+        $GoModGoLine = Select-String -Path $GoModPath -Pattern '^go\s+(\d+\.\d+(?:\.\d+)?)' | Select-Object -First 1
+        if (-not $GoModGoLine) {
+            throw "Could not find a 'go <version>' directive in $GoModPath to determine which Go toolchain to bootstrap."
+        }
+        $GoModVersion = $GoModGoLine.Matches[0].Groups[1].Value
+        if ($GoModVersion -notmatch '\.\d+\.\d+$' -and $GoModVersion -match '^\d+\.\d+$') {
+            # go.mod may specify a two-part version (e.g. "1.26"); the
+            # downloadable toolchain archives are published as X.Y.0.
+            $GoModVersion = "$GoModVersion.0"
+        }
+        Write-Host "=> go.mod requires Go $GoModVersion; bootstrapping that exact version." -ForegroundColor Cyan
+
         $GoZip = "$env:TEMP\go_bootstrap.zip"
-        $DownloadUrl = "https://go.dev/dl/go1.22.6.windows-amd64.zip"
-        
+        $DownloadUrl = "https://go.dev/dl/go$GoModVersion.windows-amd64.zip"
+
         Invoke-WebRequest -Uri $DownloadUrl -OutFile $GoZip -UseBasicParsing
         
         if (Test-Path $tempGoRoot) {
@@ -150,6 +176,7 @@ try {
     go build -ldflags="-s -w" -o $BinPath .\cmd\orchestrator\main.go
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[-] Compilation failed." -ForegroundColor Red
+        Read-Host "Press Enter to exit"
         exit 1
     }
 
@@ -165,4 +192,8 @@ finally {
 # --- 5. LAUNCH THE ORCHESTRATOR ---
 Write-Host "=> Launching Universal Boot Orchestrator..." -ForegroundColor Green
 & $BinPath
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[-] Process exited with code $LASTEXITCODE." -ForegroundColor Red
+    Read-Host "Press Enter to exit"
+}
 exit $LASTEXITCODE

@@ -123,6 +123,24 @@
     ]
   },
   {
+    "id": "ubuntu-server-arm64",
+    "category": "Ubuntu / Debian",
+    "family": "linux",
+    "distro": "Ubuntu Server",
+    "version": "24.04.4 LTS",
+    "codename": "noble",
+    "flavor": "tty",
+    "arch": "arm64",
+    "min_disk_gb": 15,
+    "approx_size_bytes": 3059724288,
+    "requires_license": false,
+    "download_url": "https://cdimage.ubuntu.com/ubuntu/releases/24.04/release/ubuntu-24.04.4-live-server-arm64.iso",
+    "mirrors": [
+      "https://cdimage.ubuntu.com/ubuntu/releases/24.04/release/ubuntu-24.04.4-live-server-arm64.iso"
+    ],
+    "notes": "Phase 6 (item 36): arm64 host dual-boot support, verified reachable."
+  },
+  {
     "id": "linux-mint-cinnamon-amd64",
     "category": "Ubuntu / Debian",
     "family": "linux",
@@ -155,6 +173,24 @@
     "mirrors": [
       "https://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/mini.iso"
     ]
+  },
+  {
+    "id": "debian-netboot-arm64",
+    "category": "Ubuntu / Debian",
+    "family": "linux",
+    "distro": "Debian GNU/Linux",
+    "version": "12 Netboot",
+    "codename": "bookworm",
+    "flavor": "tty",
+    "arch": "arm64",
+    "min_disk_gb": 10,
+    "approx_size_bytes": 142913536,
+    "requires_license": false,
+    "download_url": "https://deb.debian.org/debian/dists/bookworm/main/installer-arm64/current/images/netboot/mini.iso",
+    "mirrors": [
+      "https://deb.debian.org/debian/dists/bookworm/main/installer-arm64/current/images/netboot/mini.iso"
+    ],
+    "notes": "Phase 6 (item 36): arm64 host dual-boot support, verified reachable."
   },
   {
     "id": "fedora-workstation-amd64",
@@ -257,7 +293,9 @@
     "download_url": "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-standard-3.20.3-x86_64.iso",
     "mirrors": [
       "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-standard-3.20.3-x86_64.iso"
-    ]
+    ],
+    "unavailable": true,
+    "unavailable_reason": "incompatible with the autonomous installer"
   },
   {
     "id": "centos-7-dvd-amd64",
@@ -379,7 +417,9 @@
     "mirrors": [
       "https://distfiles.gentoo.org/releases/amd64/autobuilds/current-install-amd64-minimal/install-amd64-minimal-20260830T151604Z.iso",
       "https://gentoo.osuosl.org/releases/amd64/autobuilds/current-livegui-amd64/livegui-amd64-20260830T151604Z.iso"
-    ]
+    ],
+    "unavailable": true,
+    "unavailable_reason": "both mirrors return HTTP 404 (confirmed via curl -I on 2026-11-18 and again on 2026-11-19) — see OS_STATUS_MATRIX.md Tier 1"
   },
   {
     "id": "slackware-15-amd64",

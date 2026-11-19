@@ -1,21 +1,5 @@
 [
   {
-    "id": "macos-sequoia-virt-amd64",
-    "category": "Apple macOS",
-    "family": "macos",
-    "distro": "macOS Sequoia (Recovery BaseSystem)",
-    "version": "15.x",
-    "flavor": "gui",
-    "arch": "amd64",
-    "min_disk_gb": 64,
-    "approx_size_bytes": 680000000,
-    "opencore_profile": "vbox-opencore-sequoia",
-    "mirrors": [
-      "https://raw.githubusercontent.com/kholia/OSX-KVM/master/fetch-macOS-v2.py"
-    ],
-    "notes": "Latest virtualized macOS deployment with hypervisor CPU profile spoofing."
-  },
-  {
     "id": "macos-sonoma-virt-amd64",
     "category": "Apple macOS",
     "family": "macos",
@@ -23,12 +7,32 @@
     "version": "14.x",
     "flavor": "gui",
     "arch": "amd64",
-    "min_disk_gb": 60,
-    "approx_size_bytes": 650000000,
+    "min_disk_gb": 40,
+    "approx_size_bytes": 790000000,
     "opencore_profile": "vbox-opencore-sonoma",
     "mirrors": [
-      "https://raw.githubusercontent.com/kholia/OSX-KVM/master/fetch-macOS-v2.py"
+      "http://oscdn.apple.com/content/downloads/11/58/062-53943/of12aseueo2jnehp03qh5g3o17lx4139t1/RecoveryImage/BaseSystem.dmg"
     ],
-    "notes": "OpenCore KVM recovery bootstrap module. Streams verified BaseSystem directly from Apple."
+    "notes": "Direct Apple CDN Recovery BaseSystem payload for macOS Sonoma.",
+    "unavailable": true,
+    "unavailable_reason": "the signed Apple CDN URL returns HTTP 403 Forbidden (confirmed via curl -I on 2026-11-18 and again on 2026-11-19) — see OS_STATUS_MATRIX.md Tier 1"
+  },
+  {
+    "id": "macos-sequoia-virt-amd64",
+    "category": "Apple macOS",
+    "family": "macos",
+    "distro": "macOS Sequoia (Recovery BaseSystem)",
+    "version": "15.x",
+    "flavor": "gui",
+    "arch": "amd64",
+    "min_disk_gb": 40,
+    "approx_size_bytes": 820000000,
+    "opencore_profile": "vbox-opencore-sequoia",
+    "mirrors": [
+      "http://oscdn.apple.com/content/downloads/11/58/062-53943/of12aseueo2jnehp03qh5g3o17lx4139t1/RecoveryImage/BaseSystem.dmg"
+    ],
+    "notes": "Direct Apple CDN Recovery BaseSystem payload for macOS Sequoia.",
+    "unavailable": true,
+    "unavailable_reason": "the signed Apple CDN URL returns HTTP 403 Forbidden (confirmed via curl -I on 2026-11-18 and again on 2026-11-19) — see OS_STATUS_MATRIX.md Tier 1"
   }
 ]
