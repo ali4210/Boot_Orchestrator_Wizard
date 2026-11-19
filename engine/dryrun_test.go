@@ -199,13 +199,20 @@ func TestDryRunExecCommand_NeverExecutesButSatisfiesStdinDirEnv(t *testing.T) {
 // 32's actual migrated call site: with dry-run enabled,
 // assertDefaultCredentials's sudoers.d write (now routed through
 // fsRunner — see engine/bootloader.go) does not touch the real
-// filesystem. It still returns an error in dry-run mode — documented,
-// not a bug: the function's own account-existence verification
-// legitimately can't succeed when the chroot command that would create
-// the account never really ran (DryRunRunner returns empty output, which
-// doesn't contain the ORCH_ACCOUNT_VERIFIED marker the verification
-// checks for). A dry-run that fabricated a fake "verified" result here
-// would be lying about something it has no way to actually know.
+// filesystem.
+//
+// Updated for the PR #2 full-dry-run-flow follow-up: this function's own
+// account-existence verification used to legitimately fail in dry-run,
+// since the chroot command that would create the account never really
+// ran — which meant RunProvision could never get past account
+// provisioning under --dry-run at all, stopping well before mkfs, the
+// bootloader, or NVRAM registration. Per that follow-up's explicit
+// instruction, this specific verification (which checks for a REAL side
+// effect of an intercepted command, not something dry-run could ever
+// honestly determine either way) is now simulated instead, with a
+// logDryRunSimulated line recording exactly that — see
+// assertDefaultCredentials's own comment. A nil error here is no longer
+// a false claim: it is the documented, deliberate simulation.
 func TestAssertDefaultCredentials_DryRunDoesNotWriteSudoersFile(t *testing.T) {
 	restore := SetDryRun(true)
 	defer restore()
@@ -214,8 +221,8 @@ func TestAssertDefaultCredentials_DryRunDoesNotWriteSudoersFile(t *testing.T) {
 	creds := Credentials{Username: "janedoe", Password: "a-fine-password"}
 
 	err := assertDefaultCredentials(rootPath, creds, nil)
-	if err == nil {
-		t.Fatalf("expected an error in dry-run mode (the simulated chroot can't produce a real ORCH_ACCOUNT_VERIFIED result) — a nil error here would mean this falsely claimed success")
+	if err != nil {
+		t.Fatalf("expected assertDefaultCredentials to simulate success in dry-run (chroot's real verification is unreachable by construction, see logDryRunSimulated), got: %v", err)
 	}
 
 	sudoersPath := filepath.Join(rootPath, "etc", "sudoers.d", "janedoe")

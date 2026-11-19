@@ -2246,3 +2246,70 @@ before every commit; nothing was invented (no fabricated checksums, signing keys
 catalog URLs — every real URL added was independently checked reachable first); and every
 stopping point was written down here before context ran out, so the next session (or this
 one, after compaction) could resume from fact rather than from memory.
+
+## Post-merge follow-up (PR #2, branch `fix/dryrun-full-flow`): full headless dry-run now reaches the end
+
+Reported after PR #1 merged: a headless `--dry-run` against a real 40 GB loop device stopped
+at `partition-shrink` with `"partition /dev/loop0p1 created in table but node missing in
+/dev"`, meaning dry-run never reached mkfs, the bootloader, NVRAM, or USB staging for a
+disk-carving install. Reproduced first (exact error, exact step) against a real,
+loop-mounted, deliberately-blank 40 GB GPT disk before touching any code.
+
+### Item 71: `CheckUnallocatedHeadroom`/`CarvePartitionInFreeSpace`/`CarveHardwarePartitionAtBoundary` — route real `parted print`/`print free` reads through `diskReadRunner()` — commit (this branch)
+
+Root cause, one layer deeper than the reported symptom: these functions' own `parted ...
+print`/`parted ... print free` calls (read-only — "print" never mutates a disk) went through
+the blanket-faked `cmdRunner`, so under dry-run they always returned empty output. That made
+`CarveHardwarePartitionAtBoundary` wrongly conclude a disk WITH existing partitions was
+completely blank, skipping the shrink-existing-partition logic entirely and miscomputing the
+next free partition number — which is what then tripped the (correct, but now misapplied)
+verification that the newly-"created" partition's `/dev` node never appeared, since the
+`mkpart` that would have created it was *also* faked. Fixed by extending `diskReadRunner()`
+(originally built for `blockdev`/`dd` reads in item 50) to cover these four call sites too —
+same principle, same mechanism, not a new one. `go vet`/cross-compile confirmed real mode
+(the `else` branch of `diskReadRunner()`) is untouched.
+
+### Item 72: simulate dry-run-unreachable verification checks with `logDryRunSimulated` — same commit
+
+Three remaining checkpoints verify a REAL side effect of a command that dry-run itself
+intercepted, and so could never succeed under dry-run no matter how correct the real logic
+is — not bugs, but the thing standing between dry-run and the rest of the pipeline:
+1. `CarvePartitionInFreeSpace`'s partition-node-exists poll (the reported bug itself).
+2. `extractLiveRootFS`'s `locateSquashfsOrErr` search (depends on `mount` having really
+   populated the ISO mount point).
+3. `assertDefaultCredentials`'s `ORCH_ACCOUNT_VERIFIED` check (depends on `chroot` having
+   really run `useradd`/`id -u`).
+
+Each now short-circuits to a simulated success under `IsDryRun()`, logging a clear
+`[DRY-RUN] simulated: <what>` line (new helper, `engine/dryrun.go`'s `logDryRunSimulated`) —
+real mode is byte-for-byte unchanged at every one of these (same `else`/same condition,
+verified by temporarily reverting via `git stash` and confirming the exact reported error
+reappears). `TestAssertDefaultCredentials_DryRunDoesNotWriteSudoersFile` documented the OLD,
+now-superseded behavior ("expected an error in dry-run mode") — updated to assert the new,
+deliberate simulation instead, per this very instruction's explicit request.
+
+One check deliberately NOT touched: `extractLiveRootFS`'s real `>= 20GB` target-partition
+size floor (`QueryBlockDeviceBytes`). It only aborts when it can read a real size AND that
+size is too small (`sizeBytes > 0 && sizeBytes < minRequired`) — against a partition dry-run
+never really created, it reads 0 and silently proceeds, which is already-existing,
+already-correct behavior, not something this round changed.
+
+Nothing found that couldn't be simulated safely. The autonomous-USB-staging/NVRAM-registration
+branch (`engine/orchestrator.go` ~line 1250, gated behind `ArmAutonomousUSBBootloader`/
+`ProbeRemovableTargets`, which require a real removable USB device via `lsblk`) is a separate
+code path from the one this bug report and fix exercise (direct hardware dual-boot via GRUB/
+os-prober) — not touched here, and not claimed to be covered by item 73's test below.
+
+### Item 73: end-to-end proof — `TestRunProvision_DryRunFullFlowAgainst40GBLoopDevice_ReachesEndHostUntouched` — `engine/orchestrator_dryrun_fullflow_test.go` — root-gated
+
+Real, loop-mounted, deliberately-blank 40 GB GPT disk (the exact shape that reproduces the
+reported bug), run through the real `RunProvision` entry point end to end under
+`engine.SetDryRun(true)`. Asserts both that it reaches the final step (`Success`, no
+`FailedAtStep`) and that nothing real was ever touched: the backing image file's sha256
+(streamed via `sha256sum`, not `os.ReadFile` — loading a 40GB file into memory at once is what
+first timed this test out) is identical before/after, plus three real host artifacts —
+`/etc/fstab`, `/etc/default/grub`, and `efibootmgr -v`'s own NVRAM boot-entry listing — are
+each unchanged too (`efibootmgr`'s check is skipped, not silently passed, when the binary
+isn't on `PATH` at all — true on this project's own CI runner, which has no EFI firmware).
+Reproduce-first confirmed: with items 71-72 reverted (`git stash`), this exact test fails with
+the exact reported error text; restored, it passes.
