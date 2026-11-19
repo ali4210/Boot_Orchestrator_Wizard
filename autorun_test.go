@@ -2,6 +2,16 @@
 // directly, by sourcing the real file rather than a pasted copy of its
 // logic, so these tests catch drift between the script and whatever a
 // hand-copied test fixture would assume.
+//
+// Audit follow-up (Windows CI): autorun.sh itself never runs on Windows —
+// that platform has its own separate launchers (autorun.bat/autorun.cmd/
+// autorun.ps1, see docs/ for which is current), so every test in this
+// file (which all work by sourcing the real autorun.sh under a real
+// POSIX shell) is unreachable there by construction, not just untested.
+// Tagged !windows (not linux-only): macOS also uses autorun.sh and these
+// tests already pass there for real.
+//go:build !windows
+
 package rootscripts
 
 import (
