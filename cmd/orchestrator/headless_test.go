@@ -219,6 +219,39 @@ func TestBuildHeadlessRequest_ResolvesCatalogEntry(t *testing.T) {
 	}
 }
 
+// TestBuildHeadlessRequest_RefusesUnavailableCatalogEntry is the
+// regression test for audit follow-up G1: gentoo-stage3-amd64 and both
+// macOS recovery entries have confirmed-dead download URLs (see
+// OS_STATUS_MATRIX.md) and are now marked Unavailable in the manifest.
+// Headless mode must refuse outright, naming the reason, rather than
+// attempting a download that's already known to 404/403.
+func TestBuildHeadlessRequest_RefusesUnavailableCatalogEntry(t *testing.T) {
+	withFakeBlockDevice(t, "/dev/sdz")
+	cfg := validHeadlessConfig(t, "a-fine-password")
+	cfg.OSID = "gentoo-stage3-amd64"
+	catalog := &discovery.Catalog{Entries: []discovery.Entry{
+		{
+			ID:                "gentoo-stage3-amd64",
+			Distro:            "Gentoo Linux",
+			Family:            "linux",
+			DownloadURL:       "https://distfiles.gentoo.org/dead.iso",
+			Unavailable:       true,
+			UnavailableReason: "both mirrors return HTTP 404",
+		},
+	}}
+
+	_, err := buildHeadlessRequest(cfg, catalog, hypervisor.KindBareMetal, "", "", "")
+	if err == nil {
+		t.Fatalf("expected buildHeadlessRequest to refuse an Unavailable catalog entry")
+	}
+	if !strings.Contains(err.Error(), "unavailable") {
+		t.Errorf("expected the error to say the entry is unavailable, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("expected the error to carry the real UnavailableReason, got: %v", err)
+	}
+}
+
 // TestBuildHeadlessRequest_IsoPathUsesLocalFile proves --iso-path routes
 // the local file path straight into ImageURL (the same "local path" ingest
 // mechanism engine/streamer.go already supports for absolute paths), with

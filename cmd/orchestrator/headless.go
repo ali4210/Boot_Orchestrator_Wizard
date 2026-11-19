@@ -216,6 +216,13 @@ func resolveHeadlessImage(cfg headlessConfig, catalog *discovery.Catalog) (prima
 		if entry == nil {
 			return "", "", "", nil, false, fmt.Errorf("--os-id %q does not match any catalog entry", cfg.OSID)
 		}
+		if entry.Unavailable {
+			reason := entry.UnavailableReason
+			if reason == "" {
+				reason = "no reason recorded"
+			}
+			return "", "", "", nil, false, fmt.Errorf("--os-id %q is marked unavailable and refused in headless mode: %s (see OS_STATUS_MATRIX.md)", cfg.OSID, reason)
+		}
 		mirrors := entry.GetMirrors()
 		if len(mirrors) == 0 {
 			return "", "", "", nil, false, fmt.Errorf("catalog entry %q has no download URL or mirrors", cfg.OSID)

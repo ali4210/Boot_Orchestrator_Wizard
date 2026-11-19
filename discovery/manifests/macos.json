@@ -13,7 +13,9 @@
     "mirrors": [
       "http://oscdn.apple.com/content/downloads/11/58/062-53943/of12aseueo2jnehp03qh5g3o17lx4139t1/RecoveryImage/BaseSystem.dmg"
     ],
-    "notes": "Direct Apple CDN Recovery BaseSystem payload for macOS Sonoma."
+    "notes": "Direct Apple CDN Recovery BaseSystem payload for macOS Sonoma.",
+    "unavailable": true,
+    "unavailable_reason": "the signed Apple CDN URL returns HTTP 403 Forbidden (confirmed via curl -I on 2026-11-18 and again on 2026-11-19) — see OS_STATUS_MATRIX.md Tier 1"
   },
   {
     "id": "macos-sequoia-virt-amd64",
@@ -29,6 +31,8 @@
     "mirrors": [
       "http://oscdn.apple.com/content/downloads/11/58/062-53943/of12aseueo2jnehp03qh5g3o17lx4139t1/RecoveryImage/BaseSystem.dmg"
     ],
-    "notes": "Direct Apple CDN Recovery BaseSystem payload for macOS Sequoia."
+    "notes": "Direct Apple CDN Recovery BaseSystem payload for macOS Sequoia.",
+    "unavailable": true,
+    "unavailable_reason": "the signed Apple CDN URL returns HTTP 403 Forbidden (confirmed via curl -I on 2026-11-18 and again on 2026-11-19) — see OS_STATUS_MATRIX.md Tier 1"
   }
 ]
