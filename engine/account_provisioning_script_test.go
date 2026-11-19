@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -30,6 +31,22 @@ func writeFakeBin(t *testing.T, dir, name, body string) {
 // ever touched.
 func runAccountScript(t *testing.T, fakeEnv map[string]string) (stdout string, err error) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		// renderAccountProvisioningScript is only ever run via
+		// assertDefaultCredentials's `cmdRunner.Run("chroot", rootPath,
+		// "/bin/sh", "-c", script)` — chroot has no Windows equivalent
+		// at all, so this is unreachable on a Windows host regardless of
+		// what any individual test here asserts. (Two of the five tests
+		// in this file currently don't fail on windows-latest, but only
+		// because the fake useradd/getent/id stub mechanism this helper
+		// relies on — shebang scripts with no real Windows executable
+		// extension — doesn't work there either, making every run look
+		// like "account missing" regardless of the fake env; that's a
+		// coincidental pass, not a meaningful one, so all five are
+		// skipped together rather than leaving two in a state that looks
+		// green without actually testing anything.)
+		t.Skip("renderAccountProvisioningScript is only reachable via assertDefaultCredentials's chroot call, which has no Windows equivalent")
+	}
 	binDir := t.TempDir()
 
 	writeFakeBin(t, binDir, "getent", `
