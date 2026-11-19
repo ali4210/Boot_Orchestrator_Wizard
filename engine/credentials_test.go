@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -83,6 +84,9 @@ func TestValidPassword(t *testing.T) {
 // than trusting the quoting analysis alone. No chroot, mount, or
 // destructive operation is involved — just plain files in a temp dir.
 func TestPasswordHashSurvivesHeredocRoundTrip(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exercises the exact bash heredoc/quoting pattern used by renderAutonomousInstallerScript's password-hash embedding (transient_resize.sh) — that script only ever runs on the Linux autonomous-USB-staging target (ArmAutonomousUSBBootloader/ProbeRemovableTargets require lsblk, which doesn't exist on Windows), so this pattern is unreachable on a Windows host; Git Bash's path translation for t.TempDir()'s Windows-native path also breaks the embedded cat/bash -c commands here regardless")
+	}
 	hash, err := (Credentials{Password: "correct horse battery staple"}).HashPassword()
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
