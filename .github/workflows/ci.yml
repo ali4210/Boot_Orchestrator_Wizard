@@ -53,3 +53,30 @@ jobs:
         with:
           go-version-file: go.mod
       - run: sudo -E go test ./engine/... ./safety/...
+
+  # 2026-11 CI run 44501105882 failed go build ./... on windows-latest and
+  # macos-latest with unused-import errors in four GOOS-gated files
+  # (engine_windows.go, revert_windows.go, engine_darwin.go,
+  # revert_darwin.go) — a mistake that survived every local
+  # `go build ./... && go vet ./... && go test ./...` run because this
+  # project's development sandbox is Linux-only, and a native Linux build
+  # never compiles files gated by `//go:build windows`/`//go:build darwin`
+  # at all. This job runs scripts/crosscheck.sh (also exposed as
+  # `make crosscheck`), which cross-compiles and vets every non-native
+  # platform/arch this project ships for (windows/amd64, darwin/amd64,
+  # darwin/arm64, linux/arm64) from a single ubuntu-latest runner — no
+  # real windows-latest/macos-latest runner needed for this, since
+  # `go build`/`go vet` under GOOS/GOARCH only compiles and type-checks,
+  # it never executes anything. This exists specifically so a repeat of
+  # this exact class of mistake is caught here, not discovered only when
+  # the build-vet-test matrix's real windows-latest/macos-latest runners
+  # hit it.
+  crosscheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make crosscheck

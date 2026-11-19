@@ -38,7 +38,16 @@ development:
   A test that would pass against the old, broken code isn't testing the fix.
 - **`go build ./... && go vet ./... && go test ./...` must pass before every commit.**
   Root-gated tests (see below) are expected to skip cleanly, not fail, when run
-  unprivileged.
+  unprivileged. **This alone is not enough if you touch any `//go:build windows`/
+  `//go:build darwin`-gated file** (anything named `*_windows.go`/`*_darwin.go`, or with an
+  explicit build tag): this project's own development sandbox is Linux-only, and a native
+  `go build ./...` here never compiles those files at all. Run `make crosscheck` (or
+  `./scripts/crosscheck.sh`) too — it cross-compiles and vets every non-native platform/arch
+  this project ships for (windows/amd64, darwin/amd64, darwin/arm64, linux/arm64) from
+  wherever `go` is installed, no real Windows/macOS machine needed. This exists because a
+  real CI run once failed exactly this way (four unused imports, left behind by a rename
+  across GOOS-gated files, that no local check caught) — see `scripts/crosscheck.sh`'s own
+  comment for the full story.
 - **One commit per logical fix/item.** If you need to correct something in `PROGRESS.md`
   after the real commit hash is known, that's a legitimate separate small follow-up commit
   — don't amend.

@@ -4,7 +4,6 @@ package engine
 
 import (
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 )
