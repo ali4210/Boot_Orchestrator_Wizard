@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -70,11 +71,23 @@ func TestDefaultJournalPath_ResolvesOutsideTheCurrentDirectory(t *testing.T) {
 }
 
 // TestDefaultJournalPath_DirectoryIsNotWorldOrGroupWritable proves the
-// resolved directory's permission bits actually restrict access (on
-// platforms where Unix permission bits apply — this test is a no-op check
-// of bits that Windows mostly ignores, but is still meaningful on the
-// Linux/macOS CI and dev environments this project actually targets).
+// resolved directory's permission bits actually restrict access on Unix,
+// where os.MkdirAll's mode parameter is a real, enforced permission.
 func TestDefaultJournalPath_DirectoryIsNotWorldOrGroupWritable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows has no POSIX permission bits at all: os.FileInfo.Mode()
+		// there is synthesized from the read-only ATTRIBUTE bit only and
+		// never reflects a real ACL, so this specific check (fi.Mode().
+		// Perm()&0077) is testing the wrong thing on Windows regardless
+		// of how the directory is actually protected — confirmed for
+		// real on windows-latest CI, which failed this exact assertion
+		// with "got 777" even once the directory's ACL was correctly
+		// locked down by restrictJournalDirToAdministrators. The real
+		// Windows equivalent is verified separately, via icacls output,
+		// by TestRestrictJournalDirToAdministrators_LocksDownACL in
+		// journal_acl_windows_test.go.
+		t.Skip("os.FileInfo.Mode() on Windows never reflects a real ACL, only the read-only attribute bit — this check is meaningless there; see journal_acl_windows_test.go for the real Windows-specific verification")
+	}
 	withScratchJournalCandidateDirs(t)
 	path := DefaultJournalPath()
 	dir := filepath.Dir(path)

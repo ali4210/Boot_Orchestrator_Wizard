@@ -95,12 +95,14 @@ type RollbackFunc func(data json.RawMessage) error
 // a read-only /var), and as an absolute last resort returns a
 // repo-relative path matching this tool's original behavior.
 //
-// Windows caveat: os.MkdirAll's mode parameter does not translate into a
-// meaningful Windows ACL (Go only maps it to the read-only attribute bit),
-// so on Windows this function picks a conventional per-machine location
-// (%ProgramData%) but does NOT actually achieve the same non-admin-writable
-// guarantee it does on Unix — see the "Security tradeoff" note in
-// PROGRESS.md.
+// Windows: os.MkdirAll's mode parameter does not translate into a
+// meaningful Windows ACL on its own (Go only maps it to the read-only
+// attribute bit) — this used to be a documented, unaddressed gap (see the
+// "Security tradeoff" note in PROGRESS.md's history). setUpProtectedJournalDir
+// now closes it for real: on Windows it also runs icacls (via
+// restrictJournalDirToAdministrators, safety/journal_acl_windows.go) to
+// strip inherited %ProgramData% permissions and grant only Administrators
+// and SYSTEM, the actual Windows equivalent of 0700.
 
 // journalUnixCandidateDirs are the default journal state directories tried
 // in order on non-Windows platforms. Injectable (follow-up F17): a test
@@ -126,6 +128,27 @@ func SetJournalCandidateDirsForTesting(dirs []string) (restore func()) {
 	return func() { journalUnixCandidateDirs = orig }
 }
 
+// setUpProtectedJournalDir creates dir (mode 0700) and, on Windows, also
+// locks its ACL down to Administrators/SYSTEM only via
+// restrictJournalDirToAdministrators — the real equivalent of what 0700
+// already achieves on Unix, where os.MkdirAll's mode parameter is a real
+// permission bit, not just a synthesized read-only attribute (see that
+// function's own doc comment). Returns false (and leaves dir exactly as
+// MkdirAll left it, not half-configured) if either step fails, so the
+// caller falls through to the next candidate exactly as it would for a
+// plain MkdirAll failure.
+func setUpProtectedJournalDir(dir string) bool {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		if err := restrictJournalDirToAdministrators(dir); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func DefaultJournalPath() string {
 	var candidates []string
 	if runtime.GOOS == "windows" {
@@ -136,13 +159,13 @@ func DefaultJournalPath() string {
 		candidates = journalUnixCandidateDirs
 	}
 	for _, dir := range candidates {
-		if err := os.MkdirAll(dir, 0700); err == nil {
+		if setUpProtectedJournalDir(dir) {
 			return filepath.Join(dir, "journal.json")
 		}
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		dir := filepath.Join(home, ".local", "state", "boot-orchestrator")
-		if err := os.MkdirAll(dir, 0700); err == nil {
+		if setUpProtectedJournalDir(dir) {
 			return filepath.Join(dir, "journal.json")
 		}
 	}
