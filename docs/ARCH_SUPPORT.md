@@ -26,14 +26,22 @@ broken on arm64 even though the rest of the binary builds and the catalog now ha
 entries. Fixed via `efiBootNamesForArch(runtime.GOARCH)` (`engine/usb_manager_test.go` has
 the regression test) — selects `BOOTAA64.EFI`/`grubaa64.efi`/`arm64-efi` on arm64 hosts.
 
-**Not audited for arch-correctness this pass** (flagged, not silently assumed fine):
-`engine/bcd_qemu.go` (Windows-BCD-via-QEMU helper, hardcodes `qemu-system-x86_64` and
-`bootx64.efi`) and the handful of other `x86_64`/`amd64` string literals noted in
-`docs/dryrun-inventory.md`'s category breakdown. These are lower priority: `bcd_qemu.go` is
-Windows-specific tooling (Windows-on-ARM is a vanishingly rare target for this tool, and was
-explicitly out of scope — "Debian/Ubuntu family only," item 36), and the others are
-read-only/query paths or Linux-distribution-detection logic unaffected by host CPU
-architecture.
+**Also found and fixed in a later pass (items 42-44, closing audit 2.6 fully)**: a
+full-repo grep for `x86_64`/`amd64`/`BOOTX64` found three more live instances of the same
+bug class — `engine/orchestrator.go`'s autonomous-USB NVRAM one-shot boot entry (hardcoded
+`BOOTX64.EFI` independently of `usb_manager.go`'s own fix above), `engine/backup.go`'s
+disaster-recovery restore (`grub-install --target=x86_64-efi`), and
+`engine/bootloader.go`'s no-kernel self-heal (`apt-get install linux-image-amd64`) — all
+now branch on `runtime.GOARCH` the same way `usb_manager.go` does.
+
+**`engine/bcd_qemu.go`** (Windows-BCD-via-QEMU helper, hardcodes `qemu-system-x86_64` and
+`bootx64.efi`) is the one case left deliberately unfixed, not unaudited: Windows-on-ARM has
+no catalog entry (arm64 support here is "Debian/Ubuntu family only," item 36) and never
+will without real Windows-on-ARM install media to test against, which this project has no
+access to. Rather than guess at unverifiable arm64 BCD logic, `writeWindowsBCD` now calls
+`validateBCDHostArch(runtime.GOARCH)` and refuses loudly on any non-amd64 host instead of
+silently attempting x86_64-only logic — removing the "silently" from the original finding
+without pretending to support a target that doesn't exist.
 
 ## Real boot proof (item 37)
 

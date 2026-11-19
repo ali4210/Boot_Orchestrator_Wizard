@@ -25,8 +25,18 @@ machine that matters.
   info for the machine it's run on, exits 0, and the live-scrape section is skipped by
   default. `go run ./cmd/env-check --live-scrape` — confirm it then makes the
   `archive.ubuntu.com` call and reports current suites (needs real network).
-- `go run ./cmd/orchestrator --dry-run` — confirm it refuses to start and explains why
-  (see `cmd/orchestrator/main.go`'s `dryRunRefusalMessage`); exit code 1.
+- `go run ./cmd/orchestrator --dry-run` — confirm it prints the `[DRY-RUN]` banner
+  (`cmd/orchestrator/main.go`'s `dryRunBanner`) and then runs the real flow (TUI or
+  headless) with every reachable exec.Command/filesystem-write call logged and
+  intercepted instead of executed — see `docs/dryrun-inventory.md` for exactly what is and
+  isn't covered (the payload download and `safety.Journal`'s own bookkeeping writes are
+  deliberately NOT intercepted; everything that could touch the target disk/bootloader/
+  NVRAM is).
+- `go run ./cmd/orchestrator --dry-run --headless --yes --allow-unverified --os-id <id>
+  --target-disk /dev/sdX --username testuser --password-file <path>` against a real (but
+  disposable) disk — confirm every `[DRY-RUN]` log line names a real operation that WOULD
+  have happened, and confirm independently (via a second terminal) that the disk's real
+  partition table, bootloader, and NVRAM boot entries are completely unchanged afterward.
 - `go run ./cmd/orchestrator --target-disk /dev/sdX` (an LVM/LUKS/mdraid/BitLocker disk, if
   you have one disposable) — confirm the pre-flight + `PreflightStorageSafetyCheck` refuse
   before anything is written. If you don't have one handy, the automated
