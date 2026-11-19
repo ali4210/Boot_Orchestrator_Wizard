@@ -1942,6 +1942,125 @@ target, then reverted — before wiring it into CI as a new `crosscheck` job
 real Windows/macOS runner). `CONTRIBUTING.md` now tells anyone touching a `*_windows.go`/
 `*_darwin.go` file to run `make crosscheck` too, with the real story of why it exists.
 
+## Post-PR follow-up: real Windows/macOS go test failures (requested after item 58)
+
+Item 58's `make crosscheck` fixed the build-time failures (unused imports), but watching
+the real CI run (`gh pr checks 1 --watch`) to completion surfaced genuine `go test ./...`
+failures on `windows-latest` and `macos-latest` that cross-compiling alone can't catch,
+since cross-compiling never executes anything. Investigated and fixed each, scoped exactly
+as requested — no fix beyond what was asked.
+
+### Item 59: `path`, not `path/filepath`, for Linux device-path strings — commit 92fc270
+
+Two real bugs, same shape: `engine/partition.go`'s `SplitDiskAndPartition`/
+`JoinDiskAndPartition` and `safety/journal.go`'s `looksLikeDevicePath` all manipulate a
+fixed, always-`/`-separated Linux device-path **string** (`/dev/sdX`) using
+`path/filepath` (OS-dependent separator semantics) instead of `path` (always `/`). On a
+Windows-compiled binary this mangled every such string — confirmed by the real CI
+failures: `disk_naming_test.go`'s round-trip test (`split("/dev/mmcblk0p2") ->
+("\dev\mmcblk0", "2")`) and `journal_security_test.go`'s "well-formed journal" tests
+(`filepath.Clean("/dev/sdz")` returning `"\dev\sdz"`, never equal to the input, so every
+legitimate device path was rejected).
+
+Investigated, per the explicit instruction, whether a genuine Windows-native device-path
+form exists that the validator should instead accept, before touching anything: it does
+not. `SessionState.TargetDisk`/`TargetPartition`/`ShrunkPartition` are written in exactly
+one place (`RunProvision`, sourced from `--target-disk` or the TUI's disk list, both
+backed by lsblk-based enumeration) and are always `/dev/...` regardless of host OS.
+`engine.WindowsStorageEngine` (`engine_windows.go`) is the one place that would produce a
+Windows-native identifier (`"Disk 0"`, `"C:"`) — confirmed via grep to have **zero callers
+anywhere in the repo**, dead code in the same category as `engine/rootfs.go` and
+`hypervisor/compact.go`. So the fix is purely making the existing, correct `/dev/...`
+validation platform-independent — not loosening it, and not inventing Windows-form support
+for a code path that's never actually invoked.
+
+Verified both fixes compile and vet cleanly on `GOOS=windows GOARCH=amd64` (cross-compiled
+build + vet + `go test -c`); this sandbox cannot execute a Windows binary to re-run the
+exact failing tests, so final confirmation is CI's own `windows-latest` run.
+
+### Item 60: skip (not fail) autorun root-ownership tests when chown itself can't run — commit 4d4d250
+
+`build-vet-test (macos-latest)` failed `TestCheckRootOwnedFiles_BinOwnedByRootBlocks`/
+`TestCheckRootOwnedFiles_RuntimeDirOwnedByRootBlocks`: `sudo -n chown root:root <fixture>`
+failed with exit status 1 on GitHub's macOS runner, even though the test's own gate
+(`sudo -n true`) succeeded — `check_root_owned_files` (the function under test) was never
+even reached. Changed the chown failure from `t.Fatalf` to `t.Skip`, with a one-line
+reason naming exactly what happened (passwordless sudo allows `sudo -n true` but not
+`sudo -n chown` on that runner). Linux is unchanged: chown has always succeeded here, so
+this branch stays dead and the real assertions still run for real — verified via
+`go test .`, both tests still **PASS** (not skipped) on this machine.
+
+### Item 61: tag/skip genuinely Linux-only tests instead of failing on Windows — commit 60a4ff1
+
+`build-vet-test (windows-latest)` failed `partition_test.go`
+(`TestEnsureMtabSymlink_CreatesWhenMissing`, `TestCarveHardwarePartitionAtBoundary_ShrinkSucceeds`)
+and `usb_manager_test.go` (`TestProbeRemovableTargets_InternalSDCNotTreatedAsUSB`,
+`TestProbeUSBPayloads_InternalSDCNotScanned`). Decided per file, per the instruction,
+whether the code under test is genuinely Linux-only:
+
+- **`partition_test.go`/`partition_swap_test.go`** (tagged `//go:build linux`, one-line
+  reason in each file): every test exercises `CarveHardwarePartitionAtBoundary`/
+  `ApplyShrink`/`ensureMtabSymlink`/`readDiskRegion` — resize2fs/mkfs.ext4/parted/mtab/
+  procfs-based Linux ext4 disk-shrink logic with **no Windows equivalent at all** (no
+  `/proc`, no resize2fs). `engine.WindowsStorageEngine` is the dispatch target that would
+  replace this on Windows but, per item 59's investigation, has zero callers — this is
+  genuinely Linux-only functionality today, not a bug reachable on Windows. Moved the
+  shared `fakeExitError` helper (also used by `preflight_safety_test.go`, which must keep
+  running on every platform — its own `fakeExitError` calls happen to still work on
+  windows-latest today because Git for Windows ships a real `sh.exe` on PATH there) out to
+  its own untagged file, `engine/exitcode_helper_test.go`, so tagging `partition_test.go`
+  doesn't break that file's compilation.
+- **`usb_manager_test.go`** (targeted `runtime.GOOS != "linux"` skip on just the two
+  lsblk-dependent tests, one-line reason on each): `ProbeRemovableTargets`/
+  `ProbeUSBPayloads` shell out to `lsblk` (util-linux), also with no Windows/macOS
+  equivalent and no real caller reachability there — same architectural gap as above.
+  `withFakeLsblk`'s `#!/bin/sh` fake-binary trick only works on a real POSIX shell, which
+  is the direct cause of the reported "executable file not found" error. Not a whole-file
+  tag: `TestEfiBootNamesForArch_SelectsCorrectBinariesPerArch`/
+  `TestGrubEFIArchSuffix_MatchesShimPackagingConventions` in the same file are pure
+  string-logic tests with no OS dependency and must keep running everywhere.
+
+Verified: all four previously-failing tests still run for real and **pass** (not skipped)
+on this machine (Linux), confirming native behavior is unchanged.
+`GOOS=windows/darwin GOARCH=amd64 go vet` and `go test -c` (compile-only) both clean.
+
+### Item 62: real Windows ACL lockdown for the journal directory — commit e32aea4
+
+`TestDefaultJournalPath_DirectoryIsNotWorldOrGroupWritable` failed on `windows-latest`
+("expected C:\ProgramData\BootOrchestrator to have no group/other permission bits, got
+777") — a real, **previously-documented-but-unaddressed** gap: `DefaultJournalPath`'s own
+doc comment (and an earlier pass's "Security tradeoff" note, just above this section in
+this file's history) already said `os.MkdirAll`'s mode parameter doesn't translate into a
+meaningful Windows ACL, so `%ProgramData%\BootOrchestrator` stayed readable/writable by any
+logged-in user there despite looking restricted.
+
+Implemented it properly rather than re-documenting the gap, per the explicit instruction:
+`restrictJournalDirToAdministrators` (`safety/journal_acl_windows.go`) runs
+`icacls.exe <dir> /inheritance:r /grant:r Administrators:(OI)(CI)F /grant:r
+SYSTEM:(OI)(CI)F` — strips the broad inherited `%ProgramData%` permissions and replaces
+them with an explicit Administrators/SYSTEM-only grant, the real Windows equivalent of the
+`0700` mode that already provides this guarantee for real on Unix. A `//go:build !windows`
+no-op stub (`safety/journal_acl_other.go`) keeps the cross-platform call site
+(`DefaultJournalPath`, now routed through a new `setUpProtectedJournalDir` helper that
+creates the directory AND restricts it, falling through to the next candidate if either
+step fails) compiling on Unix, where `0700` already does the real job.
+
+The existing permission test checks `os.FileInfo.Mode().Perm()` — meaningless on Windows
+regardless of how well the directory is actually locked down (synthesized from the
+read-only attribute bit only, never a real ACL). Skipped it there with a one-line reason
+and added the real Windows-specific verification instead
+(`safety/journal_acl_windows_test.go`): parses real `icacls.exe` output to confirm
+Administrators/SYSTEM are explicitly granted and `Everyone`/`BUILTIN\Users`/
+`Authenticated Users` are not present at all.
+
+**Explicitly flagged, as instructed, rather than silently claiming full confidence**: this
+icacls-based implementation and its test are written to documented icacls semantics but
+have **not been run against a real Windows machine from this (Linux-only) development
+sandbox** — this project's own CI (`windows-latest`) is the first real execution of
+either. Verified here: `go build`/`go vet` clean natively and cross-compiled
+(`GOOS=windows/darwin GOARCH=amd64`, plus `make crosscheck`'s full matrix), and
+`go test -c` (compile-only) succeeds for the new Windows-tagged test file.
+
 ## Final Summary (item 41)
 
 **50 commits on `fix/audit-phase-0-1` ahead of `origin/fix/audit-phase-0-1`, plus the
