@@ -1546,7 +1546,7 @@ linux/arm64, windows/amd64, and darwin/arm64 throughout.
       incompatibility, dead `rootfs.go`, Windows/macOS/arm64 never driven on real hardware,
       `test/os-matrix` unmerged) are listed for transparency rather than omitted. Closes
       with exactly what would need to happen to actually reach green.
-- [x] 41. Final summary — Done (`PENDING_HASH`). See "## Final Summary" at the end of this
+- [x] 41. Final summary — Done (`0d50009`). See "## Final Summary" at the end of this
       file.
 
 ## Prior session (commits already on fix/audit-phase-0-1 before this plan started)
