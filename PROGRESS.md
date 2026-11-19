@@ -1560,6 +1560,73 @@ These satisfy some groundwork for Phase 1 item A and Phase 5, but the new plan's
 broader (JSON serialization, script permissions/cleanup, admin-group detection, min password
 length, reserved usernames) and are NOT yet done — tracked fresh above.
 
+## Gate closure: 2.6 (items 42-44, requested after item 41's gate was written)
+
+The user explicitly asked to close the gate on 2.4 and 2.6 rather than leave them open.
+This section covers 2.6 (x86_64 hardcoded despite ARM64 support); 2.4 (real dry-run) follows
+below once attempted.
+
+### Item 42: disaster-recovery restore's hardcoded x86_64-efi grub target — commit fd92ee8
+
+`RestoreHostFromBackup`'s UEFI grub-install always used `--target=x86_64-efi` regardless of
+the restoring host's real architecture — on arm64 host hardware this would silently install
+an x86_64 GRUB payload the firmware cannot execute, an unbootable "restored" system. Extracted
+`buildGrubReinstallScript(targetDisk, isUEFI, goarch)` as a pure function reusing
+`usb_manager.go`'s `efiBootNamesForArch` instead of a second hardcoded literal. Test:
+`TestBuildGrubReinstallScript_MatchesHostArchNotHardcodedAmd64` — reproduce-first confirmed by
+stashing the fix (the extracted function didn't exist yet, so the pre-fix state is a build
+failure, the honest form of "this logic didn't exist to be arch-aware" for a from-scratch
+extraction).
+
+### Item 43: bcd_qemu.go's explicit refusal on non-amd64 hosts — commit cab04fd
+
+`engine/bcd_qemu.go` (Windows BCD generation via QEMU) hardcodes `qemu-system-x86_64`,
+`bootx64.efi`, and x86_64-only OVMF paths throughout, with no arm64 equivalent — and no real
+Windows-on-ARM catalog entry exists to test one against (item 36 scoped arm64 support to
+Debian/Ubuntu only). Rather than guess at unverifiable arm64 BCD logic, added
+`validateBCDHostArch(goarch)`, called at the top of `writeWindowsBCD`, which refuses loudly
+with a clear explanation on any non-amd64 host instead of failing confusingly deep inside a
+QEMU invocation. Test: `TestValidateBCDHostArch_RefusesNonAmd64` — reproduce-first confirmed
+by stashing the fix (build fails, function didn't exist).
+
+### Item 44: three more live x86_64-hardcoded sites found by a full repo grep — commit a9e5c1e
+
+A systematic `grep` for `x86_64|amd64|BOOTX64` across every `.go` file (not just
+`usb_manager.go`, already fixed by item 36) found three more real, reachable instances:
+
+- `engine/orchestrator.go`: `RunProvision`'s autonomous-USB NVRAM one-shot boot entry always
+  registered `\EFI\BOOT\BOOTX64.EFI`, pointing at a file `ArmAutonomousUSBBootloader` never
+  staged on an arm64 host (which stages `BOOTAA64.EFI`) — the USB media would be correct but
+  the reboot-into-installer step would silently fail to boot it. Fixed via
+  `autonomousUSBEFILoaderNVRAMPath(goarch)`, sharing `efiBootNamesForArch` as the single source
+  of truth both call sites now use.
+- `engine/bootloader.go`: `assertBootableKernelAndPackages`' no-kernel self-heal always
+  `apt-get install`ed `linux-image-amd64` into the guest chroot, which fails outright on the
+  arm64 guests item 36 added to the catalog (`debian-netboot-arm64`, `ubuntu-server-arm64`) —
+  no such package exists in the arm64 repos. Fixed via `debianKernelPackageForArch(goarch)`.
+- `ui/model.go`: all three places that build a synthetic `discovery.Entry` for a user-supplied
+  or LAN-discovered payload (`selectLocalPayload`, LAN peer selection, manual LAN URL)
+  hardcoded `Arch: "amd64"` — display-only (never consulted by the actual bootloader logic,
+  which already keys off `runtime.GOARCH` directly), but still mislabeled an arm64 host's own
+  custom payload in the TUI. Fixed via `syntheticEntryArch()`/`archForGOARCH()`.
+
+Tests: `TestAutonomousUSBEFILoaderNVRAMPath_MatchesHostArch`,
+`TestDebianKernelPackageForArch_MatchesGuestArch`, `TestArchForGOARCH_MatchesHostArch` —
+reproduce-first confirmed by stashing all three fixes together (build fails, none of the three
+extracted functions existed yet).
+
+Also audited and **intentionally** left alone, documented rather than silently skipped:
+`engine/orchestrator.go`'s/`rootfs.go`'s `"arch", "x86_64"` path components (Arch Linux's own
+on-disk ISO directory layout, not host-arch logic, and Arch Linux ARM isn't in the catalog);
+the `User-Agent` header strings in `sentinel.go`/`streamer.go` (cosmetic HTTP header text with
+no functional effect); and `discovery/catalog.go`'s `ArchAMD64` constant definition (not a
+hardcoded call site, just the constant's own value).
+
+**2.6 is now closed**: every live, reachable instance found by a full-repo search is either
+fixed and tested, or explicitly guarded against with a loud, documented refusal where a real
+fix is impossible to verify (bcd_qemu.go). `READINESS_GATE.md` and `AUDIT_REPORT.md` updated
+accordingly (see below).
+
 ## Final Summary (item 41)
 
 **50 commits on `fix/audit-phase-0-1` ahead of `origin/fix/audit-phase-0-1`, plus the
