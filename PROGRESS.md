@@ -1536,7 +1536,7 @@ linux/arm64, windows/amd64, and darwin/arm64 throughout.
       class. Confirmed the audit's own flagged stray `orchestrator_journal.json` was never
       actually committed (`.gitignore`-covered, `git log --all` on it returns nothing) —
       that specific concern turned out to already be handled.
-- [x] 40. READINESS_GATE.md — Done (`PENDING_HASH`). **Verdict: NOT GREEN** — stated
+- [x] 40. READINESS_GATE.md — Done (`1dab321`). **Verdict: NOT GREEN** — stated
       honestly per the gate's own explicit rule ("green only if there are no known open
       Critical or High issues"). Two findings remain open at that severity: 2.4 (dry-run —
       genuinely open, not fixed, for the specific reason item 34 documented) and 2.6 (arch
