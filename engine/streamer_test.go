@@ -477,3 +477,45 @@ func TestStreamDownload_ProgressReportingIsNonBlocking(t *testing.T) {
 		t.Fatalf("download took %s — a slow onProgress callback appears to be blocking the transfer", elapsed)
 	}
 }
+
+// TestStreamDownloadWithFailover_LocalFileIngestCommitsForRealUnderDryRun
+// is the regression test for a real bug found while building item 50
+// (audit follow-up G3)'s dry-run proof: this function's local-file-ingest
+// commit step (os.Rename(tmpPath, destPath)) had been migrated onto
+// fsRunner for blanket consistency with every other engine file — but the
+// project's own documented design is that the payload download stays
+// real under dry-run (see this function's own doc comment). With that
+// bug, SetDryRun(true) made the real copy happen (raw os.Create/io.Copy,
+// never touched) but then silently faked the final rename, so the
+// function reported success while destPath never actually existed —
+// exactly the kind of "looks like protection but isn't" failure this
+// whole effort exists to catch. With the fix, a local-file mirror must
+// actually commit to destPath with the real bytes even with dry-run on.
+func TestStreamDownloadWithFailover_LocalFileIngestCommitsForRealUnderDryRun(t *testing.T) {
+	restore := SetDryRun(true)
+	defer restore()
+
+	payload := []byte("fake-iso-bytes-for-local-ingest-dry-run-test")
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "source.iso")
+	if err := os.WriteFile(srcPath, payload, 0644); err != nil {
+		t.Fatalf("seeding source file: %v", err)
+	}
+	destPath := filepath.Join(dir, "dest.iso")
+
+	res, err := StreamDownloadWithFailover(context.Background(), []string{srcPath}, destPath, sha256Hex(payload), nil)
+	if err != nil {
+		t.Fatalf("StreamDownloadWithFailover: %v", err)
+	}
+	if res.DestPath != destPath {
+		t.Fatalf("unexpected DestPath: %q", res.DestPath)
+	}
+
+	got, readErr := os.ReadFile(destPath)
+	if readErr != nil {
+		t.Fatalf("expected destPath to really exist after a reported-successful local-file ingest, even under dry-run, got: %v", readErr)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("destPath content mismatch: got %q, want %q", got, payload)
+	}
+}

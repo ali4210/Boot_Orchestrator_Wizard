@@ -114,12 +114,29 @@ func StreamDownload(ctx context.Context, url, destPath, expectedSHA256 string, o
 // StreamDownloadWithFailover handles local paths, iterates redundant mirrors,
 // runs active preflight sentinel checks, auto-decompresses archives,
 // and validates SHA-256 integrity.
+//
+// Deliberately NOT routed through fsRunner/execCommand, found and fixed
+// while building item 50 (audit follow-up G3)'s real dry-run proof: this
+// function only ever writes to a LOCAL destPath (never the target disk),
+// and the project's own documented design (docs/dryrun-inventory.md) is
+// that the payload download stays real under --dry-run so the rest of a
+// dry run (checksum verification, free-space headroom) stays meaningful.
+// An earlier pass had migrated this file's os.MkdirAll/Rename/Remove onto
+// fsRunner for blanket consistency with every other file — which broke
+// that documented design in a subtle way: the real HTTP/local-file copy
+// still happened for real (raw os.Create/io.Copy, never touched), but the
+// FINAL os.Rename committing the result to destPath got silently faked
+// under dry-run, so callers downstream (checksum verification against
+// streamResult.DestPath) would find no file there at all. Reverted this
+// file (and stream_decoder.go/resilient_streamer.go/scp_streamer.go,
+// the same download/local-cache family) back to raw os.* so the whole
+// download path is consistently real, not half-intercepted.
 func StreamDownloadWithFailover(ctx context.Context, mirrors []string, destPath, expectedSHA256 string, onProgress func(Progress)) (*StreamResult, error) {
 	if len(mirrors) == 0 {
 		return nil, fmt.Errorf("no download mirrors provided")
 	}
 
-	if err := fsRunner.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return nil, fmt.Errorf("creating destination directory: %w", err)
 	}
 
@@ -201,7 +218,7 @@ func StreamDownloadWithFailover(ctx context.Context, mirrors []string, destPath,
 					continue
 				}
 
-				if err := fsRunner.Rename(tmpPath, destPath); err != nil {
+				if err := os.Rename(tmpPath, destPath); err != nil {
 					return nil, fmt.Errorf("committing payload to %s: %w", destPath, err)
 				}
 
@@ -232,7 +249,7 @@ func StreamDownloadWithFailover(ctx context.Context, mirrors []string, destPath,
 		var attemptErr error
 		for cleanRestart := 0; cleanRestart < 2; cleanRestart++ {
 			if cleanRestart == 1 {
-				_ = fsRunner.Remove(tmpPath)
+				_ = os.Remove(tmpPath)
 			}
 
 			res, attemptErr = downloadFromSingleMirrorWithRetry(ctx, client, cleanMirror, tmpPath, start, onProgress)
@@ -262,13 +279,13 @@ func StreamDownloadWithFailover(ctx context.Context, mirrors []string, destPath,
 			}
 			if strings.Contains(attemptErr.Error(), "checksum mismatch") {
 				corruptPath := destPath + ".corrupt"
-				_ = fsRunner.Rename(tmpPath, corruptPath)
+				_ = os.Rename(tmpPath, corruptPath)
 			}
 			lastErr = fmt.Errorf("mirror [%d/%d] %s failed: %w", mirrorIndex+1, len(prioritizedMirrors), cleanMirror, attemptErr)
 			continue
 		}
 
-		if err := fsRunner.Rename(tmpPath, destPath); err != nil {
+		if err := os.Rename(tmpPath, destPath); err != nil {
 			return nil, fmt.Errorf("finalizing download commit to %s: %w", destPath, err)
 		}
 

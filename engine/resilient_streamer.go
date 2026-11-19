@@ -96,7 +96,7 @@ func DownloadWithFailover(ctx context.Context, src DownloadSource, onProgress fu
 
 		if lastErr != nil && lastErr != io.EOF {
 			fmt.Printf("=> Warning: Connection drop while streaming from %s. Trying alternate...\n", mirrorURL)
-			_ = fsRunner.Remove(tmpFile)
+			_ = os.Remove(tmpFile)
 			continue
 		}
 
@@ -104,13 +104,13 @@ func DownloadWithFailover(ctx context.Context, src DownloadSource, onProgress fu
 		calculatedSHA := hex.EncodeToString(hasher.Sum(nil))
 		if src.ExpectedSHA256 != "" && !strings.EqualFold(calculatedSHA, src.ExpectedSHA256) {
 			fmt.Printf("=> Error: SHA-256 mismatch from mirror %s (Corrupted payload). Failing over...\n", mirrorURL)
-			_ = fsRunner.Remove(tmpFile)
+			_ = os.Remove(tmpFile)
 			lastErr = fmt.Errorf("checksum validation failed")
 			continue
 		}
 
 		// Commit valid payload
-		_ = fsRunner.Rename(tmpFile, src.DestPath)
+		_ = os.Rename(tmpFile, src.DestPath)
 		fmt.Println("=> Payload verified and committed successfully.")
 		return nil
 	}

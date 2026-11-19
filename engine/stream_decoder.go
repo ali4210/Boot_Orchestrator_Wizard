@@ -42,14 +42,14 @@ func InspectAndDecodeStream(r io.Reader) (*DecodedStream, error) {
 
 		if _, err := io.Copy(tmpZip, combined); err != nil {
 			tmpZip.Close()
-			_ = fsRunner.Remove(tmpZip.Name())
+			_ = os.Remove(tmpZip.Name())
 			return nil, fmt.Errorf("buffering compressed zip archive: %w", err)
 		}
 		tmpZip.Close()
 
 		zipReader, err := zip.OpenReader(tmpZip.Name())
 		if err != nil {
-			_ = fsRunner.Remove(tmpZip.Name())
+			_ = os.Remove(tmpZip.Name())
 			return nil, fmt.Errorf("opening zip archive structure: %w", err)
 		}
 
@@ -65,14 +65,14 @@ func InspectAndDecodeStream(r io.Reader) (*DecodedStream, error) {
 
 		if targetFile == nil {
 			zipReader.Close()
-			_ = fsRunner.Remove(tmpZip.Name())
+			_ = os.Remove(tmpZip.Name())
 			return nil, errors.New("zip archive contains no bootable .iso or .img payload")
 		}
 
 		rc, err := targetFile.Open()
 		if err != nil {
 			zipReader.Close()
-			_ = fsRunner.Remove(tmpZip.Name())
+			_ = os.Remove(tmpZip.Name())
 			return nil, fmt.Errorf("extracting inner image stream: %w", err)
 		}
 
@@ -83,7 +83,7 @@ func InspectAndDecodeStream(r io.Reader) (*DecodedStream, error) {
 			Cleanup: func() {
 				rc.Close()
 				zipReader.Close()
-				_ = fsRunner.Remove(tmpZip.Name())
+				_ = os.Remove(tmpZip.Name())
 			},
 		}, nil
 	}
