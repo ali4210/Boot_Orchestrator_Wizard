@@ -192,7 +192,7 @@ installer"`) — hidden from the TUI, refused in headless mode, same mechanism a
 
 ## What would make this NOT green again
 
-This verdict is accurate as of the commits in `PROGRESS.md` through item 56. It should be
+This verdict is accurate as of the commits in `PROGRESS.md` through item 70. It should be
 re-checked (not assumed to still hold) if any of the following happen: a new Critical/High
 finding is reported or discovered; a call site is added to a file this gate's closures
 depend on without also being routed through `Runner`/`FS`/`execCommand` (`call_site_

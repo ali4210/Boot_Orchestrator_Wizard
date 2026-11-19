@@ -104,7 +104,7 @@ entries), `testing/reports/tier2-alpine-linux-amd64-2026-11-18.json`,
    now detect an unsupported layout and abort *before* any disk write — see
    `engine/autonomous_installer_script.go`'s `detectInstallerLayoutOrAbort` and
    `engine/orchestrator.go`'s `locateSquashfsOrErr`, both with real tests proving it). A later
-   follow-up (item 65 at the time of this note) went further and marked `alpine-linux-amd64`
+   follow-up (item 70 at the time of this note) went further and marked `alpine-linux-amd64`
    `Unavailable` in the manifest (`"incompatible with the autonomous installer"`) — hidden from
    the TUI's catalog listing and refused outright in headless mode, the same treatment
    `gentoo-stage3-amd64` and both macOS entries already had — rather than leaving it
