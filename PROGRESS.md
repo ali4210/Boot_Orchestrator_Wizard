@@ -1509,7 +1509,7 @@ functional bug found and fixed (autonomous USB staging was completely broken on 
 linux/arm64, windows/amd64, and darwin/arm64 throughout.
 
 ## Final deliverables
-- [x] 38. MANUAL_TEST_PLAN.md — Done (`PENDING_HASH`). 9 sections covering what automated
+- [x] 38. MANUAL_TEST_PLAN.md — Done (`102eb3b`). 9 sections covering what automated
       tests structurally cannot (real destructive operations against real/disposable-VM
       hardware): pre-flight gate, catalog reachability, the TUI's unverified-download gate,
       headless mode's refusal cases, a full dual-boot install, revert (both modes),
