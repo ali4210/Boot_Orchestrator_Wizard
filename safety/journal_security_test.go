@@ -82,7 +82,7 @@ func TestDefaultJournalPath_DirectoryIsNotWorldOrGroupWritable(t *testing.T) {
 		// of how the directory is actually protected — confirmed for
 		// real on windows-latest CI, which failed this exact assertion
 		// with "got 777" even once the directory's ACL was correctly
-		// locked down by restrictJournalDirToAdministrators. The real
+		// locked down by RestrictToAdministrators. The real
 		// Windows equivalent is verified separately, via icacls output,
 		// by TestRestrictJournalDirToAdministrators_LocksDownACL in
 		// journal_acl_windows_test.go.

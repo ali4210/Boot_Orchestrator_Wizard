@@ -10,12 +10,12 @@ import (
 	"testing"
 )
 
-// TestRestrictJournalDirToAdministrators_LocksDownACL is the real,
-// Windows-specific verification restrictJournalDirToAdministrators
+// TestRestrictToAdministrators_LocksDownACL is the real,
+// Windows-specific verification RestrictToAdministrators
 // needs: os.FileInfo.Mode() can't see a real ACL on Windows at all (see
 // journal_security_test.go's TestDefaultJournalPath_DirectoryIsNotWorldOrGroupWritable,
 // skipped here for exactly that reason), so this instead runs the real
-// icacls.exe (the same way restrictJournalDirToAdministrators itself
+// icacls.exe (the same way RestrictToAdministrators itself
 // does) against a real temp directory and parses its actual output:
 // Administrators and SYSTEM must each have an explicit grant, and
 // broadly-scoped identities this directory must NOT be accessible to
@@ -27,14 +27,14 @@ import (
 // Not run or verified against a real Windows machine from this (Linux)
 // development sandbox — written to documented icacls output format;
 // this project's own CI (windows-latest) is the first real execution.
-func TestRestrictJournalDirToAdministrators_LocksDownACL(t *testing.T) {
+func TestRestrictToAdministrators_LocksDownACL(t *testing.T) {
 	if _, err := exec.LookPath("icacls.exe"); err != nil {
 		t.Skip("icacls.exe not found on PATH, skipping")
 	}
 
 	dir := t.TempDir()
-	if err := restrictJournalDirToAdministrators(dir); err != nil {
-		t.Fatalf("restrictJournalDirToAdministrators: %v", err)
+	if err := RestrictToAdministrators(dir); err != nil {
+		t.Fatalf("RestrictToAdministrators: %v", err)
 	}
 
 	out, err := exec.Command("icacls.exe", dir).CombinedOutput()

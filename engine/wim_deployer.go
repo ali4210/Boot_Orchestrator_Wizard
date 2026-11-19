@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"boot-orchestrator/safety"
 )
 
 type WimIndex struct {
@@ -210,7 +212,31 @@ func injectAutounattend(srcPath, targetRoot string, creds Credentials) error {
 		return fmt.Errorf("creating Panther dir: %w", err)
 	}
 	destPath := filepath.Join(pantherDir, "unattend.xml")
-	return fsRunner.WriteFile(destPath, data, 0644)
+	if err := fsRunner.WriteFile(destPath, data, 0644); err != nil {
+		return err
+	}
+
+	// Audit follow-up (Windows CI, writeScriptSecurely investigation):
+	// this file carries creds.Password in plaintext (inherent to the
+	// unattend format, see above) — the real-world "equivalent" of
+	// writeScriptSecurely's secret-bearing script, for the ApplyWim
+	// native-Windows path (runtime.GOOS == "windows" above), which is
+	// genuinely reachable and functional there (unlike the chroot/lsblk/
+	// ext4 code elsewhere in this engine). Lock it down the same way
+	// DefaultJournalPath's directory is locked down
+	// (safety.RestrictToAdministrators, via icacls) for the real window
+	// between writing it here and the guest's own first boot deleting it
+	// (item 27's FirstLogonCommand) — targetRoot is a live-mounted drive
+	// letter on the host during that window, not an inert archive.
+	// No-op on non-Windows (ntfs-3g-mounted targetRoot there has no
+	// equivalent host-side exposure in the same way, and POSIX file
+	// modes already apply for whatever does exist).
+	if runtime.GOOS == "windows" {
+		if err := safety.RestrictToAdministrators(destPath); err != nil {
+			return fmt.Errorf("restricting %s to Administrators/SYSTEM: %w", destPath, err)
+		}
+	}
+	return nil
 }
 
 func splitLines(s string) []string {

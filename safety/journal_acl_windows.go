@@ -7,7 +7,7 @@ import (
 	"os/exec"
 )
 
-// restrictJournalDirToAdministrators locks dir down to Administrators and
+// RestrictToAdministrators locks dir down to Administrators and
 // SYSTEM only, via icacls.exe — the real Windows equivalent of the 0700
 // mode DefaultJournalPath already relies on for the same guarantee on
 // Unix (see that function's own doc comment for why os.MkdirAll's mode
@@ -28,7 +28,7 @@ import (
 // the result. Written to documented icacls semantics and covered by
 // safety/journal_acl_windows_test.go, which this project's own CI
 // (windows-latest) is the first real execution of either.
-func restrictJournalDirToAdministrators(dir string) error {
+func RestrictToAdministrators(dir string) error {
 	cmd := exec.Command("icacls.exe", dir,
 		"/inheritance:r",
 		"/grant:r", "Administrators:(OI)(CI)F",

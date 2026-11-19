@@ -100,7 +100,7 @@ type RollbackFunc func(data json.RawMessage) error
 // attribute bit) — this used to be a documented, unaddressed gap (see the
 // "Security tradeoff" note in PROGRESS.md's history). setUpProtectedJournalDir
 // now closes it for real: on Windows it also runs icacls (via
-// restrictJournalDirToAdministrators, safety/journal_acl_windows.go) to
+// RestrictToAdministrators, safety/journal_acl_windows.go) to
 // strip inherited %ProgramData% permissions and grant only Administrators
 // and SYSTEM, the actual Windows equivalent of 0700.
 
@@ -130,7 +130,7 @@ func SetJournalCandidateDirsForTesting(dirs []string) (restore func()) {
 
 // setUpProtectedJournalDir creates dir (mode 0700) and, on Windows, also
 // locks its ACL down to Administrators/SYSTEM only via
-// restrictJournalDirToAdministrators — the real equivalent of what 0700
+// RestrictToAdministrators — the real equivalent of what 0700
 // already achieves on Unix, where os.MkdirAll's mode parameter is a real
 // permission bit, not just a synthesized read-only attribute (see that
 // function's own doc comment). Returns false (and leaves dir exactly as
@@ -142,7 +142,7 @@ func setUpProtectedJournalDir(dir string) bool {
 		return false
 	}
 	if runtime.GOOS == "windows" {
-		if err := restrictJournalDirToAdministrators(dir); err != nil {
+		if err := RestrictToAdministrators(dir); err != nil {
 			return false
 		}
 	}
