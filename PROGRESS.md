@@ -1450,7 +1450,7 @@ infrastructure proven against one real batch, a ratchet stopping new debt, and a
 ./... && go test ./...` clean throughout.
 
 ## Phase 6: Architecture support (audit 2.6)
-- [x] 35. Arch table (amd64/arm64) — Done (`PENDING_HASH`). New `docs/ARCH_SUPPORT.md`:
+- [x] 35. Arch table (amd64/arm64) — Done (`a7e8b64`). New `docs/ARCH_SUPPORT.md`:
       what builds, what's actually run, what catalog entries exist, and what has a real
       boot proof, per architecture — honest about the difference between those (e.g. arm64
       builds clean and now has a real QEMU boot proof, but this session never ran it on
@@ -1461,7 +1461,7 @@ infrastructure proven against one real batch, a ratchet stopping new debt, and a
       (`engine/bcd_qemu.go`'s Windows-BCD-via-QEMU helper — Windows-on-ARM is a
       vanishingly rare target and out of this item's explicit "Debian/Ubuntu family only"
       scope).
-- [x] 36. arm64 support for Debian/Ubuntu family only — Done (`PENDING_HASH`).
+- [x] 36. arm64 support for Debian/Ubuntu family only — Done (`a7e8b64`).
       - **A real, functional bug found and fixed**: `engine/usb_manager.go`'s
         `ArmAutonomousUSBBootloader` (which stages this tool's own autonomous-install USB
         stick) hardcoded x86_64 EFI binary names (`BOOTX64.EFI`, `grubx64.efi`, GRUB's
@@ -1480,7 +1480,7 @@ infrastructure proven against one real batch, a ratchet stopping new debt, and a
         per the item's explicit scope, both resolved to real, independently-verified-reachable
         URLs (checked via `curl -I`/`-IL` before adding, same discipline as every other
         catalog entry in this project — never invented).
-- [x] 37. qemu-system-aarch64 boot tests — Done (`PENDING_HASH`). New
+- [x] 37. qemu-system-aarch64 boot tests — Done (`a7e8b64`). New
       `testing/qemu/boot-and-verify-aarch64.sh` (the aarch64/AAVMF equivalent of Phase 3's
       x86_64/OVMF script, which lives on the still-unmerged `test/os-matrix` branch — see
       `docs/ROADMAP.md`). Installed `qemu-system-arm`/`qemu-efi-aarch64` (AAVMF firmware) in
