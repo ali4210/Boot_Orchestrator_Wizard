@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -73,8 +72,8 @@ func runHeadlessRevert(yes bool, keepSlice bool) error {
 		return err
 	}
 
-	_ = os.Remove("orchestrator_installed_os.json")
-	_ = os.Remove(filepath.Join(filepath.Dir(safety.DefaultJournalPath()), "orchestrator_installed_os.json"))
+	_ = engine.FSRunner().Remove("orchestrator_installed_os.json")
+	_ = engine.FSRunner().Remove(filepath.Join(filepath.Dir(safety.DefaultJournalPath()), "orchestrator_installed_os.json"))
 	fmt.Println("Revert complete.")
 	return nil
 }
