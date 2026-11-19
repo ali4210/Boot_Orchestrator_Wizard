@@ -1521,7 +1521,21 @@ linux/arm64, windows/amd64, and darwin/arm64 throughout.
       `OS_STATUS_MATRIX.md` to avoid re-testing the already-confirmed-incompatible
       `alpine-linux-amd64` entry, names `docs/ARCH_SUPPORT.md`'s explicit gap that real
       arm64 hardware was never tested this session).
-- [ ] 39. AUDIT_REPORT.md progress section update — Not started
+- [x] 39. AUDIT_REPORT.md progress section update — Done (`PENDING_HASH`). New "## 7.
+      Remediation Progress" section appended to `AUDIT_REPORT.md` (original findings left
+      untouched) with a status table for all 19 numbered 2.x findings plus Section 6's
+      open-source-readiness list, cross-referencing `PROGRESS.md`'s real commit hashes —
+      explicitly a cross-reference, not a replacement for `PROGRESS.md` as the source of
+      truth. Honest about the 3 that aren't simply "Fixed": **2.4** (dry-run) stays
+      genuinely open, for the specific reason documented in item 34; **2.6** (arch
+      hardcoding) is partially fixed (the one confirmed-broken arm64 case, not an exhaustive
+      audit); **2.7** (signatures)'s mechanism is real but inert until catalog data exists.
+      Also notes a real pattern worth remembering: item 26 found the *exact same bug class*
+      as 2.3 (hardcoded `-G sudo`, no verification) in a second code path the original 2.3
+      fix never touched — fixing one instance of a bug class isn't the same as fixing the
+      class. Confirmed the audit's own flagged stray `orchestrator_journal.json` was never
+      actually committed (`.gitignore`-covered, `git log --all` on it returns nothing) —
+      that specific concern turned out to already be handled.
 - [ ] 40. READINESS_GATE.md — Not started
 - [ ] 41. Final summary — Not started
 

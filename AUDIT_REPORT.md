@@ -259,4 +259,78 @@ Firmware detection covers UEFI-vs-BIOS and Windows-side Secure Boot (`Confirm-Se
 
 ---
 
+## 7. Remediation Progress (added after the fact — item 39 of the follow-up plan)
+
+This section was added during a later remediation pass on branch `fix/audit-phase-0-1`
+(and, for Phase 3, `test/os-matrix`). **It is a cross-reference, not a replacement**:
+`PROGRESS.md` is the authoritative, item-by-item record (every "Done" below has a real
+commit hash and test there — follow the link, don't take this table's word alone).
+
+| Finding | Severity | Status | Where |
+|---|---|---|---|
+| 2.1 Bootloader failure silently reported as success | Critical | **Fixed** | Prior session, `f7ddc19` |
+| 2.2 `resize2fs` fails without `/etc/mtab` | Critical | **Fixed** | Prior session, `82b00ed` |
+| 2.3 Hardcoded identical username/password | Critical (security/product) | **Fixed** — but see note | `PROGRESS.md` Phase 1 + item 26 |
+| 2.4 No dry-run/simulation mode | Critical for safety & testability | **Open — honestly, not fixed.** Real interception infrastructure built and proven against one batch, but running the real flow under it would still be misleading (see below) | `PROGRESS.md` items 31-34 |
+| 2.5 No LVM/LUKS/RAID/BitLocker detection | High | **Fixed** | `PROGRESS.md` Phase 1 item 5, `3f21fec` |
+| 2.6 x86_64 hardcoded despite ARM64 catalog entries | High | **Partially fixed** — see note | `PROGRESS.md` items 35-37, `a7e8b64` |
+| 2.7 No GPG/signature verification | High | **Mechanism fixed; data gap remains** — see note | `PROGRESS.md` items 20/28 |
+| 2.8 Broken Go-version bootstrap on Windows | High | **Fixed** | Prior session, `50113e5` |
+| 2.9 Unconfirmed root-level package installation | High | **Fixed** | Prior session, `bd5f6d7` |
+| 2.10 Risky unguarded `rm -rf` | Medium | **Fixed** | Prior session, `bd5f6d7` |
+| 2.11 `autorun.sh` mutates `go.mod`/`go.sum` | Medium | **Fixed** | Prior session, `bd5f6d7` |
+| 2.12 `image-deploy` has no rollback handler | Medium | **Fixed** (documented limitation, not a silent gap) | `PROGRESS.md` item 21, `5cdce6e` |
+| 2.13 Windows XP has no viable install path | Medium | **Fixed** (entry removed) | `PROGRESS.md` item 22, `7d2a107` |
+| 2.14 `cmd/env-check`'s uncontrolled network call | Low | **Fixed** (opt-in) | `PROGRESS.md` item 23, `8b629ba` |
+| 2.15 `cmd/env-check` disconnected from the real flow | Low | **Fixed** (wired into a real pre-flight gate) | `PROGRESS.md` item 23, `8b629ba` |
+| 2.16 Windows launcher duplication | Low | **Fixed** | `PROGRESS.md` item 24, `5b9d316`/`e4debf4` |
+| 2.17 Orphaned maintainer scripts | Low | **Fixed** (moved to `tools/maintenance/`) | `PROGRESS.md` item 24, `5b9d316` |
+| 2.18 No TPM/Secure Boot detection | Medium | **Fixed** | `PROGRESS.md` Phase 1 item 5, `3f21fec` |
+| 2.19 Zero automated test coverage | Medium | **Fixed in spirit, not literally exhaustive** — see note | Every item in `PROGRESS.md` |
+
+**Notes on the ones that aren't simply "Fixed":**
+
+- **2.3** was fixed on its original code path, but item 26 (this later pass) found the
+  *exact same bug class* — hardcoded `useradd -G sudo` with no `wheel`-group detection or
+  verification — in a second, parallel account-creation code path
+  (`extractLiveRootFS`/`engine/orchestrator.go`) that the original 2.3 fix never touched.
+  Worth remembering as a pattern: fixing one instance of a bug class doesn't mean every
+  instance is fixed; grep for the shape of the bug, not just the one call site a report
+  named.
+- **2.4** remains genuinely open. Phase 5 built real, tested interception infrastructure
+  (`engine.Runner`/`engine.FS`/`SetDryRun`) and proved it against one real batch — but
+  `RunProvision`'s actual call sites interleave covered and uncovered operations inside the
+  same functions, so running the real flow under simulation today would intercept only part
+  of what happens and let the rest execute for real. That's worse than refusing, so
+  `--dry-run` still refuses to start. See `docs/dryrun-inventory.md`/`docs/ROADMAP.md` for
+  what's left before this can honestly close.
+- **2.6** is partially fixed: the one confirmed-broken case found this pass
+  (`engine/usb_manager.go`'s autonomous USB-staging bootloader, which would have produced a
+  completely unbootable stick on real arm64 host hardware) is fixed and tested. Other
+  x86_64-hardcoded sites (`engine/bcd_qemu.go`'s Windows-BCD-via-QEMU helper, in particular)
+  were explicitly not audited this pass — see `docs/ARCH_SUPPORT.md`.
+- **2.7**'s verification *mechanism* (OpenPGP signature checking, wired into the real
+  download flow) is real, tested, and will work the moment a catalog entry has real
+  `SignatureURL`/`SigningKeyURL` values — but no entry has them yet, for the same reason no
+  entry has a SHA256 checksum yet (see `docs/MANIFEST_AUDIT.md`): inventing either would
+  mean fabricating a trust relationship nobody actually verified.
+- **2.19** went from "zero" to hundreds of tests across `engine`/`ui`/`safety`/`discovery`/
+  `preflight`, including real loop-device disk-image tests, real httptest-server tests, and
+  real cryptographic (OpenPGP) tests — a different situation in kind, not just degree. It is
+  not literally exhaustive (`docs/dryrun-inventory.md`'s ~500-call-site inventory is itself
+  proof some call sites still have no dedicated test), so "fixed in spirit" rather than
+  "every line is covered."
+
+Section 6's "Missing Pieces for Open-Source Readiness" list: LICENSE (`PROGRESS.md` item
+29, MIT, user asked first), CONTRIBUTING.md (item 29), CI (item 29 — `go build`/`vet`/`test`
+on every push/PR; `download-verify.yml`/`os-matrix.yml` deliberately stay
+`workflow_dispatch`-only), repo-root clutter (item 24), and README safety warnings (item 29)
+are all addressed. The stray `orchestrator_journal.json` this report found was never
+actually committed — it's listed in `.gitignore` (confirmed via `git log --all -- 
+orchestrator_journal.json` returning nothing) — so that specific concern turned out to
+already be handled, just not obviously so from the audit's own vantage point at the time.
+Near-zero test coverage: see 2.19 above. No dry-run: see 2.4 above.
+
+---
+
 *End of report. No files other than this report were modified during this audit. No destructive disk, partition, bootloader, or firmware operations were performed on this machine.*
